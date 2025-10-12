@@ -1,6 +1,7 @@
 use gtk::{prelude::*, glib, Application, ApplicationWindow, Button, Text};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -255,11 +256,11 @@ impl AppConfig {
 // GTK RDP Widget Implementation
 struct GtkRdpWidget {
     drawing_area: gtk::DrawingArea,
-    buffer: Rc<RefCell<Vec<u32>>>,
     cairo_buffer: Rc<RefCell<Vec<u32>>>,  // Cached converted buffer
     buffer_size: Rc<RefCell<(u16, u16)>>,
     input_event_sender: mpsc::UnboundedSender<RdpInputEvent>,
     input_database: Rc<RefCell<ironrdp::input::Database>>,
+    custom_cursor: Rc<RefCell<Option<gtk::gdk::Cursor>>>,
 }
 
 impl GtkRdpWidget {
@@ -270,18 +271,18 @@ impl GtkRdpWidget {
         drawing_area.set_can_focus(true);
         drawing_area.set_focusable(true);
 
-        let buffer = Rc::new(RefCell::new(Vec::new()));
         let cairo_buffer = Rc::new(RefCell::new(Vec::new()));
         let buffer_size = Rc::new(RefCell::new((0u16, 0u16)));
         let input_database = Rc::new(RefCell::new(ironrdp::input::Database::new()));
+        let custom_cursor = Rc::new(RefCell::new(None));
 
         let widget = Self {
             drawing_area: drawing_area.clone(),
-            buffer: buffer.clone(),
             cairo_buffer: cairo_buffer.clone(),
             buffer_size: buffer_size.clone(),
             input_event_sender: input_event_sender.clone(),
             input_database: input_database.clone(),
+            custom_cursor: custom_cursor.clone(),
         };
 
         // Set up drawing
@@ -348,6 +349,9 @@ impl GtkRdpWidget {
     fn setup_input_handlers(&self) {
         // Keyboard events
         let key_controller = gtk::EventControllerKey::new();
+        // Forward all key events to the RDP session (don't let GTK consume them)
+        key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        
         let input_sender_key = self.input_event_sender.clone();
         let input_database_key = self.input_database.clone();
         
@@ -359,7 +363,8 @@ impl GtkRdpWidget {
                 let input_events = input_database_key_pressed.borrow_mut().apply(std::iter::once(operation));
                 Self::send_fast_path_events(&input_sender_key_pressed, input_events);
             }
-            glib::Propagation::Proceed
+            // Return Stop to prevent GTK from processing shortcuts
+            glib::Propagation::Stop
         });
 
         key_controller.connect_key_released(move |_, _key, keycode, _modifiers| {
@@ -372,8 +377,9 @@ impl GtkRdpWidget {
 
         self.drawing_area.add_controller(key_controller);
 
-        // Mouse events
+        // Mouse events - configure to handle all mouse buttons
         let click_controller = gtk::GestureClick::new();
+        click_controller.set_button(0); // 0 means listen to all mouse buttons
         let input_sender_click = self.input_event_sender.clone();
         let input_database_click = self.input_database.clone();
         
@@ -409,12 +415,13 @@ impl GtkRdpWidget {
         let drawing_area_motion = self.drawing_area.clone();
         
         motion_controller.connect_motion(move |_, x, y| {
-            let allocation = drawing_area_motion.allocation();
+            let widget_width = drawing_area_motion.width() as f64;
+            let widget_height = drawing_area_motion.height() as f64;
             let (buf_width, buf_height) = *buffer_size_motion.borrow();
             
-            if buf_width > 0 && buf_height > 0 {
-                let rdp_x = (x / allocation.width() as f64 * buf_width as f64) as u16;
-                let rdp_y = (y / allocation.height() as f64 * buf_height as f64) as u16;
+            if buf_width > 0 && buf_height > 0 && widget_width > 0.0 && widget_height > 0.0 {
+                let rdp_x = (x / widget_width * buf_width as f64) as u16;
+                let rdp_y = (y / widget_height * buf_height as f64) as u16;
                 
                 let operation = ironrdp::input::Operation::MouseMove(ironrdp::input::MousePosition { x: rdp_x, y: rdp_y });
                 let input_events = input_database_motion.borrow_mut().apply(std::iter::once(operation));
@@ -423,6 +430,52 @@ impl GtkRdpWidget {
         });
 
         self.drawing_area.add_controller(motion_controller);
+
+        // Mouse scroll wheel
+        let scroll_controller = gtk::EventControllerScroll::new(
+            gtk::EventControllerScrollFlags::BOTH_AXES
+        );
+        let input_sender_scroll = self.input_event_sender.clone();
+        let input_database_scroll = self.input_database.clone();
+        
+        scroll_controller.connect_scroll(move |_, dx, dy| {
+            // RDP uses 120 units per "notch" of the wheel
+            // GTK scroll delta is typically in the range of -1.0 to 1.0 per notch
+            // Negative dy means scroll up, positive means scroll down
+            
+            let mut operations = smallvec::SmallVec::<[ironrdp::input::Operation; 2]>::new();
+            
+            // Handle vertical scrolling
+            if dy.abs() > 0.001 {
+                let vertical_delta = (-dy * 120.0) as i16;
+                operations.push(ironrdp::input::Operation::WheelRotations(
+                    ironrdp::input::WheelRotations {
+                        is_vertical: true,
+                        rotation_units: vertical_delta,
+                    }
+                ));
+            }
+            
+            // Handle horizontal scrolling
+            if dx.abs() > 0.001 {
+                let horizontal_delta = (dx * 120.0) as i16;
+                operations.push(ironrdp::input::Operation::WheelRotations(
+                    ironrdp::input::WheelRotations {
+                        is_vertical: false,
+                        rotation_units: horizontal_delta,
+                    }
+                ));
+            }
+            
+            if !operations.is_empty() {
+                let input_events = input_database_scroll.borrow_mut().apply(operations);
+                Self::send_fast_path_events(&input_sender_scroll, input_events);
+            }
+            
+            gtk::glib::Propagation::Stop
+        });
+
+        self.drawing_area.add_controller(scroll_controller);
     }
 
     fn keycode_to_scancode(keycode: u32) -> Option<ironrdp::input::Scancode> {
@@ -433,138 +486,138 @@ impl GtkRdpWidget {
         // Subtract 8 to get Linux evdev code
         let evdev = keycode.saturating_sub(8);
         
-        // Map Linux evdev codes to Windows scancodes
-        let scancode = match evdev {
-            // Function keys
-            1 => 0x01,   // ESC
-            59 => 0x3B,  // F1
-            60 => 0x3C,  // F2
-            61 => 0x3D,  // F3
-            62 => 0x3E,  // F4
-            63 => 0x3F,  // F5
-            64 => 0x40,  // F6
-            65 => 0x41,  // F7
-            66 => 0x42,  // F8
-            67 => 0x43,  // F9
-            68 => 0x44,  // F10
-            87 => 0x57,  // F11
-            88 => 0x58,  // F12
+        // Comprehensive Linux evdev to Windows scancode mapping table
+        // Format: (evdev_code, windows_scancode)
+        // Extended scancodes have 0xE0 prefix encoded in upper byte
+        const SCANCODE_MAP: &[(u32, u16)] = &[
+            // Function and control keys
+            (1, 0x01),      // ESC
+            (59, 0x3B),     // F1
+            (60, 0x3C),     // F2
+            (61, 0x3D),     // F3
+            (62, 0x3E),     // F4
+            (63, 0x3F),     // F5
+            (64, 0x40),     // F6
+            (65, 0x41),     // F7
+            (66, 0x42),     // F8
+            (67, 0x43),     // F9
+            (68, 0x44),     // F10
+            (87, 0x57),     // F11
+            (88, 0x58),     // F12
             
             // Number row
-            41 => 0x29,  // ` ~
-            2 => 0x02,   // 1 !
-            3 => 0x03,   // 2 @
-            4 => 0x04,   // 3 #
-            5 => 0x05,   // 4 $
-            6 => 0x06,   // 5 %
-            7 => 0x07,   // 6 ^
-            8 => 0x08,   // 7 &
-            9 => 0x09,   // 8 *
-            10 => 0x0A,  // 9 (
-            11 => 0x0B,  // 0 )
-            12 => 0x0C,  // - _
-            13 => 0x0D,  // = +
-            14 => 0x0E,  // Backspace
+            (41, 0x29),     // ` ~
+            (2, 0x02),      // 1 !
+            (3, 0x03),      // 2 @
+            (4, 0x04),      // 3 #
+            (5, 0x05),      // 4 $
+            (6, 0x06),      // 5 %
+            (7, 0x07),      // 6 ^
+            (8, 0x08),      // 7 &
+            (9, 0x09),      // 8 *
+            (10, 0x0A),     // 9 (
+            (11, 0x0B),     // 0 )
+            (12, 0x0C),     // - _
+            (13, 0x0D),     // = +
+            (14, 0x0E),     // Backspace
             
             // Top letter row
-            15 => 0x0F,  // Tab
-            16 => 0x10,  // Q
-            17 => 0x11,  // W
-            18 => 0x12,  // E
-            19 => 0x13,  // R
-            20 => 0x14,  // T
-            21 => 0x15,  // Y
-            22 => 0x16,  // U
-            23 => 0x17,  // I
-            24 => 0x18,  // O
-            25 => 0x19,  // P
-            26 => 0x1A,  // [ {
-            27 => 0x1B,  // ] }
-            28 => 0x1C,  // Enter
+            (15, 0x0F),     // Tab
+            (16, 0x10),     // Q
+            (17, 0x11),     // W
+            (18, 0x12),     // E
+            (19, 0x13),     // R
+            (20, 0x14),     // T
+            (21, 0x15),     // Y
+            (22, 0x16),     // U
+            (23, 0x17),     // I
+            (24, 0x18),     // O
+            (25, 0x19),     // P
+            (26, 0x1A),     // [ {
+            (27, 0x1B),     // ] }
+            (28, 0x1C),     // Enter
             
             // Middle letter row
-            58 => 0x3A,  // Caps Lock
-            30 => 0x1E,  // A
-            31 => 0x1F,  // S
-            32 => 0x20,  // D
-            33 => 0x21,  // F
-            34 => 0x22,  // G
-            35 => 0x23,  // H
-            36 => 0x24,  // J
-            37 => 0x25,  // K
-            38 => 0x26,  // L
-            39 => 0x27,  // ; :
-            40 => 0x28,  // ' "
-            43 => 0x2B,  // \ |
+            (58, 0x3A),     // Caps Lock
+            (30, 0x1E),     // A
+            (31, 0x1F),     // S
+            (32, 0x20),     // D
+            (33, 0x21),     // F
+            (34, 0x22),     // G
+            (35, 0x23),     // H
+            (36, 0x24),     // J
+            (37, 0x25),     // K
+            (38, 0x26),     // L
+            (39, 0x27),     // ; :
+            (40, 0x28),     // ' "
+            (43, 0x2B),     // \ |
             
             // Bottom letter row
-            42 => 0x2A,  // Left Shift
-            44 => 0x2C,  // Z
-            45 => 0x2D,  // X
-            46 => 0x2E,  // C
-            47 => 0x2F,  // V
-            48 => 0x30,  // B
-            49 => 0x31,  // N
-            50 => 0x32,  // M
-            51 => 0x33,  // , <
-            52 => 0x34,  // . >
-            53 => 0x35,  // / ?
-            54 => 0x36,  // Right Shift
+            (42, 0x2A),     // Left Shift
+            (86, 0x56),     // ISO key (< > | on European keyboards)
+            (44, 0x2C),     // Z
+            (45, 0x2D),     // X
+            (46, 0x2E),     // C
+            (47, 0x2F),     // V
+            (48, 0x30),     // B
+            (49, 0x31),     // N
+            (50, 0x32),     // M
+            (51, 0x33),     // , <
+            (52, 0x34),     // . >
+            (53, 0x35),     // / ?
+            (54, 0x36),     // Right Shift
             
             // Bottom row
-            29 => 0x1D,  // Left Ctrl
-            100 => 0xE038, // Right Alt (extended)
-            56 => 0x38,  // Left Alt
-            57 => 0x39,  // Space
+            (29, 0x1D),     // Left Ctrl
+            (97, 0xE01D),   // Right Ctrl (extended)
+            (56, 0x38),     // Left Alt
+            (100, 0xE038),  // Right Alt / AltGr (extended)
+            (57, 0x39),     // Space
+            (125, 0xE05B),  // Left Windows/Super (extended)
+            (126, 0xE05C),  // Right Windows/Super (extended)
+            (127, 0xE05D),  // Menu/Application key (extended)
             
-            // Navigation cluster
-            102 => 0xE047, // Home (extended)
-            103 => 0xE048, // Up Arrow (extended)
-            104 => 0xE049, // Page Up (extended)
-            105 => 0xE04B, // Left Arrow (extended)
-            106 => 0xE04D, // Right Arrow (extended)
-            107 => 0xE04F, // End (extended)
-            108 => 0xE050, // Down Arrow (extended)
-            109 => 0xE051, // Page Down (extended)
-            110 => 0xE052, // Insert (extended)
-            111 => 0xE053, // Delete (extended)
+            // Navigation cluster (extended keys)
+            (102, 0xE047),  // Home
+            (103, 0xE048),  // Up Arrow
+            (104, 0xE049),  // Page Up
+            (105, 0xE04B),  // Left Arrow
+            (106, 0xE04D),  // Right Arrow
+            (107, 0xE04F),  // End
+            (108, 0xE050),  // Down Arrow
+            (109, 0xE051),  // Page Down
+            (110, 0xE052),  // Insert
+            (111, 0xE053),  // Delete
             
             // Numpad
-            69 => 0x45,  // Num Lock
-            98 => 0x4A,  // Numpad /
-            55 => 0x37,  // Numpad *
-            74 => 0x4A,  // Numpad -
-            71 => 0x47,  // Numpad 7
-            72 => 0x48,  // Numpad 8
-            73 => 0x49,  // Numpad 9
-            78 => 0x4E,  // Numpad +
-            75 => 0x4B,  // Numpad 4
-            76 => 0x4C,  // Numpad 5
-            77 => 0x4D,  // Numpad 6
-            79 => 0x4F,  // Numpad 1
-            80 => 0x50,  // Numpad 2
-            81 => 0x51,  // Numpad 3
-            82 => 0x52,  // Numpad 0
-            83 => 0x53,  // Numpad .
-            96 => 0xE01C, // Numpad Enter (extended)
+            (69, 0x45),     // Num Lock
+            (98, 0xE035),   // Numpad / (extended)
+            (55, 0x37),     // Numpad *
+            (74, 0x4A),     // Numpad -
+            (78, 0x4E),     // Numpad +
+            (96, 0xE01C),   // Numpad Enter (extended)
+            (71, 0x47),     // Numpad 7 / Home
+            (72, 0x48),     // Numpad 8 / Up
+            (73, 0x49),     // Numpad 9 / PgUp
+            (75, 0x4B),     // Numpad 4 / Left
+            (76, 0x4C),     // Numpad 5
+            (77, 0x4D),     // Numpad 6 / Right
+            (79, 0x4F),     // Numpad 1 / End
+            (80, 0x50),     // Numpad 2 / Down
+            (81, 0x51),     // Numpad 3 / PgDn
+            (82, 0x52),     // Numpad 0 / Ins
+            (83, 0x53),     // Numpad . / Del
             
             // Special keys
-            119 => 0xE05F, // Pause/Break
-            99 => 0xE037,  // Print Screen (extended)
-            70 => 0x46,    // Scroll Lock
-            127 => 0xE05D, // Menu/Application key (extended)
-            
-            // Windows/Super keys
-            125 => 0xE05B, // Left Windows/Super (extended)
-            126 => 0xE05C, // Right Windows/Super (extended)
-            
-            _ => {
-                // Unknown key - return None to ignore
-                return None;
-            }
-        };
+            (70, 0x46),     // Scroll Lock
+            (99, 0xE037),   // Print Screen (extended)
+            (119, 0xE05F),  // Pause/Break (extended - simplified, full sequence is complex)
+        ];
         
-        Some(ironrdp::input::Scancode::from_u16(scancode))
+        // Binary search would be faster for large tables, but linear search is fine here
+        SCANCODE_MAP.iter()
+            .find(|(code, _)| *code == evdev)
+            .map(|(_, scancode)| ironrdp::input::Scancode::from_u16(*scancode))
     }
 
     fn gtk_button_to_rdp_button(button: u32) -> Option<ironrdp::input::MouseButton> {
@@ -572,6 +625,8 @@ impl GtkRdpWidget {
             1 => Some(ironrdp::input::MouseButton::Left),
             2 => Some(ironrdp::input::MouseButton::Middle),
             3 => Some(ironrdp::input::MouseButton::Right),
+            8 => Some(ironrdp::input::MouseButton::X1), // Browser Back button
+            9 => Some(ironrdp::input::MouseButton::X2), // Browser Forward button
             _ => None,
         }
     }
@@ -585,18 +640,71 @@ impl GtkRdpWidget {
         }
     }
 
-    fn update_image(&self, buffer: Vec<u32>, width: u16, height: u16) {
-        // Convert once and cache: force alpha to 0xFF
-        let cairo_buffer: Vec<u32> = buffer.iter().map(|&pixel| pixel | 0xFF000000).collect();
+    fn update_image(&self, mut buffer: Vec<u32>, width: u16, height: u16) {
+        for pixel in buffer.iter_mut() {
+            *pixel |= 0xFF000000;
+        }
         
-        *self.buffer.borrow_mut() = buffer;
-        *self.cairo_buffer.borrow_mut() = cairo_buffer;
+        *self.cairo_buffer.borrow_mut() = buffer;
         *self.buffer_size.borrow_mut() = (width, height);
         self.drawing_area.queue_draw();
     }
 
     fn widget(&self) -> &gtk::DrawingArea {
         &self.drawing_area
+    }
+
+    fn set_cursor_default(&self) {
+        *self.custom_cursor.borrow_mut() = None;
+        self.drawing_area.set_cursor_from_name(Some("default"));
+    }
+
+    fn set_cursor_hidden(&self) {
+        *self.custom_cursor.borrow_mut() = None;
+        self.drawing_area.set_cursor_from_name(Some("none"));
+    }
+
+    fn set_cursor_from_bitmap(&self, pointer: Arc<ironrdp::graphics::pointer::DecodedPointer>) {
+        // Create a cursor from the RDP pointer bitmap
+        let width = pointer.width as i32;
+        let height = pointer.height as i32;
+        let hotspot_x = pointer.hotspot_x as i32;
+        let hotspot_y = pointer.hotspot_y as i32;
+
+        // The bitmap_data is already in RGBA format (4 bytes per pixel)
+        // IronRDP provides the data as Vec<u8> in RGBA order with premultiplied alpha
+        let pixel_count = (width * height) as usize;
+        let expected_size = pixel_count * 4;
+        
+        if pointer.bitmap_data.len() < expected_size {
+            eprintln!("Cursor bitmap data too small: got {}, expected {}", 
+                     pointer.bitmap_data.len(), expected_size);
+            return;
+        }
+        
+        // Data is already in RGBA format, just clone it
+        let rgba_data = pointer.bitmap_data.clone();
+
+        // Create GDK texture from the RGBA data
+        let bytes = gtk::glib::Bytes::from_owned(rgba_data);
+        let texture = gtk::gdk::MemoryTexture::new(
+            width,
+            height,
+            gtk::gdk::MemoryFormat::R8g8b8a8,
+            &bytes,
+            (width * 4) as usize,  // stride: bytes per row
+        );
+
+        // Create cursor from texture
+        let cursor = gtk::gdk::Cursor::from_texture(
+            &texture,
+            hotspot_x,
+            hotspot_y,
+            None,
+        );
+
+        *self.custom_cursor.borrow_mut() = Some(cursor.clone());
+        self.drawing_area.set_cursor(Some(&cursor));
     }
 }
 
@@ -696,7 +804,6 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
     close_button.set_tooltip_text(Some("Disconnect"));
     close_button.add_css_class("flat");
     close_button.add_css_class("circular");
-    close_button.add_css_class("destructive-action");
     
     // Pack control bar with new order: connection_label, pin, fullscreen, close
     control_bar.append(&connection_label);
@@ -746,23 +853,21 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
                     rd_window_events.close();
                 }
                 RdpOutputEvent::PointerDefault => {
-                    // TODO: Handle default pointer
+                    rdp_widget_events.set_cursor_default();
                 }
                 RdpOutputEvent::PointerHidden => {
-                    // TODO: Handle hidden pointer
+                    rdp_widget_events.set_cursor_hidden();
                 }
-                RdpOutputEvent::PointerPosition { x, y } => {
-                    // TODO: Handle pointer position
+                RdpOutputEvent::PointerPosition { x: _, y: _ } => {
+                    // Position is handled by the server's cursor rendering
+                    // We don't need to do anything here as the server controls cursor position
                 }
-                RdpOutputEvent::PointerBitmap(_pointer) => {
-                    // TODO: Handle custom pointer bitmap
+                RdpOutputEvent::PointerBitmap(pointer) => {
+                    rdp_widget_events.set_cursor_from_bitmap(pointer);
                 }
             }
         }
     });
-
-    // Set up fullscreen toggle key (F11)
-    let rd_window_f11 = rd_window.clone();
 
     // Setup close button handler
     let input_sender_close = input_event_sender.clone();
@@ -1010,42 +1115,6 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
     });
     overlay.add_controller(motion_controller_show_hide);
     
-    // Key controller for fullscreen toggle and escape
-    let key_controller = gtk::EventControllerKey::new();
-    let rd_window_for_key = rd_window.clone();
-    let is_fullscreen_for_key = is_fullscreen.clone();
-    let control_bar_for_key = control_bar.clone();
-    
-    key_controller.connect_key_pressed(move |_, key, _, _| {
-        match key {
-            gtk::gdk::Key::F11 => {
-                let mut fullscreen = is_fullscreen_for_key.borrow_mut();
-                *fullscreen = !*fullscreen;
-                
-                if *fullscreen {
-                    rd_window_for_key.fullscreen();
-                } else {
-                    rd_window_for_key.unfullscreen();
-                    // Always show controls in windowed mode
-                    control_bar_for_key.set_visible(true);
-                }
-                gtk::glib::Propagation::Stop
-            },
-            gtk::gdk::Key::Escape => {
-                let mut fullscreen = is_fullscreen_for_key.borrow_mut();
-                if *fullscreen {
-                    rd_window_for_key.unfullscreen();
-                    *fullscreen = false;
-                    // Always show controls in windowed mode
-                    control_bar_for_key.set_visible(true);
-                }
-                gtk::glib::Propagation::Stop
-            },
-            _ => gtk::glib::Propagation::Proceed
-        }
-    });
-    rd_window.add_controller(key_controller);
-    
     // Window state tracking for fullscreen changes and resizing
     let is_fullscreen_for_state = is_fullscreen.clone();
     let control_bar_for_state = control_bar.clone();
@@ -1058,6 +1127,13 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
         
         if new_fullscreen != *fullscreen {
             *fullscreen = new_fullscreen;
+            
+            // Enable/disable keyboard grab based on fullscreen state
+            // In fullscreen, we want to capture all keyboard shortcuts (Alt+Tab, etc.)
+            if new_fullscreen {
+                // Request keyboard focus and set input mode to capture all keys
+                window.set_focus_visible(true);
+            }
             
             // Re-center toolbar on both entering and exiting fullscreen (if user hasn't moved it)
             if !*user_has_moved_toolbar_for_state.borrow() {
@@ -1150,6 +1226,50 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
                 }
             });
         }
+    });
+    
+    // Handle window restore (from minimize/hide) to reposition toolbar
+    let control_bar_for_restore = control_bar.clone();
+    let control_bar_x_position_for_restore = control_bar_x_position.clone();
+    let user_has_moved_toolbar_for_restore = user_has_moved_toolbar.clone();
+    let overlay_for_restore = overlay.clone();
+    
+    rd_window.connect_notify_local(Some("is-active"), move |_, _| {
+        // When window becomes active again (e.g., restored from minimize), reposition toolbar
+        gtk::glib::idle_add_local_once({
+            let control_bar = control_bar_for_restore.clone();
+            let control_bar_x_position = control_bar_x_position_for_restore.clone();
+            let user_has_moved_toolbar = user_has_moved_toolbar_for_restore.clone();
+            let overlay = overlay_for_restore.clone();
+            
+            move || {
+                let window_width = overlay.width() as f64;
+                let control_bar_width = control_bar.width() as f64;
+                
+                if window_width > 0.0 && control_bar_width > 0.0 {
+                    if !*user_has_moved_toolbar.borrow() {
+                        // Re-center if user hasn't moved the toolbar
+                        let relative_pos = 0.5;
+                        let center_x = if window_width <= control_bar_width {
+                            0.0
+                        } else {
+                            relative_pos * (window_width - control_bar_width)
+                        };
+                        *control_bar_x_position.borrow_mut() = relative_pos;
+                        control_bar.set_margin_start(center_x as i32);
+                    } else {
+                        // Maintain relative position
+                        let current_relative_position = *control_bar_x_position.borrow();
+                        let absolute_x = if window_width <= control_bar_width {
+                            0.0
+                        } else {
+                            current_relative_position * (window_width - control_bar_width)
+                        };
+                        control_bar.set_margin_start(absolute_x as i32);
+                    }
+                }
+            }
+        });
     });
     
     // Handle window resize to keep toolbar in view and re-center if needed
@@ -1258,12 +1378,14 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
     // Handle window resize to request new desktop size from RDP server
     let last_resize_time = Rc::new(RefCell::new(std::time::Instant::now()));
     let resize_pending = Rc::new(RefCell::new(false));
+    let rdp_widget_for_resize = rdp_widget.clone();
     
     rd_window.connect_default_width_notify({
         let rd_window = rd_window.clone();
         let last_resize_time = last_resize_time.clone();
         let resize_pending = resize_pending.clone();
         let input_sender = input_sender_resize.clone();
+        let rdp_widget = rdp_widget_for_resize.clone();
         
         move |_| {
             // Debounce resize events - only send after 500ms of no resize activity
@@ -1276,20 +1398,24 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
                 let resize_pending = resize_pending.clone();
                 let input_sender = input_sender.clone();
                 let rd_window = rd_window.clone();
+                let rdp_widget = rdp_widget.clone();  // Clone for the nested closure
                 
                 gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
                     let elapsed = last_resize_time.borrow().elapsed();
                     
                     if elapsed >= std::time::Duration::from_millis(500) {
-                        // Send resize event to RDP server
-                        let width = rd_window.default_width() as u16;
-                        let height = rd_window.default_height() as u16;
+                        // Get actual widget size (not default size)
+                        let width = rdp_widget.widget().width().max(640) as u16;
+                        let height = rdp_widget.widget().height().max(480) as u16;
+                        
+                        // Get scale factor for HiDPI displays
+                        let scale_factor = rd_window.scale_factor() as u32;
                         
                         let _ = input_sender.send(RdpInputEvent::Resize {
                             width,
                             height,
-                            scale_factor: 100, // Default scale factor
-                            physical_size: None,
+                            scale_factor,
+                            physical_size: None,  // Could be enhanced with monitor info
                         });
                         
                         *resize_pending.borrow_mut() = false;
@@ -1304,6 +1430,7 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
         let last_resize_time = last_resize_time.clone();
         let resize_pending = resize_pending.clone();
         let input_sender = input_sender_resize.clone();
+        let rdp_widget = rdp_widget_for_resize.clone();
         
         move |_| {
             // Debounce resize events
@@ -1316,19 +1443,24 @@ fn create_remote_desktop_window(app: &Application, server: &str, username: &str,
                 let resize_pending = resize_pending.clone();
                 let input_sender = input_sender.clone();
                 let rd_window = rd_window.clone();
+                let rdp_widget = rdp_widget.clone();
                 
                 gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
                     let elapsed = last_resize_time.borrow().elapsed();
                     
                     if elapsed >= std::time::Duration::from_millis(500) {
-                        let width = rd_window.default_width() as u16;
-                        let height = rd_window.default_height() as u16;
+                        // Get actual widget size (not default size)
+                        let width = rdp_widget.widget().width().max(640) as u16;
+                        let height = rdp_widget.widget().height().max(480) as u16;
+                        
+                        // Get scale factor for HiDPI displays
+                        let scale_factor = rd_window.scale_factor() as u32;
                         
                         let _ = input_sender.send(RdpInputEvent::Resize {
                             width,
                             height,
-                            scale_factor: 100,
-                            physical_size: None,
+                            scale_factor,
+                            physical_size: None,  // Could be enhanced with monitor info
                         });
                         
                         *resize_pending.borrow_mut() = false;
@@ -1403,6 +1535,12 @@ fn main() -> glib::ExitCode {
 }
 
 fn build_ui(app: &Application) {
+    // Follow system dark mode preference using libadwaita StyleManager
+    let style_manager = adw::StyleManager::default();
+    // Use ColorScheme::Default to follow system preference
+    // This is the recommended approach for libadwaita applications
+    style_manager.set_color_scheme(adw::ColorScheme::Default);
+
     // Add server text box
     let server = Text::new();
 
@@ -1425,6 +1563,7 @@ fn build_ui(app: &Application) {
     // Add heading
     let heading = gtk::Label::new(Some("Remote Desktop Connection"));
     heading.add_css_class("title-1");
+    heading.set_margin_bottom(12);  // Add spacing below title
     dialog_box.append(&heading);
 
     // Load saved settings
@@ -1471,6 +1610,7 @@ fn build_ui(app: &Application) {
     password_box.append(&password_input);
 
     let button = Button::with_label("Connect");
+    button.set_margin_top(12);  // Add spacing above button
     let server_input_clone = server_input.clone();
     let username_input_clone = username_input.clone();
     let domain_input_clone = domain_input.clone();
