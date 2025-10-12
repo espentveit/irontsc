@@ -5,10 +5,10 @@ use core::str::FromStr;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
-use clap::clap_derive::ValueEnum;
 use clap::Parser;
+use clap::clap_derive::ValueEnum;
 use ironrdp::connector::{self, Credentials};
-use ironrdp::pdu::rdp::capability_sets::{client_codecs_capabilities, MajorPlatformType};
+use ironrdp::pdu::rdp::capability_sets::{MajorPlatformType, client_codecs_capabilities};
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_mstsgu::GwConnectTarget;
 use tap::prelude::*;
@@ -306,8 +306,8 @@ impl Config {
         let mut properties = ironrdp_propertyset::PropertySet::new();
 
         if let Some(rdp_file) = args.rdp_file {
-            let input =
-                std::fs::read_to_string(&rdp_file).with_context(|| format!("failed to read {}", rdp_file.display()))?;
+            let input = std::fs::read_to_string(&rdp_file)
+                .with_context(|| format!("failed to read {}", rdp_file.display()))?;
 
             if let Err(errors) = ironrdp_rdpfile::load(&mut properties, &input) {
                 for e in errors {
@@ -373,7 +373,9 @@ impl Config {
         } else if let Some(username) = properties.username() {
             username.to_owned()
         } else {
-            inquire::Text::new("Username:").prompt().context("Username prompt")?
+            inquire::Text::new("Username:")
+                .prompt()
+                .context("Username prompt")?
         };
 
         let password = if let Some(password) = args.password {
@@ -403,7 +405,9 @@ impl Config {
 
         if let Some(color_depth) = args.color_depth {
             if color_depth != 16 && color_depth != 32 {
-                anyhow::bail!("Invalid color depth. Only 16 and 32 bit color depths are supported.");
+                anyhow::bail!(
+                    "Invalid color depth. Only 16 and 32 bit color depths are supported."
+                );
             }
             bitmap.color_depth = color_depth;
         };
@@ -439,7 +443,9 @@ impl Config {
             desktop_scale_factor: 0, // Default to 0 per FreeRDP
             bitmap: Some(bitmap),
             client_build: semver::Version::parse(env!("CARGO_PKG_VERSION"))
-                .map_or(0, |version| version.major * 100 + version.minor * 10 + version.patch)
+                .map_or(0, |version| {
+                    version.major * 100 + version.minor * 10 + version.patch
+                })
                 .pipe(u32::try_from)
                 .context("cargo package version")?,
             client_name: whoami::fallible::hostname().unwrap_or_else(|_| "ironrdp".to_owned()),

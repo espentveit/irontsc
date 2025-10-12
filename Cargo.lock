@@ -2320,7 +2320,6 @@ dependencies = [
  "picky-krb",
  "semver",
  "serde",
- "serde_json",
  "smallvec",
  "tap",
  "tokio",

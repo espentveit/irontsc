@@ -7,7 +7,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite;
 
 // Placeholder that returns an error
-pub(crate) fn websocket_compat<S>(_stream: S) -> impl AsyncRead + AsyncWrite + Unpin + Send + 'static
+pub(crate) fn websocket_compat<S>(
+    _stream: S,
+) -> impl AsyncRead + AsyncWrite + Unpin + Send + 'static
 where
     S: Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
         + Sink<tungstenite::Message, Error = tungstenite::Error>
@@ -30,7 +32,7 @@ where
         + 'static,
 {
     use ironrdp_async::{transport, WsStream};
-    
+
     let compat = stream
         .filter_map(|item| {
             let mapped = item
