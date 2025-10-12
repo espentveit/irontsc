@@ -1,4 +1,7 @@
-use gtk::{Application, ApplicationWindow, Button, Image, glib, glib::ControlFlow, prelude::*};
+use gtk::{
+    Application, ApplicationWindow, Button, Image, gdk, gdk::prelude::*, glib, glib::ControlFlow,
+    prelude::*,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -580,8 +583,10 @@ impl RdpSettings {
 
 // GTK RDP Widget Implementation
 struct GtkRdpWidget {
-    drawing_area: gtk::DrawingArea,
-    cairo_buffer: Rc<RefCell<Vec<u32>>>, // Cached converted buffer
+    root: gtk::Overlay,
+    picture: gtk::Picture,
+    placeholder_label: gtk::Label,
+    size_probe: gtk::DrawingArea,
     buffer_size: Rc<RefCell<(u16, u16)>>,
     input_event_sender: mpsc::UnboundedSender<RdpInputEvent>,
     input_database: Rc<RefCell<ironrdp::input::Database>>,
@@ -590,80 +595,48 @@ struct GtkRdpWidget {
 
 impl GtkRdpWidget {
     fn new(input_event_sender: mpsc::UnboundedSender<RdpInputEvent>) -> Self {
-        let drawing_area = gtk::DrawingArea::new();
-        drawing_area.set_hexpand(true);
-        drawing_area.set_vexpand(true);
-        drawing_area.set_can_focus(true);
-        drawing_area.set_focusable(true);
+        let picture = gtk::Picture::new();
+        picture.set_hexpand(true);
+        picture.set_vexpand(true);
+        picture.set_content_fit(gtk::ContentFit::Fill);
 
-        let cairo_buffer = Rc::new(RefCell::new(Vec::new()));
+        let placeholder_label = gtk::Label::new(Some("Connecting to RDP server..."));
+        placeholder_label.set_halign(gtk::Align::Center);
+        placeholder_label.set_valign(gtk::Align::Center);
+        placeholder_label.add_css_class("title-3");
+        placeholder_label.set_can_target(false);
+
+        let size_probe = gtk::DrawingArea::new();
+        size_probe.set_hexpand(true);
+        size_probe.set_vexpand(true);
+        size_probe.set_can_target(false);
+        size_probe.set_focusable(false);
+        size_probe.set_can_focus(false);
+        size_probe.set_draw_func(|_, _, _, _| {});
+
+        let root = gtk::Overlay::new();
+        root.set_hexpand(true);
+        root.set_vexpand(true);
+        root.set_can_focus(true);
+        root.set_focusable(true);
+        root.set_child(Some(&picture));
+        root.add_overlay(&placeholder_label);
+        root.add_overlay(&size_probe);
+
         let buffer_size = Rc::new(RefCell::new((0u16, 0u16)));
         let input_database = Rc::new(RefCell::new(ironrdp::input::Database::new()));
         let custom_cursor = Rc::new(RefCell::new(None));
 
         let widget = Self {
-            drawing_area: drawing_area.clone(),
-            cairo_buffer: cairo_buffer.clone(),
+            root: root.clone(),
+            picture: picture.clone(),
+            placeholder_label: placeholder_label.clone(),
+            size_probe: size_probe.clone(),
             buffer_size: buffer_size.clone(),
             input_event_sender: input_event_sender.clone(),
             input_database: input_database.clone(),
             custom_cursor: custom_cursor.clone(),
         };
-
-        // Set up drawing
-        let cairo_buffer_draw = cairo_buffer.clone();
-        let buffer_size_draw = buffer_size.clone();
-        drawing_area.set_draw_func(move |_drawing_area, cr, width, height| {
-            let cairo_buffer = cairo_buffer_draw.borrow();
-            let (buf_width, buf_height) = *buffer_size_draw.borrow();
-
-            if cairo_buffer.is_empty() || buf_width == 0 || buf_height == 0 {
-                // Draw a placeholder background
-                cr.set_source_rgb(0.1, 0.1, 0.2);
-                cr.rectangle(0.0, 0.0, width as f64, height as f64);
-                let _ = cr.fill();
-
-                // Show "Connecting..." message
-                cr.set_source_rgb(0.8, 0.8, 0.8);
-                let text = "Connecting to RDP server...";
-                let text_extents = cr.text_extents(text).unwrap_or_else(|_| {
-                    gtk::cairo::TextExtents::new(0.0, 0.0, 100.0, 20.0, 0.0, 0.0)
-                });
-                let x = (width as f64 - text_extents.width()) / 2.0;
-                let y = (height as f64) / 2.0;
-                cr.move_to(x, y);
-                let _ = cr.show_text(text);
-                return;
-            }
-
-            // Use the pre-converted Cairo buffer directly
-            // Convert to bytes view without copying
-            let buffer_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    cairo_buffer.as_ptr() as *const u8,
-                    cairo_buffer.len() * 4,
-                )
-            };
-
-            // Create Cairo surface from the cached buffer (zero-copy reference)
-            if let Ok(surface) = gtk::cairo::ImageSurface::create_for_data(
-                buffer_bytes.to_vec(), // Cairo needs ownership, so copy here
-                gtk::cairo::Format::ARgb32,
-                buf_width as i32,
-                buf_height as i32,
-                buf_width as i32 * 4,
-            ) {
-                // Scale the image to fit the drawing area
-                let scale_x = width as f64 / buf_width as f64;
-                let scale_y = height as f64 / buf_height as f64;
-
-                cr.save().unwrap();
-                cr.scale(scale_x, scale_y);
-                cr.set_source_surface(&surface, 0.0, 0.0).unwrap();
-                cr.paint().unwrap();
-                cr.restore().unwrap();
-            }
-        });
 
         // Set up input event handlers
         widget.setup_input_handlers();
@@ -704,7 +677,7 @@ impl GtkRdpWidget {
             }
         });
 
-        self.drawing_area.add_controller(key_controller);
+        self.root.add_controller(key_controller);
 
         // Mouse events - configure to handle all mouse buttons
         let click_controller = gtk::GestureClick::new();
@@ -712,19 +685,19 @@ impl GtkRdpWidget {
         let input_sender_click = self.input_event_sender.clone();
         let input_database_click = self.input_database.clone();
         let buffer_size_click = self.buffer_size.clone();
-        let drawing_area_click = self.drawing_area.clone();
+        let overlay_click = self.root.clone();
 
         let input_sender_click_pressed = input_sender_click.clone();
         let input_database_click_pressed = input_database_click.clone();
         let buffer_size_click_pressed = buffer_size_click.clone();
-        let drawing_area_click_pressed = drawing_area_click.clone();
+        let overlay_click_pressed = overlay_click.clone();
         click_controller.connect_pressed(move |gesture, _n_press, x, y| {
             let button = gesture.current_button();
             let mouse_button = Self::gtk_button_to_rdp_button(button);
             if let Some(mouse_button) = mouse_button {
                 // Translate widget coordinates to RDP coordinates
-                let widget_width = drawing_area_click_pressed.width() as f64;
-                let widget_height = drawing_area_click_pressed.height() as f64;
+                let widget_width = overlay_click_pressed.width() as f64;
+                let widget_height = overlay_click_pressed.height() as f64;
                 let (buf_width, buf_height) = *buffer_size_click_pressed.borrow();
 
                 if buf_width > 0 && buf_height > 0 && widget_width > 0.0 && widget_height > 0.0 {
@@ -751,8 +724,8 @@ impl GtkRdpWidget {
             let mouse_button = Self::gtk_button_to_rdp_button(button);
             if let Some(mouse_button) = mouse_button {
                 // Translate widget coordinates to RDP coordinates
-                let widget_width = drawing_area_click.width() as f64;
-                let widget_height = drawing_area_click.height() as f64;
+                let widget_width = overlay_click.width() as f64;
+                let widget_height = overlay_click.height() as f64;
                 let (buf_width, buf_height) = *buffer_size_click.borrow();
 
                 if buf_width > 0 && buf_height > 0 && widget_width > 0.0 && widget_height > 0.0 {
@@ -774,18 +747,18 @@ impl GtkRdpWidget {
             }
         });
 
-        self.drawing_area.add_controller(click_controller);
+        self.root.add_controller(click_controller);
 
         // Mouse motion
         let motion_controller = gtk::EventControllerMotion::new();
         let input_sender_motion = self.input_event_sender.clone();
         let input_database_motion = self.input_database.clone();
         let buffer_size_motion = self.buffer_size.clone();
-        let drawing_area_motion = self.drawing_area.clone();
+        let overlay_motion = self.root.clone();
 
         motion_controller.connect_motion(move |_, x, y| {
-            let widget_width = drawing_area_motion.width() as f64;
-            let widget_height = drawing_area_motion.height() as f64;
+            let widget_width = overlay_motion.width() as f64;
+            let widget_height = overlay_motion.height() as f64;
             let (buf_width, buf_height) = *buffer_size_motion.borrow();
 
             if buf_width > 0 && buf_height > 0 && widget_width > 0.0 && widget_height > 0.0 {
@@ -804,7 +777,7 @@ impl GtkRdpWidget {
             }
         });
 
-        self.drawing_area.add_controller(motion_controller);
+        self.root.add_controller(motion_controller);
 
         // Mouse scroll wheel
         let scroll_controller =
@@ -849,7 +822,7 @@ impl GtkRdpWidget {
             gtk::glib::Propagation::Stop
         });
 
-        self.drawing_area.add_controller(scroll_controller);
+        self.root.add_controller(scroll_controller);
     }
 
     fn keycode_to_scancode(keycode: u32) -> Option<ironrdp::input::Scancode> {
@@ -1008,27 +981,80 @@ impl GtkRdpWidget {
     }
 
     fn update_image(&self, mut buffer: Vec<u32>, width: u16, height: u16) {
+        if width == 0 || height == 0 {
+            self.picture
+                .set_paintable(Option::<&gtk::gdk::Texture>::None);
+            self.placeholder_label.set_visible(true);
+            *self.buffer_size.borrow_mut() = (0, 0);
+            self.root.queue_draw();
+            return;
+        }
+
         for pixel in buffer.iter_mut() {
             *pixel |= 0xFF000000;
         }
 
-        *self.cairo_buffer.borrow_mut() = buffer;
+        let stride = width as usize * 4;
+        let len = buffer.len();
+        let capacity = buffer.capacity();
+        let mut buffer = std::mem::ManuallyDrop::new(buffer);
+        let data = unsafe {
+            Vec::from_raw_parts(
+                buffer.as_mut_ptr() as *mut u8,
+                len * std::mem::size_of::<u32>(),
+                capacity * std::mem::size_of::<u32>(),
+            )
+        };
+
+        let bytes = gtk::glib::Bytes::from_owned(data);
+        let texture = gtk::gdk::MemoryTexture::new(
+            width as i32,
+            height as i32,
+            gtk::gdk::MemoryFormat::B8g8r8a8,
+            &bytes,
+            stride,
+        );
+
+        self.picture.set_paintable(Some(&texture));
+        self.placeholder_label.set_visible(false);
         *self.buffer_size.borrow_mut() = (width, height);
-        self.drawing_area.queue_draw();
+        self.root.queue_draw();
     }
 
-    fn widget(&self) -> &gtk::DrawingArea {
-        &self.drawing_area
+    fn surface_fractional_scale(surface: &gdk::Surface) -> f64 {
+        let scale = surface.scale();
+        if scale > 0.0 {
+            return scale;
+        }
+
+        surface.scale_factor().max(1) as f64
+    }
+
+    fn monitor_fractional_scale(monitor: &gdk::Monitor) -> f64 {
+        let scale = monitor.scale();
+        if scale > 0.0 {
+            return scale;
+        }
+
+        monitor.scale_factor().max(1) as f64
+    }
+
+    fn widget(&self) -> &gtk::Overlay {
+        &self.root
+    }
+
+    fn size_probe(&self) -> &gtk::DrawingArea {
+        &self.size_probe
     }
 
     fn set_cursor_default(&self) {
         *self.custom_cursor.borrow_mut() = None;
-        self.drawing_area.set_cursor_from_name(Some("default"));
+        self.root.set_cursor_from_name(Some("default"));
     }
 
     fn set_cursor_hidden(&self) {
         *self.custom_cursor.borrow_mut() = None;
-        self.drawing_area.set_cursor_from_name(Some("none"));
+        self.root.set_cursor_from_name(Some("none"));
     }
 
     fn set_cursor_from_bitmap(&self, pointer: Arc<ironrdp::graphics::pointer::DecodedPointer>) {
@@ -1069,7 +1095,7 @@ impl GtkRdpWidget {
         let cursor = gtk::gdk::Cursor::from_texture(&texture, hotspot_x, hotspot_y, None);
 
         *self.custom_cursor.borrow_mut() = Some(cursor.clone());
-        self.drawing_area.set_cursor(Some(&cursor));
+        self.root.set_cursor(Some(&cursor));
     }
 }
 
@@ -1730,7 +1756,7 @@ fn create_remote_desktop_window(
     let window_weak = rd_window.downgrade();
     let input_sender_resize_widget = input_sender_resize.clone();
 
-    rdp_widget.widget().connect_resize({
+    rdp_widget.size_probe().connect_resize({
         let resize_debounce = resize_debounce.clone();
         let window_weak = window_weak.clone();
         let sender_clone = input_sender_resize_widget.clone();
@@ -1758,21 +1784,60 @@ fn create_remote_desktop_window(
                         return ControlFlow::Break;
                     };
 
-                    let widget_scale = area.scale_factor().max(1) as u32;
-                    let window_scale = window.scale_factor().max(1) as u32;
-                    let scale_factor = widget_scale.max(window_scale);
+                    let widget_scale = area.scale_factor().max(1) as f64;
+                    let window_scale = window.scale_factor().max(1) as f64;
+                    let fallback_scale = widget_scale.max(window_scale);
 
-                    let logical_width = width.max(1) as u32;
-                    let logical_height = height.max(1) as u32;
+                    let mut effective_scale = fallback_scale;
+                    let mut monitor_limit: Option<(u32, u32)> = None;
 
-                    let width_pixels = logical_width
-                        .saturating_mul(scale_factor)
-                        .clamp(200, u32::from(u16::MAX));
-                    let height_pixels = logical_height
-                        .saturating_mul(scale_factor)
-                        .clamp(200, u32::from(u16::MAX));
+                    if let Some(surface) = window.surface() {
+                        let surface_scale = GtkRdpWidget::surface_fractional_scale(&surface);
+                        if surface_scale > 0.0 {
+                            effective_scale = surface_scale;
+                        }
 
-                    let scale_factor_percent = (scale_factor.saturating_mul(100)).clamp(100, 500);
+                        let display = surface.display();
+                        if let Some(monitor) = display.monitor_at_surface(&surface) {
+                            let monitor_scale = GtkRdpWidget::monitor_fractional_scale(&monitor);
+                            let geometry = monitor.geometry();
+                            let monitor_width = (geometry.width().max(1) as f64 * monitor_scale)
+                                .round()
+                                .clamp(200.0, u32::from(u16::MAX) as f64)
+                                as u32;
+                            let monitor_height = (geometry.height().max(1) as f64 * monitor_scale)
+                                .round()
+                                .clamp(200.0, u32::from(u16::MAX) as f64)
+                                as u32;
+                            monitor_limit = Some((monitor_width, monitor_height));
+
+                            if surface_scale <= 0.0 && monitor_scale > 0.0 {
+                                effective_scale = monitor_scale;
+                            }
+                        }
+                    }
+
+                    effective_scale = effective_scale.clamp(1.0, 5.0);
+
+                    let logical_width = width.max(1) as f64;
+                    let logical_height = height.max(1) as f64;
+
+                    let mut width_pixels = (logical_width * effective_scale)
+                        .round()
+                        .clamp(200.0, u32::from(u16::MAX) as f64)
+                        as u32;
+                    let mut height_pixels = (logical_height * effective_scale)
+                        .round()
+                        .clamp(200.0, u32::from(u16::MAX) as f64)
+                        as u32;
+
+                    if let Some((max_width, max_height)) = monitor_limit {
+                        width_pixels = width_pixels.min(max_width);
+                        height_pixels = height_pixels.min(max_height);
+                    }
+
+                    let scale_factor_percent =
+                        ((effective_scale * 100.0).round() as u32).clamp(100, 500);
 
                     tracing::info!(
                         logical_width,
