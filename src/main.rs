@@ -1,4 +1,4 @@
-use gtk::{Application, ApplicationWindow, Button, Image, glib, prelude::*};
+use gtk::{Application, ApplicationWindow, Button, Image, glib, glib::ControlFlow, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -1239,6 +1239,9 @@ fn create_remote_desktop_window(
     let rdp_widget_events = rdp_widget.clone();
     let rd_window_events = rd_window.clone();
 
+    let last_frame_size = Rc::new(RefCell::new((0u16, 0u16)));
+    let last_frame_size_clone = last_frame_size.clone();
+
     // Bridge tokio channel to GTK main thread
     glib::spawn_future_local(async move {
         while let Some(event) = output_event_receiver.recv().await {
@@ -1249,6 +1252,16 @@ fn create_remote_desktop_window(
                     height,
                 } => {
                     rdp_widget_events.update_image(buffer, width.get(), height.get());
+                    let mut last_size = last_frame_size_clone.borrow_mut();
+                    let new_size = (width.get(), height.get());
+                    if *last_size != new_size {
+                        tracing::info!(
+                            width = new_size.0,
+                            height = new_size.1,
+                            "Received frame with new dimensions"
+                        );
+                        *last_size = new_size;
+                    }
                 }
                 RdpOutputEvent::ConnectionFailure(error) => {
                     eprintln!("RDP Connection failed: {:?}", error);
@@ -1713,117 +1726,75 @@ fn create_remote_desktop_window(
     rdp_widget.widget().grab_focus();
 
     // Handle window resize to request new desktop size from RDP server
-    let last_resize_time = Rc::new(RefCell::new(std::time::Instant::now()));
-    let resize_pending = Rc::new(RefCell::new(false));
-    let rdp_widget_for_resize = rdp_widget.clone();
+    let resize_debounce = Rc::new(RefCell::new(None::<gtk::glib::SourceId>));
+    let window_weak = rd_window.downgrade();
+    let input_sender_resize_widget = input_sender_resize.clone();
 
-    rd_window.connect_notify_local(Some("width"), {
-        let last_resize_time = last_resize_time.clone();
-        let resize_pending = resize_pending.clone();
-        let input_sender = input_sender_resize.clone();
-        let rdp_widget = rdp_widget_for_resize.clone();
+    rdp_widget.widget().connect_resize({
+        let resize_debounce = resize_debounce.clone();
+        let window_weak = window_weak.clone();
+        let sender_clone = input_sender_resize_widget.clone();
+        move |area, width, height| {
+            tracing::info!(width, height, "GTK widget resize event");
 
-        move |window, _| {
-            // Debounce resize events - only send after 500ms of no resize activity
-            *last_resize_time.borrow_mut() = std::time::Instant::now();
-
-            if !*resize_pending.borrow() {
-                *resize_pending.borrow_mut() = true;
-
-                let last_resize_time = last_resize_time.clone();
-                let resize_pending = resize_pending.clone();
-                let input_sender = input_sender.clone();
-                let rd_window = window.clone();
-                let rdp_widget = rdp_widget.clone(); // Clone for the nested closure
-
-                gtk::glib::timeout_add_local_once(
-                    std::time::Duration::from_millis(500),
-                    move || {
-                        let elapsed = last_resize_time.borrow().elapsed();
-
-                        if elapsed >= std::time::Duration::from_millis(500) {
-                            let scale_factor = rd_window.scale_factor().max(1) as u32;
-
-                            let logical_width = rdp_widget.widget().width().max(640) as u32;
-                            let logical_height = rdp_widget.widget().height().max(480) as u32;
-
-                            let width_pixels = logical_width
-                                .saturating_mul(scale_factor)
-                                .clamp(200, u32::from(u16::MAX));
-                            let height_pixels = logical_height
-                                .saturating_mul(scale_factor)
-                                .clamp(200, u32::from(u16::MAX));
-
-                            let scale_factor_percent =
-                                (scale_factor.saturating_mul(100)).clamp(100, 500);
-
-                            let _ = input_sender.send(RdpInputEvent::Resize {
-                                width: width_pixels as u16,
-                                height: height_pixels as u16,
-                                scale_factor: scale_factor_percent,
-                                physical_size: None,
-                            });
-
-                            *resize_pending.borrow_mut() = false;
-                        }
-                    },
-                );
+            if let Some(source) = resize_debounce.borrow_mut().take() {
+                source.remove();
             }
-        }
-    });
 
-    rd_window.connect_notify_local(Some("height"), {
-        let last_resize_time = last_resize_time.clone();
-        let resize_pending = resize_pending.clone();
-        let input_sender = input_sender_resize.clone();
-        let rdp_widget = rdp_widget_for_resize.clone();
+            let window_weak_inner = window_weak.clone();
+            let area_weak = area.downgrade();
+            let sender_inner = sender_clone.clone();
+            let debounce_holder = resize_debounce.clone();
 
-        move |window, _| {
-            // Debounce resize events
-            *last_resize_time.borrow_mut() = std::time::Instant::now();
+            let source_id =
+                gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+                    let Some(window) = window_weak_inner.upgrade() else {
+                        debounce_holder.borrow_mut().take();
+                        return ControlFlow::Break;
+                    };
 
-            if !*resize_pending.borrow() {
-                *resize_pending.borrow_mut() = true;
+                    let Some(area) = area_weak.upgrade() else {
+                        debounce_holder.borrow_mut().take();
+                        return ControlFlow::Break;
+                    };
 
-                let last_resize_time = last_resize_time.clone();
-                let resize_pending = resize_pending.clone();
-                let input_sender = input_sender.clone();
-                let rd_window = window.clone();
-                let rdp_widget = rdp_widget.clone();
+                    let widget_scale = area.scale_factor().max(1) as u32;
+                    let window_scale = window.scale_factor().max(1) as u32;
+                    let scale_factor = widget_scale.max(window_scale);
 
-                gtk::glib::timeout_add_local_once(
-                    std::time::Duration::from_millis(500),
-                    move || {
-                        let elapsed = last_resize_time.borrow().elapsed();
+                    let logical_width = width.max(1) as u32;
+                    let logical_height = height.max(1) as u32;
 
-                        if elapsed >= std::time::Duration::from_millis(500) {
-                            let scale_factor = rd_window.scale_factor().max(1) as u32;
+                    let width_pixels = logical_width
+                        .saturating_mul(scale_factor)
+                        .clamp(200, u32::from(u16::MAX));
+                    let height_pixels = logical_height
+                        .saturating_mul(scale_factor)
+                        .clamp(200, u32::from(u16::MAX));
 
-                            let logical_width = rdp_widget.widget().width().max(640) as u32;
-                            let logical_height = rdp_widget.widget().height().max(480) as u32;
+                    let scale_factor_percent = (scale_factor.saturating_mul(100)).clamp(100, 500);
 
-                            let width_pixels = logical_width
-                                .saturating_mul(scale_factor)
-                                .clamp(200, u32::from(u16::MAX));
-                            let height_pixels = logical_height
-                                .saturating_mul(scale_factor)
-                                .clamp(200, u32::from(u16::MAX));
+                    tracing::info!(
+                        logical_width,
+                        logical_height,
+                        width_pixels,
+                        height_pixels,
+                        scale_factor_percent,
+                        "Queueing resize request"
+                    );
 
-                            let scale_factor_percent =
-                                (scale_factor.saturating_mul(100)).clamp(100, 500);
+                    let _ = sender_inner.send(RdpInputEvent::Resize {
+                        width: width_pixels as u16,
+                        height: height_pixels as u16,
+                        scale_factor: scale_factor_percent,
+                        physical_size: None,
+                    });
 
-                            let _ = input_sender.send(RdpInputEvent::Resize {
-                                width: width_pixels as u16,
-                                height: height_pixels as u16,
-                                scale_factor: scale_factor_percent,
-                                physical_size: None,
-                            });
+                    debounce_holder.borrow_mut().take();
+                    ControlFlow::Break
+                });
 
-                            *resize_pending.borrow_mut() = false;
-                        }
-                    },
-                );
-            }
+            *resize_debounce.borrow_mut() = Some(source_id);
         }
     });
 

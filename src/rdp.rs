@@ -157,6 +157,10 @@ impl<T: RdpEventSender> RdpClient<T> {
             .await
             {
                 Ok(RdpControlFlow::ReconnectWithNewSize { width, height }) => {
+                    info!(
+                        width,
+                        height, "Fast reconnect requested to apply new desktop size"
+                    );
                     self.config.connector.desktop_size.width = width;
                     self.config.connector.desktop_size.height = height;
                 }
@@ -793,22 +797,26 @@ async fn active_session<T: RdpEventSender>(
 
                 match input_event {
                     RdpInputEvent::Resize { width, height, scale_factor, physical_size } => {
-                        trace!(width, height, "Resize event");
+                        info!(width, height, scale_factor, ?physical_size, "Resize event received from UI");
                         let width = u32::from(width);
                         let height = u32::from(height);
                         // TODO: Make adjust_display_size take and return width and height as u16.
                         // From the function's doc comment, the width and height values must be less than or equal to 8192 pixels.
                         // Therefore, we can remove unnecessary casts from u16 to u32 and back.
                         let (width, height) = MonitorLayoutEntry::adjust_display_size(width, height);
-                        debug!(width, height, "Adjusted display size");
-                        if let Some(response_frame) = active_stage.encode_resize(width, height, Some(scale_factor), physical_size) {
+                        info!(width, height, "Adjusted display size for request");
+                        if let Some(response_frame) =
+                            active_stage.encode_resize(width, height, Some(scale_factor), physical_size)
+                        {
+                            info!("Sending Display Control resize request over DVC");
                             vec![ActiveStageOutput::ResponseFrame(response_frame?)]
                         } else {
-                            // TODO(#271): use the "auto-reconnect cookie": https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/15b0d1c9-2891-4adb-a45e-deb4aeeeab7c
-                            debug!("Reconnecting with new size");
+                            warn!(
+                                "Display Control channel unavailable, performing fast reconnect to apply new size"
+                            );
                             let width = u16::try_from(width).expect("always in the range");
                             let height = u16::try_from(height).expect("always in the range");
-                            return Ok(RdpControlFlow::ReconnectWithNewSize { width, height })
+                            return Ok(RdpControlFlow::ReconnectWithNewSize { width, height });
                         }
                     },
                     RdpInputEvent::FastPath(events) => {
