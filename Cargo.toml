@@ -4,7 +4,38 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
+bytes = "1.5"
+cairo-rs = { version = "0.18", features = ["png"] }
+clap = { version = "4.5", features = ["derive"] }
+cpal = "0.15"
+dirs = "6.0.0"
+futures-util = "0.3"
 gtk = { version = "0.10.1", package = "gtk4", features = ["v4_18"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-dirs = "5.0"
+inquire = "0.7"
+ironrdp = { git = "https://github.com/Devolutions/IronRDP", features = ["connector", "dvc", "input", "cliprdr", "displaycontrol", "graphics", "session", "svc", "rdpdr", "rdpsnd"] }
+ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", features = ["reqwest"] }
+picky = "=7.0.0-rc.17"
+picky-krb = "=0.11.1"
+semver = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+smallvec = "1.15.1"
+tap = "1.0"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-util = "0.7"
+tracing = "0.1.41"
+url = "2.5"
+whoami = "1.5"
+x509-cert = "0.2"
+ironrdp-mstsgu = { git = "https://github.com/Devolutions/IronRDP" }
+ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", features = ["rustls"]}
+ironrdp-cfg = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.0" }
+ironrdp-rdpfile = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.0" }
+ironrdp-rdcleanpath = { git = "https://github.com/Devolutions/IronRDP", version = "0.2.1" }
+ironrdp-rdpsnd-native = { git = "https://github.com/Devolutions/IronRDP", version = "0.4.1", default-features = false }
+ironrdp-propertyset = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.0" }
+ironrdp-async = { git = "https://github.com/Devolutions/IronRDP", version = "0.7.0" }
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.5" }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
