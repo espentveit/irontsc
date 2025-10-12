@@ -1312,6 +1312,77 @@ fn create_remote_desktop_window(
     let rdp_widget_events = rdp_widget.clone();
     let rd_window_events = rd_window.clone();
 
+    // Helper: try to fetch a GdkToplevel from the window, if realized.
+    fn with_toplevel<F: FnOnce(&gdk::Toplevel)>(win: &ApplicationWindow, f: F) {
+        if let Some(surface) = win.surface() {
+            if let Ok(tl) = surface.downcast::<gdk::Toplevel>() {
+                f(&tl);
+            }
+        }
+    }
+
+    // 1) Inhibit shortcuts when pointer ENTERS the RDP overlay; restore on LEAVE
+    {
+        let enter_leave_ctrl = gtk::EventControllerMotion::new();
+        let win_weak = rd_window.downgrade();
+
+        // Inhibit on enter (pass current event if present)
+        enter_leave_ctrl.connect_enter(move |ctrl, _, _| {
+            if let Some(win) = win_weak.upgrade() {
+                with_toplevel(&win, |tl| {
+                    if let Some(ev) = ctrl.current_event() {
+                        tl.inhibit_system_shortcuts(Some(&ev));
+                    } else {
+                        tl.inhibit_system_shortcuts(None::<&gdk::Event>);
+                    }
+                });
+            }
+        });
+
+        // Restore on leave
+        let win_weak = rd_window.downgrade();
+        enter_leave_ctrl.connect_leave(move |_| {
+            if let Some(win) = win_weak.upgrade() {
+                with_toplevel(&win, |tl| tl.restore_system_shortcuts());
+            }
+        });
+
+        // Attach to the overlay that wraps the RDP view
+        rdp_widget.widget().add_controller(enter_leave_ctrl);
+    }
+
+    // 2) Also handle keyboard focus (e.g., when alt-tabbing into/out of the window)
+    {
+        let focus_ctrl = gtk::EventControllerFocus::new();
+        let win_weak = rd_window.downgrade();
+
+        focus_ctrl.connect_enter(move |_| {
+            if let Some(win) = win_weak.upgrade() {
+                with_toplevel(&win, |tl| tl.inhibit_system_shortcuts(None::<&gdk::Event>));
+            }
+        });
+
+        let win_weak = rd_window.downgrade();
+        focus_ctrl.connect_leave(move |_| {
+            if let Some(win) = win_weak.upgrade() {
+                with_toplevel(&win, |tl| tl.restore_system_shortcuts());
+            }
+        });
+
+        rd_window.add_controller(focus_ctrl);
+    }
+
+    // 3) Safety: always restore before closing
+    {
+        let win_weak = rd_window.downgrade();
+        rd_window.connect_close_request(move |_| {
+            if let Some(win) = win_weak.upgrade() {
+                with_toplevel(&win, |tl| tl.restore_system_shortcuts());
+            }
+            gtk::glib::Propagation::Proceed
+        });
+    }
+
     let last_frame_size = Rc::new(RefCell::new((0u16, 0u16)));
     let last_frame_size_clone = last_frame_size.clone();
 

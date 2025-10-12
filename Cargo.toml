@@ -39,3 +39,4 @@ ironrdp-async = { git = "https://github.com/Devolutions/IronRDP", version = "0.7
 ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.5" }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 adw = { version = "0.8.0", package = "libadwaita", features = ["v1_6"] }
+arboard = "3.6.1"
