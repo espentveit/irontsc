@@ -1,3 +1,5 @@
+use glib::prelude::Cast;
+use gtk::gio::prelude::ListModelExt;
 use gtk::{
     Application, ApplicationWindow, Button, Image, gdk, gdk::prelude::*, glib, glib::ControlFlow,
     prelude::*,
@@ -183,6 +185,7 @@ fn create_rdp_config(
     domain: &str,
     password: &str,
     rdp_settings: &RdpSettings,
+    desktop_scale_percent: u32,
 ) -> Config {
     use ironrdp::connector;
     use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
@@ -213,7 +216,7 @@ fn create_rdp_config(
         enable_server_pointer: true,
         pointer_software_rendering: false,
         autologon: true,
-        desktop_scale_factor: 1,
+        desktop_scale_factor: desktop_scale_percent,
         enable_tls: true,
         enable_credssp: true,
         keyboard_type: ironrdp::pdu::gcc::KeyboardType::IbmEnhanced,
@@ -1130,7 +1133,7 @@ fn create_remote_desktop_window(
     let username = username.to_string();
     let domain = domain.to_string();
     let password = password.to_string();
-    let rdp_settings = rdp_settings.clone();
+    let mut rdp_settings = rdp_settings.clone();
 
     // Hide the main window when opening remote desktop
     main_window.set_visible(false);
@@ -1159,6 +1162,50 @@ fn create_remote_desktop_window(
         rd_window.maximize();
     }
 
+    let logical_config_width = rdp_settings.desktopwidth;
+    let logical_config_height = rdp_settings.desktopheight;
+
+    let display = gtk::prelude::WidgetExt::display(&rd_window);
+    let primary_monitor = rd_window
+        .surface()
+        .and_then(|surface| display.monitor_at_surface(&surface))
+        .or_else(|| {
+            let monitors = display.monitors();
+            (0..monitors.n_items()).find_map(|idx| {
+                monitors
+                    .item(idx)
+                    .and_then(|obj| obj.downcast::<gdk::Monitor>().ok())
+            })
+        });
+
+    let effective_scale = primary_monitor
+        .as_ref()
+        .map(|monitor| GtkRdpWidget::monitor_fractional_scale(monitor))
+        .unwrap_or(1.0)
+        .clamp(1.0, 5.0);
+
+    let mut initial_width = logical_config_width as f64;
+    let mut initial_height = logical_config_height as f64;
+
+    if rdp_settings.full_screen {
+        if let Some(ref monitor) = primary_monitor {
+            let geometry = monitor.geometry();
+            initial_width = geometry.width().max(1) as f64 * effective_scale;
+            initial_height = geometry.height().max(1) as f64 * effective_scale;
+        }
+    } else {
+        initial_width = initial_width * effective_scale;
+        initial_height = initial_height * effective_scale;
+    }
+
+    let initial_scale_percent = ((effective_scale * 100.0).round() as u32).clamp(100, 500);
+
+    let clamp_dimension =
+        |value: f64| -> u16 { value.round().clamp(200.0, u16::MAX as f64) as u16 };
+
+    rdp_settings.desktopwidth = clamp_dimension(initial_width);
+    rdp_settings.desktopheight = clamp_dimension(initial_height);
+
     // Create RDP input/output channels
     let (input_event_sender, input_event_receiver) = RdpInputEvent::create_channel();
     let (output_event_sender, mut output_event_receiver) =
@@ -1174,7 +1221,7 @@ fn create_remote_desktop_window(
     // Assume ~250px control bar width and 800px window = center at ~275px
     control_bar.set_margin_start(275);
     control_bar.set_margin_end(8);
-    control_bar.set_margin_top(4);
+    control_bar.set_margin_top(0);
     control_bar.set_margin_bottom(4);
     control_bar.add_css_class("osd"); // Overlay style
     control_bar.set_halign(gtk::Align::Start); // Always start from left, we'll position with margin
@@ -1712,7 +1759,14 @@ fn create_remote_desktop_window(
     });
 
     // Create and start RDP client
-    let config = create_rdp_config(&server, &username, &domain, &password, &rdp_settings);
+    let config = create_rdp_config(
+        &server,
+        &username,
+        &domain,
+        &password,
+        &rdp_settings,
+        initial_scale_percent,
+    );
 
     // Clone the output sender for the RDP client
     let output_sender_for_client = output_event_sender.clone();
@@ -1751,15 +1805,137 @@ fn create_remote_desktop_window(
     rd_window.present();
     rdp_widget.widget().grab_focus();
 
+    let last_sent_resize = Rc::new(RefCell::new(Some((
+        rdp_settings.desktopwidth,
+        rdp_settings.desktopheight,
+        initial_scale_percent,
+    ))));
+    let compute_resize: Rc<
+        dyn Fn(
+            &ApplicationWindow,
+            &gtk::DrawingArea,
+            i32,
+            i32,
+        ) -> Option<(u16, u16, u32, u32, u32)>,
+    > = Rc::new(|window, area, width, height| {
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+
+        let widget_scale = area.scale_factor().max(1) as f64;
+        let window_scale = window.scale_factor().max(1) as f64;
+        let fallback_scale = widget_scale.max(window_scale);
+
+        let mut effective_scale = fallback_scale;
+        let mut monitor_limit: Option<(u32, u32)> = None;
+
+        if let Some(surface) = window.surface() {
+            let surface_scale = GtkRdpWidget::surface_fractional_scale(&surface);
+            if surface_scale > 0.0 {
+                effective_scale = surface_scale;
+            }
+
+            let display = surface.display();
+            if let Some(monitor) = display.monitor_at_surface(&surface) {
+                let monitor_scale = GtkRdpWidget::monitor_fractional_scale(&monitor);
+                let geometry = monitor.geometry();
+                let monitor_width = (geometry.width().max(1) as f64 * monitor_scale)
+                    .round()
+                    .clamp(200.0, u32::from(u16::MAX) as f64)
+                    as u32;
+                let monitor_height = (geometry.height().max(1) as f64 * monitor_scale)
+                    .round()
+                    .clamp(200.0, u32::from(u16::MAX) as f64)
+                    as u32;
+                monitor_limit = Some((monitor_width, monitor_height));
+
+                if surface_scale <= 0.0 && monitor_scale > 0.0 {
+                    effective_scale = monitor_scale;
+                }
+            }
+        }
+
+        effective_scale = effective_scale.clamp(1.0, 5.0);
+
+        let logical_width = width.max(1) as f64;
+        let logical_height = height.max(1) as f64;
+
+        let mut width_pixels = (logical_width * effective_scale)
+            .round()
+            .clamp(200.0, u32::from(u16::MAX) as f64) as u32;
+        let mut height_pixels = (logical_height * effective_scale)
+            .round()
+            .clamp(200.0, u32::from(u16::MAX) as f64) as u32;
+
+        if let Some((max_width, max_height)) = monitor_limit {
+            width_pixels = width_pixels.min(max_width);
+            height_pixels = height_pixels.min(max_height);
+        }
+
+        let scale_factor_percent = ((effective_scale * 100.0).round() as u32).clamp(100, 500);
+
+        Some((
+            width_pixels.min(u16::MAX as u32) as u16,
+            height_pixels.min(u16::MAX as u32) as u16,
+            scale_factor_percent,
+            width_pixels,
+            height_pixels,
+        ))
+    });
+
     // Handle window resize to request new desktop size from RDP server
+    let window_for_initial = rd_window.clone();
+    let sender_for_initial = input_sender_resize.clone();
+    let compute_resize_for_initial = compute_resize.clone();
+    let last_sent_initial = last_sent_resize.clone();
+    let size_probe_for_initial = rdp_widget.size_probe().clone();
+    size_probe_for_initial.connect_map(move |area| {
+        let width = area.width();
+        let height = area.height();
+
+        if let Some((width_u16, height_u16, scale_percent, width_pixels, height_pixels)) =
+            compute_resize_for_initial(&window_for_initial, area, width, height)
+        {
+            let logical_width = width.max(1) as u32;
+            let logical_height = height.max(1) as u32;
+
+            let mut last_sent = last_sent_initial.borrow_mut();
+            if last_sent.as_ref() == Some(&(width_u16, height_u16, scale_percent)) {
+                return;
+            }
+
+            tracing::info!(
+                logical_width,
+                logical_height,
+                width_pixels,
+                height_pixels,
+                scale_factor_percent = scale_percent,
+                "Queueing initial resize request"
+            );
+
+            let _ = sender_for_initial.send(RdpInputEvent::Resize {
+                width: width_u16,
+                height: height_u16,
+                scale_factor: scale_percent,
+                physical_size: None,
+            });
+
+            *last_sent = Some((width_u16, height_u16, scale_percent));
+        }
+    });
+
     let resize_debounce = Rc::new(RefCell::new(None::<gtk::glib::SourceId>));
     let window_weak = rd_window.downgrade();
     let input_sender_resize_widget = input_sender_resize.clone();
 
+    let compute_resize_for_resize = compute_resize.clone();
+    let last_sent_for_resize = last_sent_resize.clone();
     rdp_widget.size_probe().connect_resize({
         let resize_debounce = resize_debounce.clone();
         let window_weak = window_weak.clone();
         let sender_clone = input_sender_resize_widget.clone();
+        let compute_resize_for_resize = compute_resize_for_resize.clone();
+        let last_sent_for_resize = last_sent_for_resize.clone();
         move |area, width, height| {
             tracing::info!(width, height, "GTK widget resize event");
 
@@ -1771,6 +1947,8 @@ fn create_remote_desktop_window(
             let area_weak = area.downgrade();
             let sender_inner = sender_clone.clone();
             let debounce_holder = resize_debounce.clone();
+            let compute_resize_timeout = compute_resize_for_resize.clone();
+            let last_sent_timeout = last_sent_for_resize.clone();
 
             let source_id =
                 gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
@@ -1784,60 +1962,26 @@ fn create_remote_desktop_window(
                         return ControlFlow::Break;
                     };
 
-                    let widget_scale = area.scale_factor().max(1) as f64;
-                    let window_scale = window.scale_factor().max(1) as f64;
-                    let fallback_scale = widget_scale.max(window_scale);
+                    let logical_width = width.max(1) as u32;
+                    let logical_height = height.max(1) as u32;
 
-                    let mut effective_scale = fallback_scale;
-                    let mut monitor_limit: Option<(u32, u32)> = None;
+                    let Some((
+                        width_u16,
+                        height_u16,
+                        scale_factor_percent,
+                        width_pixels,
+                        height_pixels,
+                    )) = compute_resize_timeout(&window, &area, width, height)
+                    else {
+                        debounce_holder.borrow_mut().take();
+                        return ControlFlow::Break;
+                    };
 
-                    if let Some(surface) = window.surface() {
-                        let surface_scale = GtkRdpWidget::surface_fractional_scale(&surface);
-                        if surface_scale > 0.0 {
-                            effective_scale = surface_scale;
-                        }
-
-                        let display = surface.display();
-                        if let Some(monitor) = display.monitor_at_surface(&surface) {
-                            let monitor_scale = GtkRdpWidget::monitor_fractional_scale(&monitor);
-                            let geometry = monitor.geometry();
-                            let monitor_width = (geometry.width().max(1) as f64 * monitor_scale)
-                                .round()
-                                .clamp(200.0, u32::from(u16::MAX) as f64)
-                                as u32;
-                            let monitor_height = (geometry.height().max(1) as f64 * monitor_scale)
-                                .round()
-                                .clamp(200.0, u32::from(u16::MAX) as f64)
-                                as u32;
-                            monitor_limit = Some((monitor_width, monitor_height));
-
-                            if surface_scale <= 0.0 && monitor_scale > 0.0 {
-                                effective_scale = monitor_scale;
-                            }
-                        }
+                    let mut last_sent = last_sent_timeout.borrow_mut();
+                    if last_sent.as_ref() == Some(&(width_u16, height_u16, scale_factor_percent)) {
+                        debounce_holder.borrow_mut().take();
+                        return ControlFlow::Break;
                     }
-
-                    effective_scale = effective_scale.clamp(1.0, 5.0);
-
-                    let logical_width = width.max(1) as f64;
-                    let logical_height = height.max(1) as f64;
-
-                    let mut width_pixels = (logical_width * effective_scale)
-                        .round()
-                        .clamp(200.0, u32::from(u16::MAX) as f64)
-                        as u32;
-                    let mut height_pixels = (logical_height * effective_scale)
-                        .round()
-                        .clamp(200.0, u32::from(u16::MAX) as f64)
-                        as u32;
-
-                    if let Some((max_width, max_height)) = monitor_limit {
-                        width_pixels = width_pixels.min(max_width);
-                        height_pixels = height_pixels.min(max_height);
-                    }
-
-                    let scale_factor_percent =
-                        ((effective_scale * 100.0).round() as u32).clamp(100, 500);
 
                     tracing::info!(
                         logical_width,
@@ -1849,12 +1993,13 @@ fn create_remote_desktop_window(
                     );
 
                     let _ = sender_inner.send(RdpInputEvent::Resize {
-                        width: width_pixels as u16,
-                        height: height_pixels as u16,
+                        width: width_u16,
+                        height: height_u16,
                         scale_factor: scale_factor_percent,
                         physical_size: None,
                     });
 
+                    *last_sent = Some((width_u16, height_u16, scale_factor_percent));
                     debounce_holder.borrow_mut().take();
                     ControlFlow::Break
                 });
