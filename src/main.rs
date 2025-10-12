@@ -382,26 +382,54 @@ impl GtkRdpWidget {
         click_controller.set_button(0); // 0 means listen to all mouse buttons
         let input_sender_click = self.input_event_sender.clone();
         let input_database_click = self.input_database.clone();
+        let buffer_size_click = self.buffer_size.clone();
+        let drawing_area_click = self.drawing_area.clone();
         
         let input_sender_click_pressed = input_sender_click.clone();
         let input_database_click_pressed = input_database_click.clone();
-        click_controller.connect_pressed(move |gesture, _n_press, _x, _y| {
+        let buffer_size_click_pressed = buffer_size_click.clone();
+        let drawing_area_click_pressed = drawing_area_click.clone();
+        click_controller.connect_pressed(move |gesture, _n_press, x, y| {
             let button = gesture.current_button();
             let mouse_button = Self::gtk_button_to_rdp_button(button);
             if let Some(mouse_button) = mouse_button {
-                let operation = ironrdp::input::Operation::MouseButtonPressed(mouse_button);
-                let input_events = input_database_click_pressed.borrow_mut().apply(std::iter::once(operation));
-                Self::send_fast_path_events(&input_sender_click_pressed, input_events);
+                // Translate widget coordinates to RDP coordinates
+                let widget_width = drawing_area_click_pressed.width() as f64;
+                let widget_height = drawing_area_click_pressed.height() as f64;
+                let (buf_width, buf_height) = *buffer_size_click_pressed.borrow();
+                
+                if buf_width > 0 && buf_height > 0 && widget_width > 0.0 && widget_height > 0.0 {
+                    let rdp_x = (x / widget_width * buf_width as f64) as u16;
+                    let rdp_y = (y / widget_height * buf_height as f64) as u16;
+                    
+                    // Send mouse position update before button press
+                    let move_op = ironrdp::input::Operation::MouseMove(ironrdp::input::MousePosition { x: rdp_x, y: rdp_y });
+                    let press_op = ironrdp::input::Operation::MouseButtonPressed(mouse_button);
+                    let input_events = input_database_click_pressed.borrow_mut().apply([move_op, press_op]);
+                    Self::send_fast_path_events(&input_sender_click_pressed, input_events);
+                }
             }
         });
 
-        click_controller.connect_released(move |gesture, _n_press, _x, _y| {
+        click_controller.connect_released(move |gesture, _n_press, x, y| {
             let button = gesture.current_button();
             let mouse_button = Self::gtk_button_to_rdp_button(button);
             if let Some(mouse_button) = mouse_button {
-                let operation = ironrdp::input::Operation::MouseButtonReleased(mouse_button);
-                let input_events = input_database_click.borrow_mut().apply(std::iter::once(operation));
-                Self::send_fast_path_events(&input_sender_click, input_events);
+                // Translate widget coordinates to RDP coordinates
+                let widget_width = drawing_area_click.width() as f64;
+                let widget_height = drawing_area_click.height() as f64;
+                let (buf_width, buf_height) = *buffer_size_click.borrow();
+                
+                if buf_width > 0 && buf_height > 0 && widget_width > 0.0 && widget_height > 0.0 {
+                    let rdp_x = (x / widget_width * buf_width as f64) as u16;
+                    let rdp_y = (y / widget_height * buf_height as f64) as u16;
+                    
+                    // Send mouse position update before button release
+                    let move_op = ironrdp::input::Operation::MouseMove(ironrdp::input::MousePosition { x: rdp_x, y: rdp_y });
+                    let release_op = ironrdp::input::Operation::MouseButtonReleased(mouse_button);
+                    let input_events = input_database_click.borrow_mut().apply([move_op, release_op]);
+                    Self::send_fast_path_events(&input_sender_click, input_events);
+                }
             }
         });
 
