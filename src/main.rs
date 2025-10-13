@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 mod config;
@@ -17,7 +17,8 @@ mod ws; // Add websocket compatibility module
 
 use crate::config::{ClipboardType, Config, Destination};
 use crate::rdp::{
-    ArboardClipboardFactory, DvcPipeProxyFactory, RdpClient, RdpInputEvent, RdpOutputEvent,
+    ArboardClipboardFactory, DvcPipeProxyFactory, ImageRegion, RdpClient, RdpInputEvent,
+    RdpOutputEvent,
 };
 use ironrdp::cliprdr::backend::CliprdrBackendFactory;
 
@@ -651,15 +652,19 @@ impl RdpSettings {
 }
 
 // GTK RDP Widget Implementation
+#[derive(Clone)]
 struct GtkRdpWidget {
     root: gtk::Overlay,
     picture: gtk::Picture,
     placeholder_label: gtk::Label,
     size_probe: gtk::DrawingArea,
     buffer_size: Rc<RefCell<(u16, u16)>>,
+    framebuffer: Arc<Mutex<FrameState>>,
     input_event_sender: mpsc::UnboundedSender<RdpInputEvent>,
     input_database: Rc<RefCell<ironrdp::input::Database>>,
     custom_cursor: Rc<RefCell<Option<gtk::gdk::Cursor>>>,
+    pending_upload: Rc<RefCell<Option<PendingUpload>>>,
+    upload_source: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl GtkRdpWidget {
@@ -696,15 +701,22 @@ impl GtkRdpWidget {
         let input_database = Rc::new(RefCell::new(ironrdp::input::Database::new()));
         let custom_cursor = Rc::new(RefCell::new(None));
 
+        let framebuffer = Arc::new(Mutex::new(FrameState::default()));
+        let pending_upload = Rc::new(RefCell::new(None));
+        let upload_source = Rc::new(RefCell::new(None));
+
         let widget = Self {
             root: root.clone(),
             picture: picture.clone(),
             placeholder_label: placeholder_label.clone(),
             size_probe: size_probe.clone(),
             buffer_size: buffer_size.clone(),
+            framebuffer: framebuffer.clone(),
             input_event_sender: input_event_sender.clone(),
             input_database: input_database.clone(),
             custom_cursor: custom_cursor.clone(),
+            pending_upload: pending_upload.clone(),
+            upload_source: upload_source.clone(),
         };
 
         // Set up input event handlers
@@ -1049,45 +1061,203 @@ impl GtkRdpWidget {
         }
     }
 
-    fn update_image(&self, mut buffer: Vec<u32>, width: u16, height: u16) {
+    fn update_image(&self, buffer: Vec<u8>, width: u16, height: u16, region: Option<ImageRegion>) {
         if width == 0 || height == 0 {
+            self.cancel_pending_upload();
             self.picture
                 .set_paintable(Option::<&gtk::gdk::Texture>::None);
             self.placeholder_label.set_visible(true);
             *self.buffer_size.borrow_mut() = (0, 0);
+            if let Ok(mut state) = self.framebuffer.lock() {
+                state.clear();
+            }
             self.root.queue_draw();
             return;
         }
 
-        for pixel in buffer.iter_mut() {
-            *pixel |= 0xFF000000;
+        let stride = width as usize * 4;
+        let frame_len = stride * height as usize;
+
+        {
+            let mut state = self.framebuffer.lock().expect("framebuffer mutex poisoned");
+
+            match region {
+                None => {
+                    debug_assert_eq!(buffer.len(), frame_len);
+
+                    if let Some(staging) = state.staging.as_mut() {
+                        if staging.len() != frame_len {
+                            staging.resize(frame_len, 0);
+                        }
+
+                        staging.copy_from_slice(&buffer);
+                        state.staging_ready = true;
+                    } else {
+                        state.staging_ready = false;
+                    }
+
+                    state.frame = buffer;
+                    state.frame_version = state.frame_version.wrapping_add(1);
+                }
+                Some(region) => {
+                    let FrameState {
+                        frame,
+                        staging,
+                        staging_ready,
+                        frame_version,
+                        ..
+                    } = &mut *state;
+
+                    if frame.len() != frame_len {
+                        frame.resize(frame_len, 0);
+                        *staging_ready = false;
+                    }
+
+                    let region_width = usize::from(region.width.get());
+                    let region_height = usize::from(region.height.get());
+                    let bytes_per_row = region_width * 4;
+
+                    debug_assert_eq!(buffer.len(), bytes_per_row * region_height);
+
+                    match staging {
+                        Some(staging) if staging.len() == frame_len => {
+                            if !*staging_ready {
+                                staging.copy_from_slice(frame);
+                            }
+
+                            for row in 0..region_height {
+                                let src_offset = row * bytes_per_row;
+                                let dst_offset = (usize::from(region.y) + row) * stride
+                                    + usize::from(region.x) * 4;
+
+                                frame[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
+                                    &buffer[src_offset..src_offset + bytes_per_row],
+                                );
+                                staging[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
+                                    &buffer[src_offset..src_offset + bytes_per_row],
+                                );
+                            }
+
+                            *staging_ready = true;
+                        }
+                        Some(staging) => {
+                            staging.resize(frame_len, 0);
+
+                            for row in 0..region_height {
+                                let src_offset = row * bytes_per_row;
+                                let dst_offset = (usize::from(region.y) + row) * stride
+                                    + usize::from(region.x) * 4;
+
+                                frame[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
+                                    &buffer[src_offset..src_offset + bytes_per_row],
+                                );
+                            }
+
+                            *staging_ready = false;
+                        }
+                        None => {
+                            for row in 0..region_height {
+                                let src_offset = row * bytes_per_row;
+                                let dst_offset = (usize::from(region.y) + row) * stride
+                                    + usize::from(region.x) * 4;
+
+                                frame[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
+                                    &buffer[src_offset..src_offset + bytes_per_row],
+                                );
+                            }
+
+                            *staging_ready = false;
+                        }
+                    }
+
+                    *frame_version = frame_version.wrapping_add(1);
+                }
+            }
         }
 
+        self.schedule_upload(width, height);
+        self.placeholder_label.set_visible(false);
+        *self.buffer_size.borrow_mut() = (width, height);
+    }
+
+    fn schedule_upload(&self, width: u16, height: u16) {
+        {
+            let mut pending = self.pending_upload.borrow_mut();
+            *pending = Some(PendingUpload { width, height });
+        }
+
+        if self.upload_source.borrow().is_some() {
+            return;
+        }
+
+        let widget = self.clone();
+        let pending_upload = self.pending_upload.clone();
+        let upload_source = self.upload_source.clone();
+
+        let source = glib::idle_add_local(move || {
+            let pending = pending_upload.borrow_mut().take();
+            *upload_source.borrow_mut() = None;
+
+            if let Some(pending) = pending {
+                widget.upload_framebuffer(pending.width, pending.height);
+                widget.root.queue_draw();
+            }
+
+            ControlFlow::Break
+        });
+
+        *self.upload_source.borrow_mut() = Some(source);
+    }
+
+    fn cancel_pending_upload(&self) {
+        if let Some(source) = self.upload_source.borrow_mut().take() {
+            source.remove();
+        }
+        self.pending_upload.borrow_mut().take();
+    }
+
+    fn upload_framebuffer(&self, width: u16, height: u16) {
         let stride = width as usize * 4;
-        let len = buffer.len();
-        let capacity = buffer.capacity();
-        let mut buffer = std::mem::ManuallyDrop::new(buffer);
-        let data = unsafe {
-            Vec::from_raw_parts(
-                buffer.as_mut_ptr() as *mut u8,
-                len * std::mem::size_of::<u32>(),
-                capacity * std::mem::size_of::<u32>(),
-            )
+        let frame_len = stride * height as usize;
+        let bytes = {
+            let mut state = self.framebuffer.lock().expect("framebuffer mutex poisoned");
+
+            if state.frame.len() != frame_len {
+                state.frame.resize(frame_len, 0);
+                state.staging_ready = false;
+            }
+
+            let mut staging = state.staging.take().unwrap_or_else(|| vec![0u8; frame_len]);
+
+            if staging.len() != frame_len {
+                staging.resize(frame_len, 0);
+                state.staging_ready = false;
+            }
+
+            if !state.staging_ready {
+                staging.copy_from_slice(&state.frame);
+                state.staging_ready = true;
+            }
+
+            let upload_version = state.frame_version;
+            state.latest_upload_version = upload_version;
+
+            gtk::glib::Bytes::from_owned(FrameBytes::new(
+                staging,
+                Arc::clone(&self.framebuffer),
+                upload_version,
+            ))
         };
 
-        let bytes = gtk::glib::Bytes::from_owned(data);
         let texture = gtk::gdk::MemoryTexture::new(
             width as i32,
             height as i32,
-            gtk::gdk::MemoryFormat::B8g8r8a8,
+            gtk::gdk::MemoryFormat::R8g8b8x8,
             &bytes,
             stride,
         );
 
         self.picture.set_paintable(Some(&texture));
-        self.placeholder_label.set_visible(false);
-        *self.buffer_size.borrow_mut() = (width, height);
-        self.root.queue_draw();
     }
 
     fn surface_fractional_scale(surface: &gdk::Surface) -> f64 {
@@ -1165,6 +1335,71 @@ impl GtkRdpWidget {
 
         *self.custom_cursor.borrow_mut() = Some(cursor.clone());
         self.root.set_cursor(Some(&cursor));
+    }
+}
+
+#[derive(Default)]
+struct FrameState {
+    frame: Vec<u8>,
+    staging: Option<Vec<u8>>,
+    staging_ready: bool,
+    frame_version: u64,
+    latest_upload_version: u64,
+}
+
+impl FrameState {
+    fn clear(&mut self) {
+        self.frame.clear();
+        if let Some(staging) = self.staging.as_mut() {
+            staging.clear();
+        }
+        self.staging_ready = false;
+        self.frame_version = 0;
+        self.latest_upload_version = 0;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingUpload {
+    width: u16,
+    height: u16,
+}
+
+struct FrameBytes {
+    data: Option<Vec<u8>>,
+    state: Arc<Mutex<FrameState>>,
+    version: u64,
+}
+
+impl FrameBytes {
+    fn new(data: Vec<u8>, state: Arc<Mutex<FrameState>>, version: u64) -> Self {
+        Self {
+            data: Some(data),
+            state,
+            version,
+        }
+    }
+}
+
+impl AsRef<[u8]> for FrameBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.data
+            .as_deref()
+            .expect("framebuffer contents should be available")
+    }
+}
+
+impl Drop for FrameBytes {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.data.take() {
+            if let Ok(mut state) = self.state.lock() {
+                if state.staging.is_none() && state.latest_upload_version == self.version {
+                    let is_current = state.frame_version == self.version;
+                    state.staging_ready = is_current;
+                    state.staging = Some(buffer);
+                }
+            }
+        }
     }
 }
 
@@ -1480,8 +1715,9 @@ fn create_remote_desktop_window(
                     buffer,
                     width,
                     height,
+                    region,
                 } => {
-                    rdp_widget_events.update_image(buffer, width.get(), height.get());
+                    rdp_widget_events.update_image(buffer, width.get(), height.get(), region);
                     let mut last_size = last_frame_size_clone.borrow_mut();
                     let new_size = (width.get(), height.get());
                     if *last_size != new_size {

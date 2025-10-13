@@ -15,6 +15,7 @@ use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::graphics::pointer::DecodedPointer;
+use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::PduResult;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::session::image::DecodedImage;
@@ -56,12 +57,21 @@ pub trait RdpEventSender: Send + 'static {
     fn send_event(&self, event: RdpOutputEvent) -> Result<(), ()>;
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ImageRegion {
+    pub x: u16,
+    pub y: u16,
+    pub width: NonZeroU16,
+    pub height: NonZeroU16,
+}
+
 #[derive(Debug)]
 pub enum RdpOutputEvent {
     Image {
-        buffer: Vec<u32>,
+        buffer: Vec<u8>,
         width: NonZeroU16,
         height: NonZeroU16,
+        region: Option<ImageRegion>,
     },
     ConnectionFailure(connector::ConnectorError),
     PointerDefault,
@@ -210,6 +220,8 @@ async fn connect(
     cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
     dvc_pipe_proxy_factory: &DvcPipeProxyFactory,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
+    let _ = dvc_pipe_proxy_factory;
+
     let dest = format!(
         "{}:{}",
         config.destination.name(),
@@ -304,6 +316,8 @@ async fn connect_ws(
     cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
     dvc_pipe_proxy_factory: &DvcPipeProxyFactory,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
+    let _ = dvc_pipe_proxy_factory;
+
     // TODO: RDCleanPath/WebSocket support requires internal ironrdp modules
     // For now, this functionality is disabled
     return Err(connector::general_err!(
@@ -1120,12 +1134,15 @@ async fn active_session<T: RdpEventSender>(
 ) -> SessionResult<RdpControlFlow> {
     let (mut reader, mut writer) = split_tokio_framed(framed);
     let mut image = DecodedImage::new(
-        PixelFormat::BgrX32,
+        PixelFormat::RgbA32,
         connection_result.desktop_size.width,
         connection_result.desktop_size.height,
     );
 
     let mut active_stage = ActiveStage::new(connection_result);
+
+    let mut last_frame_dimensions = (image.width(), image.height());
+    let mut frame_ready = false;
 
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
@@ -1233,27 +1250,72 @@ async fn active_session<T: RdpEventSender>(
                     .write_all(&frame)
                     .await
                     .map_err(|e| session::custom_err!("write response", e))?,
-                ActiveStageOutput::GraphicsUpdate(_region) => {
-                    let buffer: Vec<u32> = image
-                        .data()
-                        .chunks_exact(4)
-                        .map(|pixel| {
-                            let r = pixel[0];
-                            let g = pixel[1];
-                            let b = pixel[2];
-                            u32::from_be_bytes([0, r, g, b])
-                        })
-                        .collect();
+                ActiveStageOutput::GraphicsUpdate(region) => {
+                    let width = NonZeroU16::new(image.width())
+                        .ok_or_else(|| session::general_err!("width is zero"))?;
+                    let height = NonZeroU16::new(image.height())
+                        .ok_or_else(|| session::general_err!("height is zero"))?;
 
-                    event_loop_proxy
-                        .send_event(RdpOutputEvent::Image {
-                            buffer,
-                            width: NonZeroU16::new(image.width())
-                                .ok_or_else(|| session::general_err!("width is zero"))?,
-                            height: NonZeroU16::new(image.height())
-                                .ok_or_else(|| session::general_err!("height is zero"))?,
-                        })
-                        .map_err(|_| session::general_err!("failed to send image event"))?;
+                    let dimensions = (width.get(), height.get());
+                    if dimensions != last_frame_dimensions {
+                        frame_ready = false;
+                        last_frame_dimensions = dimensions;
+                    }
+
+                    let is_full_frame = region.left == 0
+                        && region.top == 0
+                        && region.width() == width.get()
+                        && region.height() == height.get();
+
+                    if !frame_ready || is_full_frame {
+                        let buffer = image.data().to_vec();
+
+                        event_loop_proxy
+                            .send_event(RdpOutputEvent::Image {
+                                buffer,
+                                width,
+                                height,
+                                region: None,
+                            })
+                            .map_err(|_| session::general_err!("failed to send image event"))?;
+
+                        frame_ready = true;
+                    } else {
+                        let bytes_per_pixel = image.bytes_per_pixel();
+                        let stride = image.stride();
+                        let rect_width = usize::from(region.width());
+                        let rect_height = usize::from(region.height());
+                        let mut buffer = vec![0u8; rect_width * rect_height * bytes_per_pixel];
+                        let data = image.data();
+
+                        for row in 0..rect_height {
+                            let src_offset = (usize::from(region.top) + row) * stride
+                                + usize::from(region.left) * bytes_per_pixel;
+                            let dst_offset = row * rect_width * bytes_per_pixel;
+                            buffer[dst_offset..dst_offset + rect_width * bytes_per_pixel]
+                                .copy_from_slice(
+                                    &data[src_offset..src_offset + rect_width * bytes_per_pixel],
+                                );
+                        }
+
+                        let region = ImageRegion {
+                            x: region.left,
+                            y: region.top,
+                            width: NonZeroU16::new(region.width())
+                                .expect("region width is always non-zero"),
+                            height: NonZeroU16::new(region.height())
+                                .expect("region height is always non-zero"),
+                        };
+
+                        event_loop_proxy
+                            .send_event(RdpOutputEvent::Image {
+                                buffer,
+                                width,
+                                height,
+                                region: Some(region),
+                            })
+                            .map_err(|_| session::general_err!("failed to send image event"))?;
+                    }
                 }
                 ActiveStageOutput::PointerDefault => {
                     event_loop_proxy
@@ -1324,7 +1386,7 @@ async fn active_session<T: RdpEventSender>(
                             );
                             // Update image size with the new desktop size.
                             image = DecodedImage::new(
-                                PixelFormat::BgrX32,
+                                PixelFormat::RgbA32,
                                 desktop_size.width,
                                 desktop_size.height,
                             );
