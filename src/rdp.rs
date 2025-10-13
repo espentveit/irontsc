@@ -3,9 +3,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironrdp::cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
+use ironrdp::cliprdr::pdu::FileDescriptor;
 use ironrdp::cliprdr::pdu::{
-    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest,
-    FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
+    ClipboardFileAttributes, ClipboardFormat, ClipboardFormatId, ClipboardFormatName,
+    ClipboardGeneralCapabilityFlags, FileContentsFlags, FileContentsRequest, FileContentsResponse,
+    FormatDataRequest, FormatDataResponse, LockDataId, OwnedFormatDataResponse, PackedFileList,
 };
 use ironrdp::connector::connection_activation::ConnectionActivationState;
 use ironrdp::connector::{ConnectionResult, ConnectorResult};
@@ -34,10 +36,20 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
 use arboard::Clipboard;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::{Config, RDCleanPathConfig};
+
+fn to_utf16_bytes(value: &str) -> Vec<u8> {
+    value
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect()
+}
 
 // Trait for sending RDP output events to the UI
 pub trait RdpEventSender: Send + 'static {
@@ -74,6 +86,7 @@ pub enum RdpInputEvent {
     FastPath(SmallVec<[FastPathInputEvent; 2]>),
     Close,
     Clipboard(ClipboardMessage),
+    ClipboardFileContents(FileContentsResponse<'static>),
     SendDvcMessages {
         channel_id: u32,
         messages: Vec<SvcMessage>,
@@ -573,7 +586,7 @@ impl CliprdrBackendFactory for ArboardClipboardFactory {
 #[derive(Debug)]
 struct ArboardClipboardBackend {
     sender: mpsc::UnboundedSender<RdpInputEvent>,
-    last_text: Arc<Mutex<Option<String>>>,
+    clipboard_state: Arc<Mutex<ClipboardState>>,
     running: Arc<AtomicBool>,
     watcher: Option<thread::JoinHandle<()>>,
     temp_dir: String,
@@ -581,11 +594,313 @@ struct ArboardClipboardBackend {
 
 impl_as_any!(ArboardClipboardBackend);
 
+const FILE_LIST_CLIPBOARD_FORMAT_ID: ClipboardFormatId = ClipboardFormatId(0xC0FE);
+const FILE_LIST_CLIPBOARD_FORMAT_ID_FALLBACK: ClipboardFormatId = ClipboardFormatId(0);
+
+fn is_file_descriptor_format(format: ClipboardFormatId) -> bool {
+    format == FILE_LIST_CLIPBOARD_FORMAT_ID || format == FILE_LIST_CLIPBOARD_FORMAT_ID_FALLBACK
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ClipboardState {
+    text: Option<String>,
+    files: Option<FileClipboard>,
+}
+
+impl ClipboardState {
+    fn from_clipboard(clipboard: &mut Clipboard) -> Self {
+        let text = clipboard.get_text().ok();
+        let files = clipboard
+            .get()
+            .file_list()
+            .ok()
+            .and_then(FileClipboard::from_paths);
+
+        let text = Self::sanitize_text(text, files.is_some());
+
+        Self { text, files }
+    }
+
+    fn formats(&self) -> Vec<ClipboardFormat> {
+        let mut formats = Vec::new();
+
+        if self.text.is_some() {
+            formats.push(ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT));
+        }
+
+        if self.files.is_some() {
+            formats.push(ClipboardFormat::new(ClipboardFormatId::CF_HDROP));
+            formats.push(
+                ClipboardFormat::new(FILE_LIST_CLIPBOARD_FORMAT_ID)
+                    .with_name(ClipboardFormatName::FILE_LIST),
+            );
+        }
+
+        formats
+    }
+
+    fn has_any(&self) -> bool {
+        self.text.is_some() || self.files.is_some()
+    }
+
+    fn sanitize_text(text: Option<String>, has_files: bool) -> Option<String> {
+        if !has_files {
+            return text;
+        }
+
+        text.and_then(|value| {
+            let trimmed = value.trim();
+            let looks_like_file_payload = trimmed.starts_with("copy\nfile://")
+                || trimmed.starts_with("cut\nfile://")
+                || trimmed
+                    .lines()
+                    .all(|line| line.trim().is_empty() || line.starts_with("file://"));
+
+            if looks_like_file_payload {
+                None
+            } else {
+                Some(value)
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileClipboard {
+    entries: Vec<FileEntry>,
+}
+
+impl FileClipboard {
+    fn from_paths(paths: Vec<PathBuf>) -> Option<Self> {
+        let mut entries = Vec::new();
+
+        for path in paths {
+            let sanitized_path = sanitize_path(path);
+
+            if sanitized_path.as_os_str().is_empty() {
+                continue;
+            }
+
+            if let Some(entry) = FileEntry::from_path(sanitized_path) {
+                entries.push(entry);
+            }
+        }
+
+        if entries.is_empty() {
+            None
+        } else {
+            Some(Self { entries })
+        }
+    }
+
+    fn to_file_group_descriptor(&self) -> Option<OwnedFormatDataResponse> {
+        let descriptors: Vec<FileDescriptor> = self
+            .entries
+            .iter()
+            .map(|entry| FileDescriptor {
+                attributes: Some(entry.attributes),
+                last_write_time: entry.last_write_time,
+                file_size: entry.file_size,
+                name: entry.name.clone(),
+            })
+            .collect();
+
+        FormatDataResponse::new_file_list(&PackedFileList { files: descriptors })
+            .ok()
+            .map(FormatDataResponse::into_owned)
+    }
+
+    fn to_hdrop(&self) -> Option<OwnedFormatDataResponse> {
+        let mut file_buffer = Vec::new();
+
+        for entry in &self.entries {
+            let mut wide_name: Vec<u8> = to_utf16_bytes(entry.name.as_str());
+            wide_name.push(0);
+            wide_name.push(0);
+            file_buffer.extend_from_slice(&wide_name);
+        }
+
+        file_buffer.extend_from_slice(&[0, 0]);
+
+        const DROPFILES_HEADER_SIZE: u32 = 20;
+
+        let mut data = Vec::with_capacity(DROPFILES_HEADER_SIZE as usize + file_buffer.len());
+        data.extend_from_slice(&DROPFILES_HEADER_SIZE.to_le_bytes());
+        data.extend_from_slice(&[0u8; 8]);
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&file_buffer);
+
+        Some(FormatDataResponse::new_data(data).into_owned())
+    }
+
+    fn handle_file_contents_request(
+        &self,
+        request: &FileContentsRequest,
+    ) -> FileContentsResponse<'static> {
+        let Some(entry) = self.entries.get(request.index as usize).cloned() else {
+            return FileContentsResponse::new_error(request.stream_id).into_owned();
+        };
+
+        if request.flags.contains(FileContentsFlags::SIZE) {
+            let size = entry.file_size.unwrap_or(0);
+            return FileContentsResponse::new_size_response(request.stream_id, size).into_owned();
+        }
+
+        if !request.flags.contains(FileContentsFlags::DATA) {
+            return FileContentsResponse::new_error(request.stream_id).into_owned();
+        }
+
+        if entry.is_directory {
+            return FileContentsResponse::new_error(request.stream_id).into_owned();
+        }
+
+        let Some(file_size) = entry.file_size else {
+            return FileContentsResponse::new_error(request.stream_id).into_owned();
+        };
+
+        if request.position > file_size {
+            return FileContentsResponse::new_error(request.stream_id).into_owned();
+        }
+
+        let mut to_read = u64::from(request.requested_size);
+        let remaining = file_size - request.position;
+        if to_read > remaining {
+            to_read = remaining;
+        }
+
+        let read_len = match usize::try_from(to_read) {
+            Ok(len) => len,
+            Err(_) => usize::MAX,
+        };
+
+        let mut file = match File::open(&entry.path) {
+            Ok(file) => file,
+            Err(err) => {
+                warn!("Failed to open clipboard file {:?}: {err}", entry.path);
+                return FileContentsResponse::new_error(request.stream_id).into_owned();
+            }
+        };
+
+        if let Err(err) = file.seek(SeekFrom::Start(request.position)) {
+            warn!("Failed to seek clipboard file {:?}: {err}", entry.path);
+            return FileContentsResponse::new_error(request.stream_id).into_owned();
+        }
+
+        let mut buffer = vec![0u8; read_len];
+        match file.read(&mut buffer) {
+            Ok(bytes_read) => {
+                buffer.truncate(bytes_read);
+                FileContentsResponse::new_data_response(request.stream_id, buffer).into_owned()
+            }
+            Err(err) => {
+                warn!("Failed to read clipboard file {:?}: {err}", entry.path);
+                FileContentsResponse::new_error(request.stream_id).into_owned()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileEntry {
+    path: PathBuf,
+    name: String,
+    attributes: ClipboardFileAttributes,
+    file_size: Option<u64>,
+    last_write_time: Option<u64>,
+    is_directory: bool,
+}
+
+impl FileEntry {
+    fn from_path(path: PathBuf) -> Option<Self> {
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn!(
+                    "Failed to read metadata for clipboard file {:?}: {err}",
+                    path
+                );
+                return None;
+            }
+        };
+
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())?;
+
+        let is_directory = metadata.is_dir();
+        let file_size = if metadata.is_file() {
+            Some(metadata.len())
+        } else {
+            None
+        };
+
+        let last_write_time = metadata.modified().ok().and_then(system_time_to_filetime);
+
+        let attributes = if is_directory {
+            ClipboardFileAttributes::DIRECTORY
+        } else {
+            ClipboardFileAttributes::ARCHIVE
+        };
+
+        Some(Self {
+            path,
+            name,
+            attributes,
+            file_size,
+            last_write_time,
+            is_directory,
+        })
+    }
+}
+
+fn sanitize_path(path: PathBuf) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut bytes = path.into_os_string().into_vec();
+
+        while bytes
+            .last()
+            .is_some_and(|value| matches!(value, b'\r' | b'\n'))
+        {
+            bytes.pop();
+        }
+
+        PathBuf::from(OsString::from_vec(bytes))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut path_string = path.to_string_lossy().into_owned();
+
+        while path_string.ends_with(['\r', '\n']) {
+            path_string.pop();
+        }
+
+        PathBuf::from(path_string)
+    }
+}
+
+fn system_time_to_filetime(time: SystemTime) -> Option<u64> {
+    const WINDOWS_TO_UNIX_EPOCH_DIFF: u64 = 11_644_473_600;
+
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+
+    let secs = duration.as_secs().checked_add(WINDOWS_TO_UNIX_EPOCH_DIFF)?;
+    let nanos = u64::from(duration.subsec_nanos());
+
+    secs.checked_mul(10_000_000)?.checked_add(nanos / 100)
+}
+
 impl ArboardClipboardBackend {
     fn new(sender: mpsc::UnboundedSender<RdpInputEvent>) -> Self {
         Self {
             sender,
-            last_text: Arc::new(Mutex::new(None)),
+            clipboard_state: Arc::new(Mutex::new(ClipboardState::default())),
             running: Arc::new(AtomicBool::new(false)),
             watcher: None,
             temp_dir: std::env::temp_dir().display().to_string(),
@@ -600,7 +915,7 @@ impl ArboardClipboardBackend {
         self.running.store(true, Ordering::Relaxed);
         let running = Arc::clone(&self.running);
         let sender = self.sender.clone();
-        let last_text = Arc::clone(&self.last_text);
+        let clipboard_state = Arc::clone(&self.clipboard_state);
 
         self.watcher = Some(thread::spawn(move || {
             let mut clipboard = Clipboard::new().ok();
@@ -611,22 +926,24 @@ impl ArboardClipboardBackend {
                 }
 
                 if let Some(cb) = clipboard.as_mut() {
-                    match cb.get_text() {
-                        Ok(text) => {
-                            let mut guard = last_text.lock().unwrap();
-                            if guard.as_deref() != Some(text.as_str()) {
-                                *guard = Some(text.clone());
-                                drop(guard);
+                    let state = ClipboardState::from_clipboard(cb);
 
-                                let formats =
-                                    vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)];
-                                let _ = sender.send(RdpInputEvent::Clipboard(
-                                    ClipboardMessage::SendInitiateCopy(formats),
-                                ));
-                            }
+                    let should_advertise = {
+                        let mut guard = clipboard_state.lock().unwrap();
+                        if *guard != state {
+                            *guard = state.clone();
+                            state.has_any()
+                        } else {
+                            false
                         }
-                        Err(err) => {
-                            trace!("Failed to read clipboard text: {err}");
+                    };
+
+                    if should_advertise {
+                        let formats = state.formats();
+                        if !formats.is_empty() {
+                            let _ = sender.send(RdpInputEvent::Clipboard(
+                                ClipboardMessage::SendInitiateCopy(formats),
+                            ));
                         }
                     }
                 }
@@ -637,15 +954,23 @@ impl ArboardClipboardBackend {
     }
 
     fn advertise_current_clipboard(&self) {
-        if let Some(text) = self.read_clipboard_text() {
-            let mut state = self.last_text.lock().unwrap();
-            if state.as_deref() == Some(text.as_str()) {
+        let mut clipboard = match Clipboard::new() {
+            Ok(clipboard) => clipboard,
+            Err(err) => {
+                trace!("Failed to access clipboard: {err}");
                 return;
             }
-            *state = Some(text);
-            drop(state);
+        };
 
-            let formats = vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)];
+        let state = ClipboardState::from_clipboard(&mut clipboard);
+
+        {
+            let mut guard = self.clipboard_state.lock().unwrap();
+            *guard = state.clone();
+        }
+
+        let formats = state.formats();
+        if !formats.is_empty() {
             let _ = self.sender.send(RdpInputEvent::Clipboard(
                 ClipboardMessage::SendInitiateCopy(formats),
             ));
@@ -653,7 +978,8 @@ impl ArboardClipboardBackend {
     }
 
     fn read_clipboard_text(&self) -> Option<String> {
-        Clipboard::new().ok()?.get_text().ok()
+        let mut clipboard = Clipboard::new().ok()?;
+        ClipboardState::from_clipboard(&mut clipboard).text
     }
 
     fn set_clipboard_text(&self, text: &str) {
@@ -665,6 +991,10 @@ impl ArboardClipboardBackend {
             }
             Err(err) => warn!("Failed to access clipboard: {err}"),
         }
+
+        let mut state = self.clipboard_state.lock().unwrap();
+        state.text = Some(text.to_owned());
+        state.files = None;
     }
 }
 
@@ -684,6 +1014,9 @@ impl CliprdrBackend for ArboardClipboardBackend {
 
     fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
         ClipboardGeneralCapabilityFlags::USE_LONG_FORMAT_NAMES
+            | ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED
+            | ClipboardGeneralCapabilityFlags::FILECLIP_NO_FILE_PATHS
+            | ClipboardGeneralCapabilityFlags::HUGE_FILE_SUPPORT_ENABLED
     }
 
     fn on_ready(&mut self) {
@@ -714,54 +1047,64 @@ impl CliprdrBackend for ArboardClipboardBackend {
     }
 
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
-        if request.format == ClipboardFormatId::CF_UNICODETEXT {
-            let text =
-                { self.last_text.lock().unwrap().clone() }.or_else(|| self.read_clipboard_text());
+        let response = if request.format == ClipboardFormatId::CF_UNICODETEXT {
+            let text = { self.clipboard_state.lock().unwrap().text.clone() }
+                .or_else(|| self.read_clipboard_text());
 
-            let response = match text {
+            match text {
                 Some(text) => {
-                    let mut guard = self.last_text.lock().unwrap();
-                    *guard = Some(text.clone());
-                    drop(guard);
+                    {
+                        let mut guard = self.clipboard_state.lock().unwrap();
+                        guard.text = Some(text.clone());
+                    }
                     FormatDataResponse::new_unicode_string(&text).into_owned()
                 }
                 None => FormatDataResponse::new_error().into_owned(),
-            };
-
-            let _ = self
-                .sender
-                .send(RdpInputEvent::Clipboard(ClipboardMessage::SendFormatData(
-                    response,
-                )));
+            }
+        } else if is_file_descriptor_format(request.format) {
+            let files = self.clipboard_state.lock().unwrap().files.clone();
+            files
+                .and_then(|files| files.to_file_group_descriptor())
+                .unwrap_or_else(|| FormatDataResponse::new_error().into_owned())
+        } else if request.format == ClipboardFormatId::CF_HDROP {
+            let files = self.clipboard_state.lock().unwrap().files.clone();
+            files
+                .and_then(|files| files.to_hdrop())
+                .unwrap_or_else(|| FormatDataResponse::new_error().into_owned())
         } else {
-            let response = FormatDataResponse::new_error().into_owned();
-            let _ = self
-                .sender
-                .send(RdpInputEvent::Clipboard(ClipboardMessage::SendFormatData(
-                    response,
-                )));
-        }
+            FormatDataResponse::new_error().into_owned()
+        };
+
+        let _ = self
+            .sender
+            .send(RdpInputEvent::Clipboard(ClipboardMessage::SendFormatData(
+                response,
+            )));
     }
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         match response.to_unicode_string() {
             Ok(text) => {
-                {
-                    let mut state = self.last_text.lock().unwrap();
-                    *state = Some(text.clone());
-                }
                 self.set_clipboard_text(&text);
             }
             Err(err) => warn!("Failed to decode clipboard data: {err}"),
         }
     }
 
-    fn on_file_contents_request(&mut self, _request: FileContentsRequest) {
-        warn!("File clipboard transfer is not supported");
+    fn on_file_contents_request(&mut self, request: FileContentsRequest) {
+        let files = self.clipboard_state.lock().unwrap().files.clone();
+
+        let response = files
+            .map(|files| files.handle_file_contents_request(&request))
+            .unwrap_or_else(|| FileContentsResponse::new_error(request.stream_id).into_owned());
+
+        let _ = self
+            .sender
+            .send(RdpInputEvent::ClipboardFileContents(response));
     }
 
     fn on_file_contents_response(&mut self, _response: FileContentsResponse<'_>) {
-        warn!("File clipboard transfer is not supported");
+        warn!("Receiving file clipboard data is not supported");
     }
 
     fn on_lock(&mut self, _data_id: LockDataId) {}
@@ -855,6 +1198,22 @@ async fn active_session<T: RdpEventSender>(
                             }
                         } else  {
                             warn!("Clipboard event received, but Cliprdr is not available");
+                            Vec::new()
+                        }
+                    }
+                    RdpInputEvent::ClipboardFileContents(response) => {
+                        if let Some(cliprdr) =
+                            active_stage.get_svc_processor::<cliprdr::CliprdrClient>()
+                        {
+                            let svc_messages = cliprdr
+                                .submit_file_contents(response)
+                                .map_err(|e| session::custom_err!("CLIPRDR", e))?;
+
+                            let frame = active_stage.process_svc_processor_messages(svc_messages)?;
+
+                            vec![ActiveStageOutput::ResponseFrame(frame)]
+                        } else {
+                            warn!("File contents response received, but Cliprdr is not available");
                             Vec::new()
                         }
                     }
