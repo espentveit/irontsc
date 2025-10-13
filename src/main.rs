@@ -5,7 +5,7 @@ use gtk::{
     prelude::*,
 };
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,6 +23,13 @@ use ironrdp::cliprdr::backend::CliprdrBackendFactory;
 
 const APP_ID: &str = "org.gtk_rs.IronTsc";
 const DEFAULT_RDP_FILE: &str = "default.rdp";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseIntent {
+    None,
+    User,
+    Programmatic,
+}
 
 /// Convert Windows NT status code to user-friendly error message
 fn get_friendly_error_message(ntstatus_code: u32) -> Option<(&'static str, &'static str)> {
@@ -1285,6 +1292,9 @@ fn create_remote_desktop_window(
     let (output_event_sender, mut output_event_receiver) =
         tokio::sync::mpsc::unbounded_channel::<RdpOutputEvent>();
 
+    // Track why the window is being closed
+    let close_intent = Rc::new(Cell::new(CloseIntent::None));
+
     // Create the RDP widget
     let rdp_widget = GtkRdpWidget::new(input_event_sender.clone());
     let rdp_widget = Rc::new(rdp_widget);
@@ -1461,6 +1471,8 @@ fn create_remote_desktop_window(
     let last_frame_size_clone = last_frame_size.clone();
 
     // Bridge tokio channel to GTK main thread
+    let close_intent_for_events = close_intent.clone();
+
     glib::spawn_future_local(async move {
         while let Some(event) = output_event_receiver.recv().await {
             match event {
@@ -1494,11 +1506,13 @@ fn create_remote_desktop_window(
                         .build();
 
                     let window_to_close = rd_window_events.clone();
+                    let close_intent_for_dialog = close_intent_for_events.clone();
                     dialog.choose(
                         Some(&rd_window_events),
                         None::<&gtk::gio::Cancellable>,
                         move |_result| {
                             // Close window after user dismisses the error dialog
+                            close_intent_for_dialog.set(CloseIntent::Programmatic);
                             window_to_close.close();
                         },
                     );
@@ -1508,6 +1522,7 @@ fn create_remote_desktop_window(
                         Ok(reason) => println!("RDP session terminated: {:?}", reason),
                         Err(error) => eprintln!("RDP session error: {:?}", error),
                     }
+                    close_intent_for_events.set(CloseIntent::Programmatic);
                     rd_window_events.close();
                 }
                 RdpOutputEvent::PointerDefault => {
@@ -1525,12 +1540,6 @@ fn create_remote_desktop_window(
                 }
             }
         }
-    });
-
-    // Setup close button handler
-    let input_sender_close = input_event_sender.clone();
-    close_button.connect_clicked(move |_| {
-        let _ = input_sender_close.send(RdpInputEvent::Close);
     });
 
     // Add drag functionality using the overlay for consistent coordinates
@@ -1742,11 +1751,9 @@ fn create_remote_desktop_window(
 
     // Close button functionality
     let rd_window_for_close = rd_window.clone();
-    let main_window_for_close_button = main_window.clone();
+    let close_intent_for_button = close_intent.clone();
     close_button.connect_clicked(move |_| {
-        // Show the main window again before closing
-        main_window_for_close_button.set_visible(true);
-        main_window_for_close_button.present();
+        close_intent_for_button.set(CloseIntent::User);
         rd_window_for_close.close();
     });
 
@@ -1894,12 +1901,30 @@ fn create_remote_desktop_window(
     // Handle window close
     let main_window_for_close = main_window.clone();
     let input_sender_window_close = input_event_sender.clone();
+    let close_intent_for_request = close_intent.clone();
+    let app_for_close = app.clone();
     rd_window.connect_close_request(move |_| {
         // Send close event to RDP client
         let _ = input_sender_window_close.send(RdpInputEvent::Close);
-        // Show the main window again when remote desktop closes
-        main_window_for_close.set_visible(true);
-        main_window_for_close.present();
+
+        match close_intent_for_request.get() {
+            CloseIntent::Programmatic => {
+                // Show the main window again when remote desktop closes on its own
+                main_window_for_close.set_visible(true);
+
+                // Restore focus without re-centering the window so it stays put
+                with_toplevel(&main_window_for_close, |tl| {
+                    tl.focus(gdk::CURRENT_TIME);
+                });
+            }
+            _ => {
+                // User initiated close – quit the entire application
+                app_for_close.quit();
+            }
+        }
+
+        close_intent_for_request.set(CloseIntent::None);
+
         gtk::glib::Propagation::Proceed
     });
 
