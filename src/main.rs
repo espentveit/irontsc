@@ -318,6 +318,42 @@ enum ColorDepth {
     Bpp32, // Highest quality (32 bit)
 }
 
+const DPI_SCALE_OPTIONS: &[(Option<u32>, &str)] = &[
+    (None, "Current screen"),
+    (Some(100), "100%"),
+    (Some(125), "125%"),
+    (Some(150), "150%"),
+    (Some(175), "175%"),
+    (Some(200), "200%"),
+    (Some(225), "225%"),
+    (Some(250), "250%"),
+    (Some(300), "300%"),
+    (Some(350), "350%"),
+    (Some(400), "400%"),
+    (Some(450), "450%"),
+    (Some(500), "500%"),
+];
+
+fn dpi_value_from_index(index: u32) -> Option<u32> {
+    DPI_SCALE_OPTIONS
+        .get(index as usize)
+        .map(|(value, _)| *value)
+        .unwrap_or(None)
+}
+
+fn dpi_index_from_value(value: Option<u32>) -> u32 {
+    DPI_SCALE_OPTIONS
+        .iter()
+        .position(|(candidate, _)| *candidate == value)
+        .unwrap_or(0) as u32
+}
+
+fn is_supported_dpi_value(value: u32) -> bool {
+    DPI_SCALE_OPTIONS
+        .iter()
+        .any(|(candidate, _)| candidate.map(|v| v == value).unwrap_or(false))
+}
+
 impl ColorDepth {
     fn to_bpp(&self) -> u16 {
         match self {
@@ -382,6 +418,8 @@ struct RdpSettings {
     session_bpp: u16,
     #[serde(default)]
     full_screen: bool,
+    #[serde(default)]
+    dpi_scaling: Option<u32>,
 }
 
 fn default_width() -> u16 {
@@ -404,6 +442,7 @@ impl Default for RdpSettings {
             desktopheight: 768,
             session_bpp: 32,
             full_screen: false,
+            dpi_scaling: None,
         }
     }
 }
@@ -461,6 +500,15 @@ impl RdpSettings {
                         settings.session_bpp = bpp;
                     }
                 }
+                "desktopscalefactor" | "devicescalefactor" => {
+                    if let Ok(scale) = value.parse::<u32>() {
+                        if scale == 0 {
+                            settings.dpi_scaling = None;
+                        } else if is_supported_dpi_value(scale) {
+                            settings.dpi_scaling = Some(scale);
+                        }
+                    }
+                }
                 "screen mode id" => {
                     if let Ok(mode) = value.parse::<u8>() {
                         settings.full_screen = mode == 2;
@@ -474,63 +522,66 @@ impl RdpSettings {
     }
 
     fn to_rdp_format(&self) -> String {
-        format!(
-            "screen mode id:i:{}\n\
-            use multimon:i:0\n\
-            desktopwidth:i:{}\n\
-            desktopheight:i:{}\n\
-            session bpp:i:{}\n\
-            winposstr:s:0,3,0,0,800,600\n\
-            compression:i:1\n\
-            keyboardhook:i:2\n\
-            audiocapturemode:i:0\n\
-            videoplaybackmode:i:1\n\
-            connection type:i:7\n\
-            networkautodetect:i:1\n\
-            bandwidthautodetect:i:1\n\
-            displayconnectionbar:i:1\n\
-            enableworkspacereconnect:i:0\n\
-            disable wallpaper:i:0\n\
-            allow font smoothing:i:0\n\
-            allow desktop composition:i:0\n\
-            disable full window drag:i:1\n\
-            disable menu anims:i:1\n\
-            disable themes:i:0\n\
-            disable cursor setting:i:0\n\
-            bitmapcachepersistenable:i:1\n\
-            full address:s:{}\n\
-            audiomode:i:0\n\
-            redirectprinters:i:1\n\
-            redirectcomports:i:0\n\
-            redirectsmartcards:i:1\n\
-            redirectclipboard:i:1\n\
-            redirectposdevices:i:0\n\
-            autoreconnection enabled:i:1\n\
-            authentication level:i:2\n\
-            prompt for credentials:i:0\n\
-            negotiate security layer:i:1\n\
-            remoteapplicationmode:i:0\n\
-            alternate shell:s:\n\
-            shell working directory:s:\n\
-            gatewayhostname:s:\n\
-            gatewayusagemethod:i:4\n\
-            gatewaycredentialssource:i:4\n\
-            gatewayprofileusagemethod:i:0\n\
-            promptcredentialonce:i:0\n\
-            gatewaybrokeringtype:i:0\n\
-            use redirection server name:i:0\n\
-            rdgiskdcproxy:i:0\n\
-            kdcproxyname:s:\n\
-            username:s:{}\n\
-            domain:s:{}",
-            if self.full_screen { 2 } else { 1 },
-            self.desktopwidth,
-            self.desktopheight,
-            self.session_bpp,
-            self.server,
-            self.username,
-            self.domain
-        )
+        let mut lines = vec![
+            format!("screen mode id:i:{}", if self.full_screen { 2 } else { 1 }),
+            "use multimon:i:0".to_string(),
+            format!("desktopwidth:i:{}", self.desktopwidth),
+            format!("desktopheight:i:{}", self.desktopheight),
+            format!("session bpp:i:{}", self.session_bpp),
+        ];
+
+        if let Some(scale) = self.dpi_scaling {
+            lines.push(format!("desktopscalefactor:i:{scale}"));
+            lines.push(format!("devicescalefactor:i:{scale}"));
+        }
+
+        lines.extend([
+            "winposstr:s:0,3,0,0,800,600".to_string(),
+            "compression:i:1".to_string(),
+            "keyboardhook:i:2".to_string(),
+            "audiocapturemode:i:0".to_string(),
+            "videoplaybackmode:i:1".to_string(),
+            "connection type:i:7".to_string(),
+            "networkautodetect:i:1".to_string(),
+            "bandwidthautodetect:i:1".to_string(),
+            "displayconnectionbar:i:1".to_string(),
+            "enableworkspacereconnect:i:0".to_string(),
+            "disable wallpaper:i:0".to_string(),
+            "allow font smoothing:i:0".to_string(),
+            "allow desktop composition:i:0".to_string(),
+            "disable full window drag:i:1".to_string(),
+            "disable menu anims:i:1".to_string(),
+            "disable themes:i:0".to_string(),
+            "disable cursor setting:i:0".to_string(),
+            "bitmapcachepersistenable:i:1".to_string(),
+            format!("full address:s:{}", self.server),
+            "audiomode:i:0".to_string(),
+            "redirectprinters:i:1".to_string(),
+            "redirectcomports:i:0".to_string(),
+            "redirectsmartcards:i:1".to_string(),
+            "redirectclipboard:i:1".to_string(),
+            "redirectposdevices:i:0".to_string(),
+            "autoreconnection enabled:i:1".to_string(),
+            "authentication level:i:2".to_string(),
+            "prompt for credentials:i:0".to_string(),
+            "negotiate security layer:i:1".to_string(),
+            "remoteapplicationmode:i:0".to_string(),
+            "alternate shell:s:".to_string(),
+            "shell working directory:s:".to_string(),
+            "gatewayhostname:s:".to_string(),
+            "gatewayusagemethod:i:4".to_string(),
+            "gatewaycredentialssource:i:4".to_string(),
+            "gatewayprofileusagemethod:i:0".to_string(),
+            "promptcredentialonce:i:0".to_string(),
+            "gatewaybrokeringtype:i:0".to_string(),
+            "use redirection server name:i:0".to_string(),
+            "rdgiskdcproxy:i:0".to_string(),
+            "kdcproxyname:s:".to_string(),
+            format!("username:s:{}", self.username),
+            format!("domain:s:{}", self.domain),
+        ]);
+
+        lines.join("\n")
     }
 
     fn save_to_file(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -581,6 +632,14 @@ impl RdpSettings {
 
     fn set_color_depth(&mut self, depth: ColorDepth) {
         self.session_bpp = depth.to_bpp();
+    }
+
+    fn get_dpi_scaling(&self) -> Option<u32> {
+        self.dpi_scaling
+    }
+
+    fn set_dpi_scaling(&mut self, scaling: Option<u32>) {
+        self.dpi_scaling = scaling;
     }
 }
 
@@ -1178,11 +1237,28 @@ fn create_remote_desktop_window(
             })
         });
 
-    let effective_scale = primary_monitor
+    let detected_scale = primary_monitor
         .as_ref()
         .map(|monitor| GtkRdpWidget::monitor_fractional_scale(monitor))
         .unwrap_or(1.0)
         .clamp(1.0, 5.0);
+
+    let manual_scale_percent = rdp_settings
+        .get_dpi_scaling()
+        .map(|scale| scale.clamp(100, 500));
+
+    let (effective_scale, initial_scale_percent) = if let Some(scale_percent) = manual_scale_percent
+    {
+        (
+            (scale_percent as f64 / 100.0).clamp(1.0, 5.0),
+            scale_percent,
+        )
+    } else {
+        (
+            detected_scale,
+            ((detected_scale * 100.0).round() as u32).clamp(100, 500),
+        )
+    };
 
     let mut initial_width = logical_config_width as f64;
     let mut initial_height = logical_config_height as f64;
@@ -1197,8 +1273,6 @@ fn create_remote_desktop_window(
         initial_width = initial_width * effective_scale;
         initial_height = initial_height * effective_scale;
     }
-
-    let initial_scale_percent = ((effective_scale * 100.0).round() as u32).clamp(100, 500);
 
     let clamp_dimension =
         |value: f64| -> u16 { value.round().clamp(200.0, u16::MAX as f64) as u16 };
@@ -1881,6 +1955,7 @@ fn create_remote_desktop_window(
         rdp_settings.desktopheight,
         initial_scale_percent,
     ))));
+    let manual_scale_percent_for_resize = manual_scale_percent;
     let compute_resize: Rc<
         dyn Fn(
             &ApplicationWindow,
@@ -1888,7 +1963,7 @@ fn create_remote_desktop_window(
             i32,
             i32,
         ) -> Option<(u16, u16, u32, u32, u32)>,
-    > = Rc::new(|window, area, width, height| {
+    > = Rc::new(move |window, area, width, height| {
         if width <= 0 || height <= 0 {
             return None;
         }
@@ -1896,14 +1971,13 @@ fn create_remote_desktop_window(
         let widget_scale = area.scale_factor().max(1) as f64;
         let window_scale = window.scale_factor().max(1) as f64;
         let fallback_scale = widget_scale.max(window_scale);
-
-        let mut effective_scale = fallback_scale;
+        let mut detected_scale = fallback_scale;
         let mut monitor_limit: Option<(u32, u32)> = None;
 
         if let Some(surface) = window.surface() {
             let surface_scale = GtkRdpWidget::surface_fractional_scale(&surface);
             if surface_scale > 0.0 {
-                effective_scale = surface_scale;
+                detected_scale = surface_scale;
             }
 
             let display = surface.display();
@@ -1921,12 +1995,23 @@ fn create_remote_desktop_window(
                 monitor_limit = Some((monitor_width, monitor_height));
 
                 if surface_scale <= 0.0 && monitor_scale > 0.0 {
-                    effective_scale = monitor_scale;
+                    detected_scale = monitor_scale;
                 }
             }
         }
 
-        effective_scale = effective_scale.clamp(1.0, 5.0);
+        detected_scale = detected_scale.clamp(1.0, 5.0);
+
+        let (effective_scale, scale_factor_percent) =
+            if let Some(manual_percent) = manual_scale_percent_for_resize {
+                (
+                    (manual_percent as f64 / 100.0).clamp(1.0, 5.0),
+                    manual_percent,
+                )
+            } else {
+                let percent = ((detected_scale * 100.0).round() as u32).clamp(100, 500);
+                (detected_scale, percent)
+            };
 
         let logical_width = width.max(1) as f64;
         let logical_height = height.max(1) as f64;
@@ -1942,8 +2027,6 @@ fn create_remote_desktop_window(
             width_pixels = width_pixels.min(max_width);
             height_pixels = height_pixels.min(max_height);
         }
-
-        let scale_factor_percent = ((effective_scale * 100.0).round() as u32).clamp(100, 500);
 
         Some((
             width_pixels.min(u16::MAX as u32) as u16,
@@ -2449,6 +2532,26 @@ fn build_ui(app: &Application) {
     colors_frame.set_child(Some(&colors_box));
     display_page.append(&colors_frame);
 
+    // DPI scaling
+    let dpi_frame = gtk::Frame::new(Some("DPI scaling"));
+    let dpi_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    dpi_box.set_margin_top(5);
+    dpi_box.set_margin_bottom(5);
+    dpi_box.set_margin_start(5);
+    dpi_box.set_margin_end(5);
+
+    let dpi_label = gtk::Label::new(Some("Set DPI scaling:"));
+    dpi_label.set_xalign(0.0);
+    dpi_box.append(&dpi_label);
+
+    let dpi_labels: Vec<&str> = DPI_SCALE_OPTIONS.iter().map(|(_, label)| *label).collect();
+    let dpi_dropdown = gtk::DropDown::from_strings(&dpi_labels);
+    dpi_dropdown.set_selected(dpi_index_from_value(settings_for_ui.get_dpi_scaling()));
+    dpi_box.append(&dpi_dropdown);
+
+    dpi_frame.set_child(Some(&dpi_box));
+    display_page.append(&dpi_frame);
+
     notebook.append_page(&display_page, Some(&gtk::Label::new(Some("Display"))));
 
     // Show/Hide options button
@@ -2544,16 +2647,25 @@ fn build_ui(app: &Application) {
         rdp_settings_for_colors.borrow_mut().set_color_depth(depth);
     });
 
+    // DPI dropdown handler
+    let rdp_settings_for_dpi = rdp_settings.clone();
+    dpi_dropdown.connect_selected_notify(move |dropdown| {
+        let scale = dpi_value_from_index(dropdown.selected());
+        rdp_settings_for_dpi.borrow_mut().set_dpi_scaling(scale);
+    });
+
     // Save button handler
     let rdp_settings_for_save = rdp_settings.clone();
     let server_input_for_save = server_input.clone();
     let username_input_for_save = username_input.clone();
     let domain_input_for_save = domain_input.clone();
+    let dpi_dropdown_for_save = dpi_dropdown.clone();
     save_button.connect_clicked(move |_| {
         let mut settings = rdp_settings_for_save.borrow_mut();
         settings.server = server_input_for_save.buffer().text().to_string();
         settings.username = username_input_for_save.buffer().text().to_string();
         settings.domain = domain_input_for_save.buffer().text().to_string();
+        settings.set_dpi_scaling(dpi_value_from_index(dpi_dropdown_for_save.selected()));
 
         if let Err(e) = settings.save_as_default() {
             eprintln!("Failed to save settings: {}", e);
@@ -2565,6 +2677,7 @@ fn build_ui(app: &Application) {
     let server_input_for_save_as = server_input.clone();
     let username_input_for_save_as = username_input.clone();
     let domain_input_for_save_as = domain_input.clone();
+    let dpi_dropdown_for_save_as = dpi_dropdown.clone();
     let window_for_save_as = window_clone.clone();
     save_as_button.connect_clicked(move |_| {
         let file_dialog = gtk::FileDialog::new();
@@ -2574,6 +2687,7 @@ fn build_ui(app: &Application) {
             let server_input = server_input_for_save_as.clone();
             let username_input = username_input_for_save_as.clone();
             let domain_input = domain_input_for_save_as.clone();
+            let dpi_dropdown = dpi_dropdown_for_save_as.clone();
 
             move |result| {
                 if let Ok(file) = result {
@@ -2581,6 +2695,7 @@ fn build_ui(app: &Application) {
                     settings.server = server_input.buffer().text().to_string();
                     settings.username = username_input.buffer().text().to_string();
                     settings.domain = domain_input.buffer().text().to_string();
+                    settings.set_dpi_scaling(dpi_value_from_index(dpi_dropdown.selected()));
 
                     if let Some(path) = file.path() {
                         if let Err(e) = settings.save_to_file(&path) {
@@ -2600,6 +2715,7 @@ fn build_ui(app: &Application) {
     let resolution_slider_for_open = resolution_slider.clone();
     let colors_dropdown_for_open = colors_dropdown.clone();
     let resolution_value_label_for_open = resolution_value_label.clone();
+    let dpi_dropdown_for_open = dpi_dropdown.clone();
     let window_for_open = window_clone.clone();
 
     open_button.connect_clicked(move |_| {
@@ -2613,6 +2729,7 @@ fn build_ui(app: &Application) {
             let resolution_slider = resolution_slider_for_open.clone();
             let colors_dropdown = colors_dropdown_for_open.clone();
             let resolution_value_label = resolution_value_label_for_open.clone();
+            let dpi_dropdown = dpi_dropdown_for_open.clone();
 
             move |result| {
                 if let Ok(file) = result {
@@ -2629,6 +2746,9 @@ fn build_ui(app: &Application) {
                             let color_depth = loaded_settings.get_color_depth();
                             colors_dropdown.set_selected(color_depth.to_index() as u32);
 
+                            let dpi_index = dpi_index_from_value(loaded_settings.get_dpi_scaling());
+                            dpi_dropdown.set_selected(dpi_index);
+
                             *rdp_settings.borrow_mut() = loaded_settings;
                         }
                     }
@@ -2643,6 +2763,7 @@ fn build_ui(app: &Application) {
     let username_input_for_connect = username_input.clone();
     let domain_input_for_connect = domain_input.clone();
     let password_input_for_connect = password_input.clone();
+    let dpi_dropdown_for_connect = dpi_dropdown.clone();
     let window_for_connect = window_clone.clone();
     let app_for_connect = app.clone();
 
@@ -2666,6 +2787,7 @@ fn build_ui(app: &Application) {
         settings.server = server_text.to_string();
         settings.username = username_text.to_string();
         settings.domain = domain_text.to_string();
+        settings.set_dpi_scaling(dpi_value_from_index(dpi_dropdown_for_connect.selected()));
 
         if let Err(err) = settings.save_as_default() {
             eprintln!("Failed to save default RDP settings: {err}");
