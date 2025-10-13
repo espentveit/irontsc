@@ -1,0 +1,15 @@
+[package]
+name = "drdynvc"
+version = "0.1.0"
+edition = "2021"
+authors = ["irontsc contributors"]
+description = "Minimal DRDYNVC (Dynamic Virtual Channel) client implementation"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.5"
+thiserror = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]

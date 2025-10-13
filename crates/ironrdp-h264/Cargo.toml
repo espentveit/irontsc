@@ -1,0 +1,27 @@
+[package]
+name = "ironrdp-h264"
+version = "0.1.0"
+edition = "2021"
+authors = ["irontsc contributors"]
+description = "H.264 decoder for RDPEGFX (AVC420/AVC444)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.5"
+thiserror = "1.0"
+tracing = "0.1"
+
+# FFmpeg bindings
+ffmpeg-next = { version = "7.1", optional = true }
+
+[features]
+default = ["ffmpeg-sw"]
+ffmpeg-sw = ["ffmpeg-next"]
+# Future hardware acceleration features
+ffmpeg-d3d11va = ["ffmpeg-next"]
+ffmpeg-vaapi = ["ffmpeg-next"]
+ffmpeg-videotoolbox = ["ffmpeg-next"]
+ffmpeg-cuda = ["ffmpeg-next"]
+
+[dev-dependencies]
