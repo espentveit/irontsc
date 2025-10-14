@@ -1,3 +1,13 @@
+[workspace]
+members = [
+    ".",
+    "crates/drdynvc",
+    "crates/zgfx",
+    "crates/ironrdp-gfx",
+    "crates/ironrdp-h264",
+    "crates/ironrdp-dvc-local",
+]
+
 [package]
 name = "irontsc"
 version = "0.1.0"
@@ -40,3 +50,18 @@ ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 adw = { version = "0.8.0", package = "libadwaita", features = ["v1_6"] }
 arboard = "3.6.1"
+
+# RDPEGFX + H.264 support
+drdynvc = { path = "crates/drdynvc" }
+zgfx = { path = "crates/zgfx" }
+ironrdp-gfx = { path = "crates/ironrdp-gfx" }
+ironrdp-h264 = { path = "crates/ironrdp-h264", optional = true }
+ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP" }
+
+[features]
+default = []
+h264 = ["ironrdp-h264"]
+
+[patch."https://github.com/Devolutions/IronRDP"]
+ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
