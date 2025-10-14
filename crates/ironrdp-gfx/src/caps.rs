@@ -49,21 +49,26 @@ impl CapabilitySet {
         // RDP 8.0 (no H.264 support)
         caps.push(Self::new(cap_version::V8, base_flags));
 
-        // RDP 8.1+ with optional H.264/AVC420
+        // RDP 8.1 with AVC420 support (software encoding)
         let mut flags_81 = base_flags;
         if avc420_enabled {
             flags_81 |= cap_flags::AVC420_ENABLED;
         }
-
         caps.push(Self::new(cap_version::V81, flags_81));
-        caps.push(Self::new(cap_version::V10, flags_81));
-        caps.push(Self::new(cap_version::V101, flags_81));
-        caps.push(Self::new(cap_version::V102, flags_81));
-        caps.push(Self::new(cap_version::V103, flags_81));
-        caps.push(Self::new(cap_version::V104, flags_81));
-        caps.push(Self::new(cap_version::V105, flags_81));
-        caps.push(Self::new(cap_version::V106, flags_81));
-        caps.push(Self::new(cap_version::V107, flags_81));
+
+        // RDP 10.0+ with AVC444 support (hardware encoding)
+        // By NOT setting AVC_DISABLED, we advertise AVC444 capability
+        // This enables hardware-accelerated H.264 encoding on the server
+        let flags_10 = base_flags;
+
+        caps.push(Self::new(cap_version::V10, flags_10));
+        caps.push(Self::new(cap_version::V101, flags_10));
+        caps.push(Self::new(cap_version::V102, flags_10));
+        caps.push(Self::new(cap_version::V103, flags_10));
+        caps.push(Self::new(cap_version::V104, flags_10));
+        caps.push(Self::new(cap_version::V105, flags_10));
+        caps.push(Self::new(cap_version::V106, flags_10));
+        caps.push(Self::new(cap_version::V107, flags_10));
 
         caps
     }

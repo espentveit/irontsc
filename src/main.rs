@@ -15,7 +15,18 @@ mod config;
 mod gfx;
 mod gfx_channel;
 mod rdp;
-mod ws; // Add websocket compatibility module
+mod ws;
+mod h264_codec_caps;
+
+// Video Redirection support (MS-RDPEVOR)
+#[cfg(feature = "video-redirection")]
+mod video_redirect;
+#[cfg(feature = "video-redirection")]
+mod video_control_channel;
+#[cfg(feature = "video-redirection")]
+mod video_data_channel;
+#[cfg(feature = "video-redirection")]
+mod geometry_channel;
 
 use crate::config::{ClipboardType, Config, Destination};
 use crate::rdp::{
@@ -239,7 +250,16 @@ fn create_rdp_config(
         ime_file_name: "".to_string(),
         dig_product_id: "".to_string(),
         hardware_id: None,
-        bitmap: None,
+        bitmap: {
+            // Inject H.264/AVC444 codec support for RDPEGFX hardware encoding
+            match crate::h264_codec_caps::create_bitmap_config_with_h264(false, 32) {
+                Ok(config) => Some(config),
+                Err(e) => {
+                    tracing::warn!("Failed to create H.264 bitmap config: {}", e);
+                    None
+                }
+            }
+        },
         request_data: None,
         enable_audio_playback: false,
         performance_flags: PerformanceFlags::empty(),

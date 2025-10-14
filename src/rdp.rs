@@ -276,6 +276,48 @@ async fn connect(
         info!("RDPEGFX support disabled (rebuild with --features h264 to enable)");
     }
 
+    // Add Video Redirection channels if feature is enabled
+    #[cfg(feature = "video-redirection")]
+    {
+        use crate::video_redirect::VideoRedirectionManager;
+        use crate::video_control_channel::VideoControlProcessor;
+        use crate::video_data_channel::VideoDataProcessor;
+        use crate::geometry_channel::GeometryProcessor;
+
+        info!("Initializing Video Redirection (MS-RDPEVOR) support...");
+
+        // Create a simple event sender for video (sends to nowhere during init)
+        struct DummyEventSender;
+        impl RdpEventSender for DummyEventSender {
+            fn send_event(&self, _event: RdpOutputEvent) -> Result<(), ()> {
+                Ok(()) // Silently ignore during connection phase
+            }
+        }
+
+        // Create shared video redirection manager
+        let manager = Arc::new(Mutex::new(
+            VideoRedirectionManager::new(Box::new(DummyEventSender))
+                .expect("Failed to initialize Video Redirection manager")
+        ));
+
+        // Register all three channels
+        let control_processor = VideoControlProcessor::new(Arc::clone(&manager));
+        let data_processor = VideoDataProcessor::new(Arc::clone(&manager));
+        let geometry_processor = GeometryProcessor::new(Arc::clone(&manager));
+
+        drdynvc = drdynvc
+            .with_dynamic_channel(control_processor)
+            .with_dynamic_channel(data_processor)
+            .with_dynamic_channel(geometry_processor);
+
+        info!("Video Redirection channels registered with DRDYNVC (Control + Data + Geometry)");
+    }
+
+    #[cfg(not(feature = "video-redirection"))]
+    {
+        info!("Video Redirection support disabled (rebuild with --features video-redirection to enable)");
+    }
+
     // TODO: DVC proxies not yet implemented
     // Instantiate all DVC proxies
     // for proxy in config.dvc_pipe_proxies.iter() {

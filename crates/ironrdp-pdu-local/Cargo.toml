@@ -1,0 +1,47 @@
+[package]
+name = "ironrdp-pdu"
+version = "0.6.0"
+readme = "README.md"
+description = "RDP PDU encoding and decoding (H.264 patched)"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/Devolutions/IronRDP"
+repository = "https://github.com/Devolutions/IronRDP"
+authors = ["Devolutions Inc. <infos@devolutions.net>"]
+keywords = ["rdp", "pdu"]
+categories = ["encoding"]
+
+[lib]
+doctest = false
+# test = false
+
+[features]
+default = []
+std = ["alloc", "ironrdp-error/std", "ironrdp-core/std"]
+alloc = ["ironrdp-core/alloc", "ironrdp-error/alloc"]
+qoi = []
+qoiz = ["qoi"]
+
+[dependencies]
+bitflags = "2.9"
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1", features = ["std"] }
+ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
+tap = "1"
+
+# TODO: get rid of these dependencies (related code should probably go into another crate)
+bit_field = "0.10"
+byteorder = "1.5" # TODO: remove
+der-parser = "10.0"
+thiserror = "2.0"
+md5 = { package = "md-5", version = "0.10" }
+num-bigint = "0.4"
+num-derive = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
+sha1 = "0.10"
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+pkcs1 = "0.7"
+
+[dev-dependencies]
+expect-test = "1"
+lazy_static = "1"
