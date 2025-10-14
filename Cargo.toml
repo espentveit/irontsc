@@ -6,6 +6,9 @@ members = [
     "crates/ironrdp-gfx",
     "crates/ironrdp-h264",
     "crates/ironrdp-dvc-local",
+    "crates/ironrdp-video",
+    "crates/ironrdp-geometry",
+
 ]
 
 [package]
@@ -58,10 +61,14 @@ ironrdp-gfx = { path = "crates/ironrdp-gfx" }
 ironrdp-h264 = { path = "crates/ironrdp-h264", optional = true }
 ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
 ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP" }
+# Video Redirection (MS-RDPEVOR) support
+ironrdp-video = { path = "crates/ironrdp-video", optional = true }
+ironrdp-geometry = { path = "crates/ironrdp-geometry", optional = true }
 
 [features]
 default = []
 h264 = ["ironrdp-h264"]
+video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264"]
 
 [patch."https://github.com/Devolutions/IronRDP"]
 ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
