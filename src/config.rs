@@ -469,6 +469,7 @@ impl Config {
             pointer_software_rendering: false,
             performance_flags: PerformanceFlags::default(),
             timezone_info: TimezoneInfo::default(),
+            correlation_id: None,  // Will be auto-generated if needed
         };
 
         let rdcleanpath = args

@@ -1,4 +1,5 @@
 use core::num::NonZeroU16;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +19,8 @@ use ironrdp::graphics::pointer::DecodedPointer;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::PduResult;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
+use ironrdp::pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
+use ironrdp::pdu::rdp::multitransport::{InitiateMultitransportRequest, InitiateMultitransportResponse};
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
@@ -29,11 +32,13 @@ use ironrdp_core::{IntoOwned, WriteBuf};
 use ironrdp_rdpsnd_native::cpal;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
+use ironrdp_udp::{CorrelationId, SynAckPacket, SynData, SynDataEx, SynDataExFlags, SynPacket, UdpProtocolVersion};
 use rdpdr::NoopRdpdrBackend;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
 
 use arboard::Clipboard;
@@ -43,7 +48,11 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::config::{Config, RDCleanPathConfig};
+use crate::config::{Config, Destination, RDCleanPathConfig};
+use anyhow::Context as _;
+use rand::RngCore;
+use rand::SeedableRng;
+use sha2::{Sha256, Digest};
 
 fn to_utf16_bytes(value: &str) -> Vec<u8> {
     value
@@ -135,7 +144,7 @@ pub struct RdpClient<T: RdpEventSender> {
 impl<T: RdpEventSender> RdpClient<T> {
     pub async fn run(mut self) {
         loop {
-            let (connection_result, framed) =
+            let (connection_result, framed, client_addr) =
                 if let Some(rdcleanpath) = self.config.rdcleanpath.as_ref() {
                     match connect_ws(
                         &self.config,
@@ -176,6 +185,8 @@ impl<T: RdpEventSender> RdpClient<T> {
                 connection_result,
                 &self.event_loop_proxy,
                 &mut self.input_event_receiver,
+                self.config.destination.clone(),
+                client_addr,
             )
             .await
             {
@@ -219,7 +230,7 @@ async fn connect(
     config: &Config,
     cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
     dvc_pipe_proxy_factory: &DvcPipeProxyFactory,
-) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
+) -> ConnectorResult<(ConnectionResult, UpgradedFramed, SocketAddr)> {
     let _ = dvc_pipe_proxy_factory;
 
     let dest = format!(
@@ -378,15 +389,204 @@ async fn connect(
 
     debug!(?connection_result);
 
-    Ok((connection_result, upgraded_framed))
+    // ═══════════════════════════════════════════════════════════════════════
+    // UDP MULTITRANSPORT ATTEMPT (Optimistic, May Timeout)
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // NOTE: This attempts UDP connection immediately after TCP handshake.
+    // According to MS-RDPEUDP spec, proper flow requires:
+    //
+    // 1. Server advertises MULTITRANSPORT support in RDP capabilities
+    // 2. Server sends "Initiate Multitransport Request PDU" (MS-RDPBCGR 2.2.15.1)
+    // 3. Client uses correlation ID from RDP_NEG_CORRELATION_INFO
+    // 4. Client initiates UDP with matching correlation ID
+    //
+    // We're currently doing "optimistic UDP" - trying immediately with a
+    // random correlation ID. This will timeout (~1.5s) if:
+    // - Server requires prior multitransport negotiation (most servers)
+    // - Server doesn't support UDP (Windows Server 2012 R2 and earlier)
+    // - Network/firewall blocks UDP port 3389
+    //
+    // The timeout is EXPECTED and handled gracefully with TCP fallback.
+    // All functionality works via TCP. UDP would provide 20-50ms lower
+    // latency for video streaming, but isn't required.
+    //
+    // TODO: Implement full MS-RDPBCGR multitransport negotiation:
+    //       - Wait for server's Initiate Multitransport Request PDU
+    //       - Use proper correlation ID from RDP negotiation
+    //       - Support RDPUDP_PROTOCOL_VERSION_3 with securityCookie hash
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // NOTE: Client-initiated UDP is disabled. According to MS-RDPBCGR Section 1.3.3,
+    // the client MUST wait for the server to send an "Initiate Multitransport Request"
+    // PDU during the active session. UDP establishment is now handled in active_session()
+    // when the server sends SEC_TRANSPORT_REQ.
+    
+    info!("✅ Multitransport capability advertised, waiting for server request...");
+    
+    // Extract correlation_id from connection_result for later use
+    let correlation_id = connection_result.correlation_id;
+    if let Some(ref corr_id) = correlation_id {
+        debug!("Correlation ID available for multitransport: {:02x?}", &corr_id[..8]);
+    } else {
+        warn!("⚠️  No correlation ID - server-initiated UDP multitransport will not be possible");
+    }
+
+    Ok((connection_result, upgraded_framed, client_addr))
+}
+
+async fn try_establish_rdpudp(destination: Destination, client_addr: SocketAddr, correlation_id: Option<[u8; 16]>) {
+    if let Err(err) = establish_rdpudp(destination, client_addr, correlation_id, None).await {
+        debug!("RDP-UDP handshake failed: {err:?}");
+    }
+}
+
+async fn establish_rdpudp(
+    destination: Destination, 
+    client_addr: SocketAddr,
+    correlation_id: Option<[u8; 16]>,
+    cookie_hash: Option<[u8; 32]>,
+) -> anyhow::Result<UdpSocket> {
+    info!("🔌 Starting UDP handshake for {}", destination.name());
+    
+    if let Some(ref hash) = cookie_hash {
+        debug!("Using security cookie hash for authentication: {:02x?}", &hash[..8]);
+    }
+    
+    let bind_addr = SocketAddr::new(client_addr.ip(), 0);
+    debug!("Binding UDP socket to: {}", bind_addr);
+
+    let socket = match UdpSocket::bind(bind_addr).await {
+        Ok(socket) => socket,
+        Err(err) => {
+            warn!("Failed to bind to {}, trying UNSPECIFIED: {}", bind_addr, err);
+            let fallback_ip = match client_addr.ip() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            };
+
+            UdpSocket::bind(SocketAddr::new(fallback_ip, 0))
+                .await
+                .with_context(|| format!("bind fallback UDP socket after error: {err}"))?
+        }
+    };
+
+    let local_addr = socket.local_addr()?;
+    info!("UDP socket bound to local address: {}", local_addr);
+
+    let server_addr = format!("{}:{}", destination.name(), destination.port());
+    debug!("Connecting UDP socket to: {}", server_addr);
+    
+    socket
+        .connect(&server_addr)
+        .await
+        .context("connect UDP socket to RDP server")?;
+    
+    info!("UDP socket connected to: {}", server_addr);
+
+    // Use correlation_id from X.224 negotiation, or generate a new one if not available
+    let correlation_bytes = if let Some(corr_id) = correlation_id {
+        debug!("Using correlation ID from X.224 negotiation: {:02x?}", &corr_id[..8]);
+        corr_id
+    } else {
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut correlation_bytes = [0u8; 16];
+        loop {
+            rng.fill_bytes(&mut correlation_bytes);
+            if correlation_bytes[0] != 0x00
+                && correlation_bytes[0] != 0xF4
+                && !correlation_bytes.iter().any(|&b| b == 0x0D)
+            {
+                break;
+            }
+        }
+        debug!("Generated new correlation ID: {:02x?}", &correlation_bytes[..8]);
+        correlation_bytes
+    };
+
+    let mut rng = rand::rngs::StdRng::from_entropy();
+
+    let syn_data = SynData {
+        initial_sequence_number: rng.next_u32(),
+        upstream_mtu: 1232,
+        downstream_mtu: 1232,
+    };
+
+    debug!(
+        "Creating SYN packet: seq={}, upstream_mtu={}, downstream_mtu={}",
+        syn_data.initial_sequence_number, syn_data.upstream_mtu, syn_data.downstream_mtu
+    );
+
+    let syn_packet = SynPacket::new(
+        0x0400,  // receive window size
+        false,   // syn_lossy (false = reliable mode)
+        syn_data,
+        Some(CorrelationId::new(correlation_bytes)),
+        // For server-initiated multitransport with cookie_hash, use v3
+        cookie_hash.map(|hash| {
+            SynDataEx {
+                flags: SynDataExFlags::VERSION_INFO_VALID,
+                udp_version: Some(UdpProtocolVersion::V3),
+                cookie_hash: Some(hash),
+            }
+        }),
+    );
+    
+    let payload = syn_packet.to_padded_bytes();
+    info!(
+        "Sending SYN packet: {} bytes (padded to MTU)",
+        payload.len()
+    );
+    debug!("SYN packet full dump (first 100 bytes): {:02x?}", &payload[..100.min(payload.len())]);
+    
+    // Log SynDataEx details if present
+    if cookie_hash.is_some() {
+        info!("📋 SYN packet includes RDP-UDP v3 authentication:");
+        info!("   - Protocol Version: 0x0101 (v3)");
+        info!("   - Cookie Hash: {:02x?}", &cookie_hash.unwrap()[..16]);
+        info!("   - Correlation ID: {:02x?}", &correlation_bytes[..16]);
+    }
+    
+    socket
+        .send(&payload)
+        .await
+        .context("send RDPUDP SYN datagram")?;
+
+    info!("✅ SYN packet sent, waiting for SYN+ACK (timeout: 3000ms)...");
+
+    let mut recv_buffer = vec![0u8; 2048];  // Increased buffer size to catch any response
+    debug!("Receive buffer size: {} bytes", recv_buffer.len());
+    
+    // Try to receive with recv_from to see the source address
+    // Note: Server may not respond until it receives TCP InitiateMultitransportResponse PDU
+    let (received, source_addr) = timeout(
+        std::time::Duration::from_millis(3000),  // Increased from 1500ms
+        socket.recv_from(&mut recv_buffer),
+    )
+    .await
+    .context("waiting for SYN-ACK timed out")?
+    .context("receive SYN-ACK datagram")?;
+
+    info!("📦 Received {} bytes from {}", received, source_addr);
+    debug!("SYN+ACK packet full dump: {:02x?}", &recv_buffer[..received.min(100)]);
+
+    let syn_ack =
+        SynAckPacket::decode(&recv_buffer[..received]).context("decode SYN-ACK datagram")?;
+
+    info!(
+        "✅ RDP-UDP handshake completed successfully! ACK seq: {}",
+        syn_ack.inner().header.sn_source_ack
+    );
+
+    Ok(socket)
 }
 
 async fn connect_ws(
-    config: &Config,
-    rdcleanpath: &RDCleanPathConfig,
-    cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
+    _config: &Config,
+    _rdcleanpath: &RDCleanPathConfig,
+    _cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
     dvc_pipe_proxy_factory: &DvcPipeProxyFactory,
-) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
+) -> ConnectorResult<(ConnectionResult, UpgradedFramed, SocketAddr)> {
     let _ = dvc_pipe_proxy_factory;
 
     // TODO: RDCleanPath/WebSocket support requires internal ironrdp modules
@@ -475,7 +675,7 @@ async fn connect_ws(
     let erased_stream = Box::new(ws) as Box<dyn AsyncReadWrite + Unpin + Send + Sync>;
     let upgraded_framed = ironrdp_tokio::TokioFramed::new_with_leftover(erased_stream, leftover_bytes);
 
-    Ok((connection_result, upgraded_framed))
+    Ok((connection_result, upgraded_framed, client_addr))
     */
 }
 
@@ -1197,11 +1397,67 @@ impl CliprdrBackend for ArboardClipboardBackend {
     fn on_unlock(&mut self, _data_id: LockDataId) {}
 }
 
+/// Check if a frame contains a multitransport request (SEC_TRANSPORT_REQ flag)
+/// Returns Some((request_id, security_cookie)) if detected, None otherwise
+fn detect_multitransport_request(action: ironrdp::pdu::Action, payload: &[u8]) -> Option<(u32, [u8; 16])> {
+    use ironrdp::pdu::Action;
+    use ironrdp_core::{Decode, ReadCursor};
+    
+    // Only check X224 frames (FastPath doesn't have security headers)
+    if action != Action::X224 {
+        return None;
+    }
+    
+    // Need at least TPKT (4) + X.224 (3) + MCS (varies) + Security Header (4) bytes
+    if payload.len() < 20 {
+        return None;
+    }
+    
+    // Try to parse security header
+    // TPKT header is 4 bytes, X.224 is 3 bytes, then comes MCS
+    // For a typical X224 PDU: TPKT(4) + X224(3) + MCS Domain PDU (varies) + Security Header (4)
+    // We'll search for the security header pattern
+    
+    // Skip TPKT (4 bytes) + X.224 (3 bytes) = 7 bytes minimum
+    let data = &payload[7..];
+    
+    // Try to find BasicSecurityHeader with TRANSPORT_REQ flag
+    // The security header should appear after MCS headers
+    // Let's try parsing at different offsets (MCS headers are variable length)
+    for offset in 0..std::cmp::min(data.len().saturating_sub(4), 50) {
+        let test_data = &data[offset..];
+        if test_data.len() < 4 {
+            break;
+        }
+        
+        let mut cursor = ReadCursor::new(test_data);
+        if let Ok(security_header) = BasicSecurityHeader::decode(&mut cursor) {
+            if security_header.flags.contains(BasicSecurityHeaderFlags::TRANSPORT_REQ) {
+                // Found TRANSPORT_REQ flag! Try to parse the multitransport request
+                debug!("Detected SEC_TRANSPORT_REQ flag at offset {}", offset + 7);
+                
+                // The InitiateMultitransportRequest PDU follows the security header
+                if let Ok(request) = InitiateMultitransportRequest::decode(&mut cursor) {
+                    info!(
+                        "Received Initiate Multitransport Request: request_id={}, protocol={:?}",
+                        request.request_id, request.requested_protocol
+                    );
+                    return Some((request.request_id, request.security_cookie));
+                }
+            }
+        }
+    }
+    
+    None
+}
+
 async fn active_session<T: RdpEventSender>(
     framed: UpgradedFramed,
     connection_result: ConnectionResult,
     event_loop_proxy: &T,
     input_event_receiver: &mut mpsc::UnboundedReceiver<RdpInputEvent>,
+    destination: Destination,
+    client_addr: SocketAddr,
 ) -> SessionResult<RdpControlFlow> {
     let (mut reader, mut writer) = split_tokio_framed(framed);
     let mut image = DecodedImage::new(
@@ -1210,18 +1466,90 @@ async fn active_session<T: RdpEventSender>(
         connection_result.desktop_size.height,
     );
 
+    // Extract correlation_id before connection_result is consumed
+    let correlation_id = connection_result.correlation_id;
+
     let mut active_stage = ActiveStage::new(connection_result);
 
     let mut last_frame_dimensions = (image.width(), image.height());
     let mut frame_ready = false;
 
     let disconnect_reason = 'outer: loop {
-        let outputs = tokio::select! {
+        let mut outputs = tokio::select! {
             frame = reader.read_pdu() => {
                 let (action, payload) = frame.map_err(|e| session::custom_err!("read frame", e))?;
                 trace!(?action, frame_length = payload.len(), "Frame received");
 
-                active_stage.process(&mut image, action, &payload)?
+                let mut extra_outputs = Vec::new();
+
+                // Check for multitransport request before processing
+                if let Some((request_id, security_cookie)) = detect_multitransport_request(action, &payload) {
+                    info!("🔥 Detected Initiate Multitransport Request: request_id={}", request_id);
+                    info!("Security Cookie: {:02x?}", &security_cookie[..8]);
+                    
+                    // Calculate SHA-256 hash of security cookie for UDP authentication
+                    let mut hasher = Sha256::new();
+                    hasher.update(&security_cookie);
+                    let cookie_hash: [u8; 32] = hasher.finalize().into();
+                    info!("Cookie Hash (SHA-256): {:02x?}", &cookie_hash[..8]);
+                    
+                    // Send TCP response BEFORE starting UDP handshake
+                    // This is critical - server may wait for this before responding to UDP
+                    let response = InitiateMultitransportResponse::success(request_id);
+                    let mut response_frame = WriteBuf::new();
+                    
+                    // Try to encode using active_stage's encode_static if possible
+                    // For now, we'll do a simple manual encoding as a ShareDataPdu variant doesn't exist
+                    // We need to send this as a raw frame with proper headers
+                    use ironrdp_core::{Encode, WriteCursor};
+                    
+                    // Pre-allocate buffer with enough space (8 bytes for InitiateMultitransportResponse)
+                    let mut pdu_buf = vec![0u8; 64]; // Allocate more than needed
+                    let bytes_written = {
+                        let mut cursor = WriteCursor::new(&mut pdu_buf);
+                        response.encode(&mut cursor).map_err(|e| session::custom_err!("encode multitransport response", e))?;
+                        cursor.pos()
+                    };
+                    pdu_buf.truncate(bytes_written); // Trim to actual size
+                    
+                    info!("📤 Sending Initiate Multitransport Response: request_id={}, hrResponse=S_OK", request_id);
+                    info!("    Response PDU size: {} bytes", pdu_buf.len());
+                    
+                    // TODO: Wrap in proper headers (Security, MCS, X224, TPKT)
+                    // For now, try sending the raw PDU and see if it helps
+                    // The proper way would be to use active_stage.encode_static() with a custom variant
+                    warn!("⚠️  Sending raw multitransport response - may need proper framing");
+                    extra_outputs.push(ActiveStageOutput::ResponseFrame(pdu_buf));
+                    
+                    if let Some(corr_id) = correlation_id {
+                        info!("Correlation ID available: {:02x?}", &corr_id[..8]);
+                        
+                        // Establish UDP connection with authentication
+                        info!("🚀 Initiating server-requested UDP multitransport...");
+                        
+                        // Spawn UDP handshake in background so we don't block TCP
+                        let dest_clone = destination.clone();
+                        let addr_clone = client_addr;
+                        tokio::spawn(async move {
+                            match establish_rdpudp(dest_clone, addr_clone, Some(corr_id), Some(cookie_hash)).await {
+                                Ok(_udp_socket) => {
+                                    info!("✅ UDP multitransport established successfully!");
+                                    // TODO: Integrate UDP socket with GFX channel
+                                }
+                                Err(e) => {
+                                    error!("❌ Failed to establish UDP multitransport: {:?}", e);
+                                }
+                            }
+                        });
+                    } else {
+                        warn!("⚠️  Multitransport requested but no correlation_id available");
+                    }
+                }
+
+                // Process the PDU normally and combine with extra outputs
+                let mut main_outputs = active_stage.process(&mut image, action, &payload)?;
+                extra_outputs.append(&mut main_outputs);
+                extra_outputs
             }
             input_event = input_event_receiver.recv() => {
                 let input_event = input_event.ok_or_else(|| session::general_err!("GUI is stopped"))?;

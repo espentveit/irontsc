@@ -257,6 +257,7 @@ pub struct ConnectionRequest {
     pub nego_data: Option<NegoRequestData>,
     pub flags: RequestFlags,
     pub protocol: SecurityProtocol,
+    pub correlation_info: Option<CorrelationInfo>,
 }
 
 impl_x224_pdu_pod!(ConnectionRequest);
@@ -282,13 +283,9 @@ impl<'de> X224Pdu<'de> for ConnectionRequest {
         dst.write_u16(Self::RDP_NEG_REQ_SIZE);
         dst.write_u32(self.protocol.bits());
 
-        if self.flags.contains(RequestFlags::CORRELATION_INFO_PRESENT) {
-            // TODO(#111): support for RDP_NEG_CORRELATION_INFO
-            return Err(invalid_field_err(
-                Self::NAME,
-                "flags",
-                "CORRECTION_INFO_PRESENT flag is set, but not supported by IronRDP",
-            ));
+        // Encode correlation info if present
+        if let Some(ref correlation_info) = self.correlation_info {
+            correlation_info.encode(dst)?;
         }
 
         Ok(())
@@ -319,37 +316,46 @@ impl<'de> X224Pdu<'de> for ConnectionRequest {
             }
 
             let flags = RequestFlags::from_bits_truncate(src.read_u8());
-
-            if flags.contains(RequestFlags::CORRELATION_INFO_PRESENT) {
-                // TODO(#111): support for RDP_NEG_CORRELATION_INFO
-                return Err(invalid_field_err(
-                    Self::NAME,
-                    "flags",
-                    "CORRECTION_INFO_PRESENT flag is set, but not supported by IronRDP",
-                ));
-            }
-
             let _length = src.read_u16();
-
             let protocol = SecurityProtocol::from_bits_truncate(src.read_u32());
+
+            // Decode correlation info if present
+            let correlation_info = if flags.contains(RequestFlags::CORRELATION_INFO_PRESENT) {
+                // Calculate remaining bytes after RDP_NEG_REQ
+                let consumed = nego_data.as_ref().map(|d| d.size()).unwrap_or(0) + usize::from(Self::RDP_NEG_REQ_SIZE);
+                if variable_part_size >= consumed + CorrelationInfo::SIZE as usize {
+                    Some(CorrelationInfo::decode(src)?)
+                } else {
+                    return Err(invalid_field_err(
+                        Self::NAME,
+                        "correlation_info",
+                        "CORRELATION_INFO_PRESENT flag is set but insufficient data",
+                    ));
+                }
+            } else {
+                None
+            };
 
             Ok(Self {
                 nego_data,
                 flags,
                 protocol,
+                correlation_info,
             })
         } else {
             Ok(Self {
                 nego_data,
                 flags: RequestFlags::empty(),
                 protocol: SecurityProtocol::empty(),
+                correlation_info: None,
             })
         }
     }
 
     fn tpdu_header_variable_part_size(&self) -> usize {
         let optional_nego_data_size = self.nego_data.as_ref().map(|data| data.size()).unwrap_or(0);
-        optional_nego_data_size + usize::from(Self::RDP_NEG_REQ_SIZE)
+        let correlation_size = self.correlation_info.as_ref().map(|c| c.size()).unwrap_or(0);
+        optional_nego_data_size + usize::from(Self::RDP_NEG_REQ_SIZE) + correlation_size
     }
 
     fn tpdu_user_data_size(&self) -> usize {
@@ -482,4 +488,101 @@ fn write_nego_data(dst: &mut WriteCursor<'_>, ctx: &'static str, prefix: &str, v
     dst.write_u16(0x0A0D);
 
     Ok(())
+}
+
+/// RDP Correlation Info structure (RDP_NEG_CORRELATION_INFO)
+///
+/// Used by a client to propagate connection correlation information to the server.
+/// This allows diagnostic tools on the server to track and monitor a specific connection.
+///
+/// # MSDN
+///
+/// * [RDP Correlation Info](https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/b2975bdc-6d56-49ee-9c57-f2ff3a0b6817)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrelationInfo {
+    /// A unique identifier to associate with the connection.
+    /// First byte SHOULD NOT be 0x00 or 0xF4, and 0x0D SHOULD NOT be in any byte.
+    pub correlation_id: [u8; 16],
+}
+
+impl CorrelationInfo {
+    const TYPE: u8 = 0x06; // TYPE_RDP_CORRELATION_INFO
+    const SIZE: u16 = 36; // Total structure size in bytes
+    
+    /// Creates a new CorrelationInfo with a random correlation ID
+    pub fn new_random() -> Self {
+        use rand::RngCore;
+        let mut correlation_id = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut correlation_id);
+        
+        // Follow spec recommendations: first byte should not be 0x00 or 0xF4
+        if correlation_id[0] == 0x00 || correlation_id[0] == 0xF4 {
+            correlation_id[0] = 0x01;
+        }
+        
+        // Avoid 0x0D in all bytes
+        for byte in &mut correlation_id {
+            if *byte == 0x0D {
+                *byte = 0x0E;
+            }
+        }
+        
+        Self { correlation_id }
+    }
+    
+    /// Creates a CorrelationInfo from an existing correlation ID
+    pub fn from_id(correlation_id: [u8; 16]) -> Self {
+        Self { correlation_id }
+    }
+    
+    /// Encodes the correlation info into the provided cursor
+    pub fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
+        ensure_size!(in: dst, size: usize::from(Self::SIZE));
+        
+        dst.write_u8(Self::TYPE);
+        dst.write_u8(0x00); // flags (must be 0x00)
+        dst.write_u16(Self::SIZE);
+        dst.write_slice(&self.correlation_id);
+        dst.write_slice(&[0u8; 16]); // reserved (must be zero)
+        
+        Ok(())
+    }
+    
+    /// Decodes correlation info from the provided cursor
+    pub fn decode(src: &mut ReadCursor<'_>) -> DecodeResult<Self> {
+        ensure_size!(in: src, size: usize::from(Self::SIZE));
+        
+        let msg_type = src.read_u8();
+        if msg_type != Self::TYPE {
+            return Err(unexpected_message_type_err!("CorrelationInfo", msg_type));
+        }
+        
+        let flags = src.read_u8();
+        if flags != 0x00 {
+            return Err(invalid_field_err("CorrelationInfo", "flags", "must be 0x00"));
+        }
+        
+        let length = src.read_u16();
+        if length != Self::SIZE {
+            return Err(invalid_field_err(
+                "CorrelationInfo",
+                "length",
+                "length mismatch",
+            ));
+        }
+        
+        let correlation_id_bytes = src.read_slice(16);
+        let mut correlation_id = [0u8; 16];
+        correlation_id.copy_from_slice(correlation_id_bytes);
+        
+        // Skip reserved bytes (16 bytes)
+        src.advance(16);
+        
+        Ok(Self { correlation_id })
+    }
+    
+    /// Returns the size of the structure in bytes
+    pub fn size(&self) -> usize {
+        usize::from(Self::SIZE)
+    }
 }

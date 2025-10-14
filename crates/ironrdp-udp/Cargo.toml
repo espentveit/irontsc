@@ -1,0 +1,16 @@
+[package]
+name = "ironrdp-udp"
+version = "0.1.0"
+edition = "2021"
+description = "RDP UDP transport extension support (local sidecar)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+test = true
+
+[dependencies]
+bitflags = "2.5"
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1", features = ["std"] }
+ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
+thiserror = "2.0"

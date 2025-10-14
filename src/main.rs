@@ -15,6 +15,9 @@ mod config;
 mod gfx;
 mod gfx_channel;
 mod rdp;
+mod udp_gfx;
+mod udp_gfx_bridge;
+mod udp_transport;
 mod ws;
 mod h264_codec_caps;
 
@@ -265,6 +268,7 @@ fn create_rdp_config(
         performance_flags: PerformanceFlags::empty(),
         license_cache: None,
         timezone_info: TimezoneInfo::default(),
+        correlation_id: None,  // Will be auto-generated if needed
     };
 
     Config {

@@ -27,6 +27,7 @@ bitflags = "2.9"
 ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1", features = ["std"] }
 ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
 tap = "1"
+rand = { version = "0.8", features = ["std"] }
 
 # TODO: get rid of these dependencies (related code should probably go into another crate)
 bit_field = "0.10"

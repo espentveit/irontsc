@@ -1,0 +1,31 @@
+[package]
+name = "ironrdp-connector"
+version = "0.7.1"
+readme = "README.md"
+description = "State machines to drive an RDP connection sequence (local modified version)"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = []
+arbitrary = ["dep:arbitrary"]
+qoi = ["ironrdp-pdu/qoi"]
+qoiz = ["ironrdp-pdu/qoiz"]
+
+[dependencies]
+ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", version = "0.5" }
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
+ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
+ironrdp-pdu = { path = "../ironrdp-pdu-local", version = "0.6" }
+arbitrary = { version = "1", features = ["derive"], optional = true }
+sspi = "0.16"
+url = "2.5"
+rand = { version = "0.9", features = ["std"] }
+tracing = { version = "0.1", features = ["log"] }
+picky-asn1-der = "0.5"
+picky-asn1-x509 = "0.14"
+picky = "7.0.0-rc.17"
