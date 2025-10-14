@@ -24,11 +24,18 @@ struct GfxSurface {
     buffer: Vec<u8>,
 }
 
+/// Unsafe Send wrapper for FFmpeg decoder (it's not actually sent between threads)
+#[cfg(feature = "h264")]
+struct SendFfmpegDecoder(FfmpegDecoder);
+
+#[cfg(feature = "h264")]
+unsafe impl Send for SendFfmpegDecoder {}
+
 /// GFX client state
 pub struct GfxState {
     /// H.264 decoder (optional, requires h264 feature)
     #[cfg(feature = "h264")]
-    h264_decoder: FfmpegDecoder,
+    h264_decoder: SendFfmpegDecoder,
     /// Active surfaces
     surfaces: HashMap<u16, GfxSurface>,
     /// Event sender for UI updates
@@ -39,15 +46,22 @@ pub struct GfxState {
 
 impl GfxState {
     pub fn new(event_sender: Box<dyn RdpEventSender>) -> Result<Self> {
-        #[cfg(feature = "h264")]
-        let h264_decoder = FfmpegDecoder::new()
-            .context("Failed to initialize H.264 decoder - ensure FFmpeg libraries are installed")?;
+        use tracing::info;
 
         #[cfg(feature = "h264")]
-        debug!("Initialized RDPEGFX client with H.264 support");
+        let h264_decoder = {
+            info!("🎬 Initializing FFmpeg H.264 decoder...");
+            let decoder = FfmpegDecoder::new()
+                .context("Failed to initialize H.264 decoder - ensure FFmpeg libraries are installed")?;
+            info!("✅ FFmpeg H.264 decoder initialized successfully");
+            SendFfmpegDecoder(decoder)
+        };
+
+        #[cfg(feature = "h264")]
+        info!("✅ RDPEGFX GfxState initialized with H.264 support");
 
         #[cfg(not(feature = "h264"))]
-        debug!("Initialized RDPEGFX client without H.264 support");
+        info!("⚠️ RDPEGFX GfxState initialized WITHOUT H.264 support");
 
         Ok(Self {
             #[cfg(feature = "h264")]
@@ -80,12 +94,11 @@ impl GfxContext for GfxState {
         height: u16,
         pixel_format: u8,
     ) -> Result<()> {
-        debug!(
-            surface_id,
-            width,
-            height,
-            pixel_format,
-            "Creating GFX surface"
+        use tracing::info;
+
+        info!(
+            "🖼️ RDPEGFX: CREATE_SURFACE id={} size={}x{} format=0x{:02X}",
+            surface_id, width, height, pixel_format
         );
 
         // Delete old surface if it exists (protocol allows reuse)
@@ -136,14 +149,18 @@ impl GfxContext for GfxState {
         dest_rect: ironrdp_gfx::pdu::Rectangle,
         bitmap_data: &[u8],
     ) -> Result<()> {
-        trace!(
+        use tracing::info;
+
+        info!(
+            "🎨 RDPEGFX: WIRE_TO_SURFACE surface={} codec=0x{:04X} ({}) rect={}x{} at ({},{}) data={} bytes",
             surface_id,
             codec_id,
-            "GFX surface command: {}x{} at ({}, {})",
+            codec::codec_name(codec_id),
             dest_rect.width(),
             dest_rect.height(),
             dest_rect.left,
-            dest_rect.top
+            dest_rect.top,
+            bitmap_data.len()
         );
 
         let surface = self.surfaces.get_mut(&surface_id)
@@ -152,12 +169,14 @@ impl GfxContext for GfxState {
         match codec_id {
             #[cfg(feature = "h264")]
             codec::codec_id::AVC420 => {
+                info!("🎬 Decoding H.264/AVC420 frame ({} bytes)...", bitmap_data.len());
                 // Decode H.264/AVC420
-                let frame = self.h264_decoder.decode_gfx_stream(
+                let frame = self.h264_decoder.0.decode_gfx_stream(
                     AvcKind::Avc420,
                     bitmap_data,
                 ).context("Failed to decode AVC420 frame")?;
 
+                info!("✅ H.264 decode complete, blitting to surface");
                 Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
             }
             #[cfg(feature = "h264")]
@@ -169,7 +188,7 @@ impl GfxContext for GfxState {
                     AvcKind::Avc444v2
                 };
 
-                let frame = self.h264_decoder.decode_gfx_stream(kind, bitmap_data)
+                let frame = self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data)
                     .context("Failed to decode AVC444 frame")?;
 
                 Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;

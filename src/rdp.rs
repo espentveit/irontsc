@@ -247,6 +247,35 @@ async fn connect(
     let mut drdynvc = ironrdp::dvc::DrdynvcClient::new()
         .with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new())));
 
+    // Add RDPEGFX channel if H.264 feature is enabled
+    #[cfg(feature = "h264")]
+    {
+        use crate::gfx::GfxState;
+        use crate::gfx_channel::GfxDvcProcessor;
+
+        info!("Initializing RDPEGFX (H.264) support...");
+
+        // Create a simple event sender for GFX (sends to nowhere during init)
+        struct DummyEventSender;
+        impl RdpEventSender for DummyEventSender {
+            fn send_event(&self, _event: RdpOutputEvent) -> Result<(), ()> {
+                Ok(()) // Silently ignore during connection phase
+            }
+        }
+
+        let gfx_state = GfxState::new(Box::new(DummyEventSender))
+            .expect("Failed to initialize GFX state");
+        let gfx_processor = GfxDvcProcessor::new(gfx_state);
+
+        drdynvc = drdynvc.with_dynamic_channel(gfx_processor);
+        info!("RDPEGFX channel registered with DRDYNVC (H.264 decoder ready)");
+    }
+
+    #[cfg(not(feature = "h264"))]
+    {
+        info!("RDPEGFX support disabled (rebuild with --features h264 to enable)");
+    }
+
     // TODO: DVC proxies not yet implemented
     // Instantiate all DVC proxies
     // for proxy in config.dvc_pipe_proxies.iter() {

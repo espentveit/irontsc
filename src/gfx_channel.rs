@@ -4,85 +4,130 @@
 
 use anyhow::{Result, Context as _};
 use ironrdp_gfx::GfxClient;
-use ironrdp::svc::SvcMessage;
-use tracing::{debug, trace, warn};
+use ironrdp_dvc::{DvcMessage, DvcProcessor};
+use ironrdp_core::AsAny;
+use ironrdp_pdu::PduResult;
+use tracing::{debug, trace};
 
 use crate::gfx::GfxState;
 
 /// RDPEGFX dynamic channel name
 pub const GFX_CHANNEL_NAME: &str = "Microsoft::Windows::RDS::Graphics";
 
-/// GFX channel manager
-pub struct GfxChannel {
+/// GFX message wrapper for DVC
+struct GfxDvcMessage {
+    data: Vec<u8>,
+}
+
+impl ironrdp_core::Encode for GfxDvcMessage {
+    fn encode(&self, dst: &mut ironrdp_core::WriteCursor<'_>) -> ironrdp_core::EncodeResult<()> {
+        dst.write_slice(&self.data);
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "GfxDvcMessage"
+    }
+
+    fn size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl ironrdp_dvc::DvcEncode for GfxDvcMessage {}
+
+/// GFX DVC Processor
+pub struct GfxDvcProcessor {
     /// GFX client
     client: GfxClient<GfxState>,
-    /// Channel state
-    state: ChannelState,
+    /// Current channel ID (set when channel opens)
+    channel_id: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChannelState {
-    /// Channel not yet opened
-    Closed,
-    /// Channel open, waiting for CAPS_CONFIRM
-    WaitingForCaps,
-    /// Channel fully active
-    Active,
-}
-
-impl GfxChannel {
-    /// Create a new GFX channel
+impl GfxDvcProcessor {
+    /// Create a new GFX DVC processor
     pub fn new(gfx_state: GfxState) -> Self {
         let client = GfxClient::new(gfx_state, false, false);
 
         Self {
             client,
-            state: ChannelState::Closed,
+            channel_id: None,
         }
     }
+}
 
-    /// Called when the channel is opened
-    pub fn on_channel_open(&mut self) -> Result<Vec<SvcMessage>> {
-        debug!("GFX channel opened");
+impl AsAny for GfxDvcProcessor {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
+impl DvcProcessor for GfxDvcProcessor {
+    fn channel_name(&self) -> &str {
+        GFX_CHANNEL_NAME
+    }
+
+    fn start(&mut self, channel_id: u32) -> PduResult<Vec<DvcMessage>> {
+        use tracing::info;
+        info!("🎨 RDPEGFX channel opened! channel_id={}", channel_id);
+        self.channel_id = Some(channel_id);
 
         // Send capabilities advertisement
-        self.client.send_caps_advertise()
-            .context("Failed to send GFX capabilities")?;
-
-        self.state = ChannelState::WaitingForCaps;
+        if let Err(_e) = self.client.send_caps_advertise() {
+            info!("⚠️ Failed to send CAPS_ADVERTISE");
+            return Ok(Vec::new());
+        }
 
         // Get outgoing messages
         let messages = self.client.ctx.take_outgoing_messages();
-        Ok(messages.into_iter().map(SvcMessage::from).collect())
+        info!("📤 Sending CAPS_ADVERTISE ({} bytes)",
+            messages.iter().map(|m| m.len()).sum::<usize>());
+        Ok(messages
+            .into_iter()
+            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .collect())
     }
 
-    /// Process incoming data from the GFX channel
-    pub fn process_data(&mut self, data: &[u8]) -> Result<Vec<SvcMessage>> {
-        trace!("Processing {} bytes from GFX channel", data.len());
+    fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
+        use tracing::info;
+        info!("📥 RDPEGFX: Received {} bytes on channel {}", payload.len(), channel_id);
 
         // Decompress with zGFX
-        let decompressed = zgfx::decompress(data)
-            .context("Failed to decompress GFX data")?;
+        let decompressed = zgfx::decompress(payload)
+            .map_err(|_e| {
+                info!("❌ RDPEGFX: zGFX decompression failed");
+                ironrdp_pdu::pdu_other_err!("GFX decompress failed")
+            })?;
 
-        trace!("Decompressed {} -> {} bytes", data.len(), decompressed.len());
+        info!("📦 RDPEGFX: Decompressed {} -> {} bytes", payload.len(), decompressed.len());
 
         // Process PDUs
         self.client.process_pdu_stream(&decompressed)
-            .context("Failed to process GFX PDU stream")?;
-
-        // Check if we transitioned to active state
-        if self.state == ChannelState::WaitingForCaps && self.client.cap_version().is_some() {
-            debug!("GFX channel now active, negotiated version: {:?}", self.client.cap_version());
-            self.state = ChannelState::Active;
-        }
+            .map_err(|e| {
+                info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
+                ironrdp_pdu::pdu_other_err!("GFX PDU processing failed")
+            })?;
 
         // Get any outgoing messages (acknowledgements, etc.)
         let messages = self.client.ctx.take_outgoing_messages();
-        Ok(messages.into_iter().map(SvcMessage::from).collect())
+        if !messages.is_empty() {
+            info!("📤 RDPEGFX: Sending {} response messages ({} bytes)",
+                messages.len(),
+                messages.iter().map(|m| m.len()).sum::<usize>());
+        }
+        Ok(messages
+            .into_iter()
+            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .collect())
     }
 
-    /// Check if the channel is active
-    pub fn is_active(&self) -> bool {
-        self.state == ChannelState::Active
+    fn close(&mut self, channel_id: u32) {
+        use tracing::info;
+        info!("🔌 RDPEGFX channel closed (ID: {})", channel_id);
+        self.channel_id = None;
     }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "ironrdp-dvc"
+version = "0.4.1"
+readme = "README.md"
+description = "DRDYNVC static channel implementation and traits to implement dynamic virtual channels (local sidecar)"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = []
+std = []
+
+[dependencies]
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1", features = ["alloc"] } # public
+ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", version = "0.5" } # public
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", version = "0.6", features = ["alloc"] } # public
+tracing = { version = "0.1", features = ["log"] }
+slab = "0.4"

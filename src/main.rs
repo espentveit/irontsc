@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 mod config;
+mod gfx;
+mod gfx_channel;
 mod rdp;
 mod ws; // Add websocket compatibility module
 
