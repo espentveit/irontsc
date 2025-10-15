@@ -41,6 +41,8 @@ impl RdpVersion {
     pub const V10_10: Self = Self(0x0008_000F);
     pub const V10_11: Self = Self(0x0008_0010);
     pub const V10_12: Self = Self(0x0008_0011);
+    // Windows 11 24H2 (Build 26100) - version 17.8
+    pub const V11_24H2: Self = Self(0x0011_0008);
 }
 
 #[derive(Debug, Error)]

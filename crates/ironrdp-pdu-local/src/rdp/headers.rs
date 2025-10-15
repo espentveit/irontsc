@@ -456,7 +456,22 @@ impl Encode for ShareDataPdu {
             ShareDataPdu::ShutdownRequest | ShareDataPdu::ShutdownDenied => Ok(()),
             ShareDataPdu::SuppressOutput(pdu) => pdu.encode(dst),
             ShareDataPdu::RefreshRectangle(pdu) => pdu.encode(dst),
-            _ => Err(other_err!("Encoding not implemented")),
+            ShareDataPdu::Update(buffer)
+            | ShareDataPdu::Pointer(buffer)
+            | ShareDataPdu::PlaySound(buffer)
+            | ShareDataPdu::SetKeyboardIndicators(buffer)
+            | ShareDataPdu::BitmapCachePersistentList(buffer)
+            | ShareDataPdu::BitmapCacheErrorPdu(buffer)
+            | ShareDataPdu::SetKeyboardImeStatus(buffer)
+            | ShareDataPdu::OffscreenCacheErrorPdu(buffer)
+            | ShareDataPdu::DrawNineGridErrorPdu(buffer)
+            | ShareDataPdu::DrawGdiPusErrorPdu(buffer)
+            | ShareDataPdu::ArcStatusPdu(buffer)
+            | ShareDataPdu::StatusInfoPdu(buffer) => {
+                ensure_size!(in: dst, size: buffer.len());
+                dst.write_slice(buffer);
+                Ok(())
+            }
         }
     }
 

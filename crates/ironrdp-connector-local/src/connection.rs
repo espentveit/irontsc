@@ -665,18 +665,11 @@ fn create_gcc_blocks<'a>(
 
     let max_color_depth = config.bitmap.as_ref().map(|bitmap| bitmap.color_depth).unwrap_or(32);
 
-    let supported_color_depths = match max_color_depth {
-        15 => SupportedColorDepths::BPP15,
-        16 => SupportedColorDepths::BPP16,
-        24 => SupportedColorDepths::BPP24,
-        32 => SupportedColorDepths::BPP32 | SupportedColorDepths::BPP16,
-        _ => {
-            return Err(reason_err!(
-                "create gcc blocks",
-                "unsupported color depth: {max_color_depth}"
-            ))
-        }
-    };
+    // Match Windows client: advertise all color depths (0x000f)
+    let supported_color_depths = SupportedColorDepths::BPP24 
+        | SupportedColorDepths::BPP16 
+        | SupportedColorDepths::BPP15 
+        | SupportedColorDepths::BPP32;
 
     let channels = static_channels
         .map(ironrdp_svc::make_channel_definition)
@@ -684,7 +677,7 @@ fn create_gcc_blocks<'a>(
 
     Ok(ClientGccBlocks {
         core: ClientCoreData {
-            version: RdpVersion::V5_PLUS,
+            version: RdpVersion::V10_12,  // Use Windows 10 version for compatibility
             desktop_width: config.desktop_size.width,
             desktop_height: config.desktop_size.height,
             color_depth: ColorDepth::Bpp8, // ignored because we use the optional core data below
@@ -703,12 +696,16 @@ fn create_gcc_blocks<'a>(
                 high_color_depth: Some(HighColorDepth::Bpp24),
                 supported_color_depths: Some(supported_color_depths),
                 early_capability_flags: {
-                    let mut early_capability_flags = ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
-                        | ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
+                    // Match Windows client flags (0x0faf) exactly for maximum compatibility
+                    let mut early_capability_flags = ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
+                        | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU
                         | ClientEarlyCapabilityFlags::STRONG_ASYMMETRIC_KEYS
+                        | ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
+                        | ClientEarlyCapabilityFlags::SUPPORT_NET_CHAR_AUTODETECT
+                        | ClientEarlyCapabilityFlags::SUPPORT_DYN_VC_GFX_PROTOCOL  // Critical for GFX/multitransport
+                        | ClientEarlyCapabilityFlags::SUPPORT_DYNAMIC_TIME_ZONE
+                        | ClientEarlyCapabilityFlags::SUPPORT_HEART_BEAT_PDU
                         | ClientEarlyCapabilityFlags::SUPPORT_SKIP_CHANNELJOIN;
-
-                    // TODO(#136): support for ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU
 
                     if max_color_depth == 32 {
                         early_capability_flags |= ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION;
@@ -717,7 +714,7 @@ fn create_gcc_blocks<'a>(
                     Some(early_capability_flags)
                 },
                 dig_product_id: Some(config.dig_product_id.clone()),
-                connection_type: Some(ConnectionType::Lan),
+                connection_type: Some(ConnectionType::Autodetect),  // Match working client (Auto Detect)
                 server_selected_protocol: Some(selected_protocol),
                 desktop_physical_width: Some(0),  // 0 per FreeRDP
                 desktop_physical_height: Some(0), // 0 per FreeRDP
@@ -743,15 +740,23 @@ fn create_gcc_blocks<'a>(
         } else {
             Some(ClientNetworkData { channels })
         },
-        // TODO(#139): support for Some(ClientClusterData { flags: RedirectionFlags::REDIRECTION_SUPPORTED, redirection_version: RedirectionVersion::V4, redirected_session_id: 0, }),
-        cluster: None,
+        // Enable cluster/redirection support (required for multitransport on some servers)
+        // Match Windows 11 client exactly: Version 6, REDIRECTION_SUPPORTED only (not SMARTCARD)
+        cluster: Some(gcc::ClientClusterData {
+            flags: gcc::RedirectionFlags::REDIRECTION_SUPPORTED,  // Only 0x01, no smartcard
+            redirection_version: gcc::RedirectionVersion::V6,  // Match working client
+            redirected_session_id: 0,
+        }),
         monitor: None,
         // TODO(#140): support for Client Message Channel Data (https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/f50e791c-de03-4b25-b17e-e914c9020bc3)
         message_channel: None,
         // Enable multitransport (UDP) support for video streaming
+        // Match Windows client flags: 0x305 = FECL (0x01) + Reserved (0x04) + PREFERRED (0x100) + SOFT_SYNC (0x200)
         multi_transport_channel: Some(ironrdp_pdu::gcc::MultiTransportChannelData {
-            flags: ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
-                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL,
+            flags: ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
+                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_MULTITRANSPORT_FLAGS_RESERVED
+                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
+                | ironrdp_pdu::gcc::MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
         }),
         monitor_extended: None,
     })

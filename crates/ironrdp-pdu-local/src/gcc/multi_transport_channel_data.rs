@@ -46,8 +46,9 @@ impl<'de> Decode<'de> for MultiTransportChannelData {
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct MultiTransportFlags: u32 {
-        const TRANSPORT_TYPE_UDP_FECR = 0x01;
-        const TRANSPORT_TYPE_UDP_FECL = 0x04;
+        const TRANSPORT_TYPE_UDP_FECL = 0x01; // Lossy/unreliable UDP (Forward Error Correction Lossy)
+        const TRANSPORT_TYPE_UDP_FECR = 0x02; // Reliable UDP (Forward Error Correction Reliable)
+        const TRANSPORT_TYPE_MULTITRANSPORT_FLAGS_RESERVED = 0x04; // Reserved flag (Windows clients set this)
         const TRANSPORT_TYPE_UDP_PREFERRED = 0x100;
         const SOFT_SYNC_TCP_TO_UDP = 0x200;
     }

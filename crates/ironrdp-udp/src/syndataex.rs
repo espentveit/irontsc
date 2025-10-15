@@ -55,6 +55,7 @@ impl SynDataEx {
     }
 
     pub fn encode_into(&self, output: &mut Vec<u8>) {
+        // SynDataEx uses BIG-ENDIAN byte order (matches decode which uses read_u16_be)
         output.extend_from_slice(&self.flags.bits().to_be_bytes());
         let version = self.udp_version.map(|v| v.raw_value()).unwrap_or_default();
         output.extend_from_slice(&version.to_be_bytes());

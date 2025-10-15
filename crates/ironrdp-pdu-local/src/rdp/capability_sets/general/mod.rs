@@ -88,7 +88,8 @@ bitflags! {
         const NO_BITMAP_COMPRESSION_HDR = 0x0400;
         const LONG_CREDENTIALS_SUPPORTED = 0x0004;
         const AUTORECONNECT_SUPPORTED = 0x0008;
-        const ENC_SALTED_CHECKSUM = 0x0010;
+        const MULTITRANSPORT_SUPPORTED = 0x0010;  // MS-RDPBCGR 2.2.1.11.1.1.1 - UDP multitransport support
+        const ENC_SALTED_CHECKSUM = 0x0020;
     }
 }
 
