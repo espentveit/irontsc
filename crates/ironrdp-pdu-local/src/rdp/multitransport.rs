@@ -15,6 +15,8 @@ pub enum MultitransportProtocol {
     UdpFecReliable = 0x01,
     /// RDP-UDP FEC lossy transport
     UdpFecLossy = 0x02,
+    /// Unknown/unsupported protocol (preserved for debugging)
+    Unknown(u16),
 }
 
 impl MultitransportProtocol {
@@ -22,12 +24,16 @@ impl MultitransportProtocol {
         match value {
             0x01 => Some(Self::UdpFecReliable),
             0x02 => Some(Self::UdpFecLossy),
-            _ => None,
+            _ => Some(Self::Unknown(value)), // Accept but mark as unknown
         }
     }
 
     pub fn as_u16(self) -> u16 {
-        self as u16
+        match self {
+            Self::UdpFecReliable => 0x01,
+            Self::UdpFecLossy => 0x02,
+            Self::Unknown(v) => v,
+        }
     }
 }
 

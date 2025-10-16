@@ -612,6 +612,14 @@ impl Sequence for ClientConnector {
                         written,
                         ClientConnectorState::ConnectionFinalization { connection_activation },
                     ),
+                    ConnectionActivationState::CapabilitiesExchange { .. } => {
+                        // Still in capabilities exchange (e.g., after handling Initiate Multitransport Request)
+                        // Stay in this state to receive the next PDU (DemandActivePdu)
+                        (
+                            written,
+                            ClientConnectorState::CapabilitiesExchange { connection_activation },
+                        )
+                    }
                     _ => return Err(general_err!("invalid state (this is a bug)")),
                 }
             }

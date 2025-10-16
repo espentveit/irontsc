@@ -101,6 +101,44 @@ impl Sequence for ConnectionActivationSequence {
                 debug!("Capabilities Exchange");
 
                 let send_data_indication_ctx = legacy::decode_send_data_indication(input)?;
+                
+                // Check if this is an Initiate Multitransport Request (28 bytes)
+                if send_data_indication_ctx.user_data.len() == 28 {
+                    use ironrdp_pdu::rdp::multitransport::{InitiateMultitransportRequest, InitiateMultitransportResponse};
+                    use ironrdp_core::decode;
+                    
+                    if let Ok(mt_request) = decode::<InitiateMultitransportRequest>(send_data_indication_ctx.user_data) {
+                        warn!(
+                            "🔥 Received Initiate Multitransport Request: request_id={}, protocol={:?}",
+                            mt_request.request_id, mt_request.requested_protocol
+                        );
+                        warn!("   Security cookie: {:02x?}", mt_request.security_cookie);
+                        
+                        // Send success response - UDP will be established separately
+                        let response = InitiateMultitransportResponse::success(mt_request.request_id);
+                        
+                        warn!("   Sending SUCCESS response - UDP transport will be established");
+                        
+                        // Encode and send the response
+                        let written = legacy::encode_send_data_request(
+                            user_channel_id,
+                            io_channel_id,
+                            &response,
+                            output,
+                        )?;
+                        
+                        // Stay in CapabilitiesExchange state to receive the actual DemandActivePdu next
+                        let next_state = ConnectionActivationState::CapabilitiesExchange {
+                            io_channel_id,
+                            user_channel_id,
+                        };
+                        
+                        self.state = next_state;
+                        return Ok(Written::from_size(written)?);
+                    }
+                }
+                
+                // Decode as ShareControlHeader (normal capabilities exchange)
                 let share_control_ctx = legacy::decode_share_control(send_data_indication_ctx)?;
 
                 debug!(message = ?share_control_ctx.pdu, "Received");
