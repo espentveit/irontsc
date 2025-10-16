@@ -20,7 +20,7 @@ use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::PduResult;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
-use ironrdp::pdu::rdp::multitransport::{InitiateMultitransportRequest, InitiateMultitransportResponse};
+use ironrdp::pdu::rdp::multitransport::{InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol};
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
@@ -1407,8 +1407,9 @@ impl CliprdrBackend for ArboardClipboardBackend {
 }
 
 /// Check if a frame contains a multitransport request (SEC_TRANSPORT_REQ flag)
-/// Returns Some((request_id, security_cookie)) if detected, None otherwise
-fn detect_multitransport_request(action: ironrdp::pdu::Action, payload: &[u8]) -> Option<(u32, [u8; 16])> {
+/// Detects MultiTransportRequest PDUs in the stream
+/// Returns Some((request_id, protocol, security_cookie)) if detected, None otherwise
+fn detect_multitransport_request(action: ironrdp::pdu::Action, payload: &[u8]) -> Option<(u32, MultitransportProtocol, [u8; 16])> {
     use ironrdp::pdu::Action;
     use ironrdp_core::{Decode, ReadCursor};
     
@@ -1451,7 +1452,7 @@ fn detect_multitransport_request(action: ironrdp::pdu::Action, payload: &[u8]) -
                         "Received Initiate Multitransport Request: request_id={}, protocol={:?}",
                         request.request_id, request.requested_protocol
                     );
-                    return Some((request.request_id, request.security_cookie));
+                    return Some((request.request_id, request.requested_protocol, request.security_cookie));
                 }
             }
         }
@@ -1485,15 +1486,13 @@ async fn active_session<T: RdpEventSender>(
     let mut last_frame_dimensions = (image.width(), image.height());
     let mut frame_ready = false;
     
-    // Track processed multitransport request IDs to avoid duplicate UDP handshakes
-    let mut processed_multitransport_requests: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    
-    // Shared flag to track if UDP handshake is in progress (across reconnections)
-    // This prevents multiple concurrent handshakes when fast reconnecting
-    let udp_handshake_in_progress = Arc::new(AtomicBool::new(false));
+    // Track multitransport requests with their authentication data
+    // Maps request_id -> (cookie_hash, correlation_id)
+    // Each request_id represents a separate UDP transport channel
+    let mut multitransport_requests: std::collections::HashMap<u32, ([u8; 32], [u8; 16])> = std::collections::HashMap::new();
 
     let disconnect_reason = 'outer: loop {
-        let mut outputs = tokio::select! {
+        let outputs = tokio::select! {
             frame = reader.read_pdu() => {
                 match frame {
                     Ok((action, payload)) => {
@@ -1502,17 +1501,17 @@ async fn active_session<T: RdpEventSender>(
                         let mut extra_outputs = Vec::new();
 
                 // Check for multitransport request before processing
-                let outputs = if let Some((request_id, security_cookie)) = detect_multitransport_request(action, &payload) {
-                    info!("🔥 Detected Initiate Multitransport Request: request_id={}", request_id);
+                let outputs = if let Some((request_id, protocol, security_cookie)) = detect_multitransport_request(action, &payload) {
+                    info!("🔥 Detected Initiate Multitransport Request: request_id={}, protocol={:?}", request_id, protocol);
                     
                     // Check if we've already processed this request_id
-                    let is_duplicate = processed_multitransport_requests.contains(&request_id);
+                    let is_duplicate = multitransport_requests.contains_key(&request_id);
                     if is_duplicate {
                         warn!("⚠️  Ignoring duplicate multitransport request_id={} (already processed)", request_id);
                     } else {
+                        info!("   request_id={}, Protocol: {:?}", request_id, protocol);
                         info!("   request_id={}, Security Cookie (full 16 bytes): {:02x?}", request_id, security_cookie);
                         info!("   request_id={}, Security Cookie (first 8):  {:02x?}", request_id, &security_cookie[..8]);
-                        processed_multitransport_requests.insert(request_id);
                     }
                     
                     // Calculate SHA-256 hash of security cookie for UDP authentication
@@ -1550,43 +1549,38 @@ async fn active_session<T: RdpEventSender>(
                     
                     // Only start UDP handshake if this is a new request (not a duplicate)
                     if !is_duplicate {
-                        // Check if UDP handshake already in progress (from previous fast reconnect)
-                        if udp_handshake_in_progress.load(Ordering::SeqCst) {
-                            warn!("⚠️  Skipping UDP handshake for request_id={} - handshake already in progress", request_id);
-                        } else if let Some(corr_id) = correlation_id {
+                        if let Some(corr_id) = correlation_id {
                             info!("✅ Correlation ID from TCP negotiation: {:02x?}", corr_id);
-                            info!("   (This will be used in UDP SYN packet)");
+                            info!("   (This will be used in UDP SYN packet for request_id={})", request_id);
+                            
+                            // Store this request with its authentication data
+                            multitransport_requests.insert(request_id, (cookie_hash, corr_id));
+                            info!("📝 Stored request_id={} with cookie_hash and correlation_id", request_id);
                             
                             // CRITICAL FIX: Working client sends UDP SYN ~1.5ms after TCP ACK
-                            info!("🚀 Starting UDP handshake after TCP ACK...");
-                            
-                            // Mark handshake as in progress
-                            udp_handshake_in_progress.store(true, Ordering::SeqCst);
+                            info!("🚀 Starting UDP handshake for request_id={}...", request_id);
                             
                             // Spawn UDP handshake in background with minimal delay
                             let dest_clone = destination.clone();
                             let addr_clone = client_addr;
-                            let handshake_flag = udp_handshake_in_progress.clone();
+                            let req_id = request_id;
                             tokio::spawn(async move {
                                 // Wait 2ms to allow TCP ACK to be sent
                                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                                 
-                                info!("🚀 Sending UDP SYN with v3 authentication (2ms after TCP ACK)...");
+                                info!("🚀 Sending UDP SYN for request_id={} with v3 authentication (2ms after TCP ACK)...", req_id);
                                 match establish_rdpudp(dest_clone, addr_clone, Some(corr_id), Some(cookie_hash)).await {
                                     Ok(_udp_socket) => {
-                                        info!("✅ UDP multitransport established successfully!");
+                                        info!("✅ UDP multitransport established successfully for request_id={}!", req_id);
                                         // TODO: Integrate UDP socket with GFX channel
-                                        // Keep the flag set - we have an active UDP connection
                                     }
                                     Err(e) => {
-                                        error!("❌ Failed to establish UDP multitransport: {:?}", e);
-                                        // Clear flag on failure so we can retry
-                                        handshake_flag.store(false, Ordering::SeqCst);
+                                        error!("❌ Failed to establish UDP multitransport for request_id={}: {:?}", req_id, e);
                                     }
                                 }
                             });
                         } else {
-                            warn!("⚠️  Multitransport requested but no correlation_id available");
+                            warn!("⚠️  Multitransport requested but no correlation_id available for request_id={}", request_id);
                         }
                     }
                     

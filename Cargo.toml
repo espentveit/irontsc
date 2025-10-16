@@ -11,6 +11,8 @@ members = [
     "crates/ironrdp-udp",
     "crates/ironrdp-connector-local",
     "crates/ironrdp-pdu-local",
+    "crates/ironrdp-async-local",
+    "crates/ironrdp-tokio-local",
 ]
 
 [package]
@@ -80,3 +82,8 @@ video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264"]
 ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
 ironrdp-connector = { path = "crates/ironrdp-connector-local" }
 ironrdp-pdu = { path = "crates/ironrdp-pdu-local" }
+ironrdp-async = { path = "crates/ironrdp-async-local" }
+ironrdp-tokio = { path = "crates/ironrdp-tokio-local" }
+
+[patch.crates-io]
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP" }

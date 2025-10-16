@@ -360,25 +360,40 @@ impl Sequence for ClientConnector {
             }
 
             //== CredSSP ==//
-            ClientConnectorState::Credssp { selected_protocol } => (
-                Written::Nothing,
-                ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol },
-            ),
+            ClientConnectorState::Credssp { selected_protocol } => {
+                debug!("CredSSP complete, transitioning to Basic Settings Exchange");
+                (
+                    Written::Nothing,
+                    ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol },
+                )
+            }
+
 
             //== Basic Settings Exchange ==//
             // Exchange basic settings including Core Data, Security Data and Network Data.
             ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol } => {
-                debug!("Basic Settings Exchange");
+                debug!("Basic Settings Exchange - Creating GCC blocks (ClientData)");
 
                 let client_gcc_blocks =
                     create_gcc_blocks(&self.config, selected_protocol, self.static_channels.values())?;
 
+                debug!(
+                    "GCC blocks created: core={:?}, security={:?}, network={:?}, cluster={:?}, multi_transport={:?}",
+                    client_gcc_blocks.core.version,
+                    !client_gcc_blocks.security.encryption_methods.is_empty(),
+                    client_gcc_blocks.network.is_some(),
+                    client_gcc_blocks.cluster.is_some(),
+                    client_gcc_blocks.multi_transport_channel.as_ref().map(|mt| mt.flags.bits())
+                );
+
                 let connect_initial =
                     mcs::ConnectInitial::with_gcc_blocks(client_gcc_blocks).map_err(ConnectorError::decode)?;
 
-                debug!(message = ?connect_initial, "Send");
+                debug!(message = ?connect_initial, "Sending MCS Connect Initial with ClientData");
 
                 let written = encode_x224_packet(&connect_initial, output)?;
+
+                debug!("MCS Connect Initial sent: {} bytes", written);
 
                 (
                     Written::from_size(written)?,
@@ -677,7 +692,9 @@ fn create_gcc_blocks<'a>(
 
     Ok(ClientGccBlocks {
         core: ClientCoreData {
-            version: RdpVersion::V10_12,  // Use Windows 10 version for compatibility
+            // Use Windows 11 24H2 version (17.8) to match modern RDP clients
+            // This corresponds to build 26100 and provides best compatibility
+            version: RdpVersion::V11_24H2,  // Version 17.8 (0x00110008)
             desktop_width: config.desktop_size.width,
             desktop_height: config.desktop_size.height,
             color_depth: ColorDepth::Bpp8, // ignored because we use the optional core data below
@@ -751,11 +768,16 @@ fn create_gcc_blocks<'a>(
         // TODO(#140): support for Client Message Channel Data (https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/f50e791c-de03-4b25-b17e-e914c9020bc3)
         message_channel: None,
         // Enable multitransport (UDP) support for video streaming
-        // Match Windows client flags: 0x305 = FECL (0x01) + Reserved (0x04) + PREFERRED (0x100) + SOFT_SYNC (0x200)
+        // Advertise support for both Reliable (FECR) and Lossy (FECL) UDP transport
+        // Flags value 0x305 matches real Windows RDP client:
+        //   0x01 (FECR): Reliable UDP support
+        //   0x04 (FECL): Lossy UDP support  
+        //   0x100 (REQUEST): Client is requesting multitransport
+        //   0x200 (SOFT_SYNC): Client supports soft-syncing TCP to UDP
         multi_transport_channel: Some(ironrdp_pdu::gcc::MultiTransportChannelData {
-            flags: ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
-                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_MULTITRANSPORT_FLAGS_RESERVED
-                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
+            flags: ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
+                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
+                | ironrdp_pdu::gcc::MultiTransportFlags::MULTITRANSPORT_TYPE_FLAGS_REQUEST
                 | ironrdp_pdu::gcc::MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
         }),
         monitor_extended: None,
@@ -799,11 +821,11 @@ fn create_client_info_pdu(config: &Config, client_addr: &SocketAddr) -> rdp::Cli
 
     let client_info = ClientInfo {
         credentials: Credentials {
+            domain: config.domain.clone(),
             username: config.credentials.username().unwrap_or("").to_owned(),
             password: config.credentials.secret().to_owned(),
-            domain: config.domain.clone(),
         },
-        code_page: 0, // ignored if the keyboardLayout field of the Client Core Data is set to zero
+        code_page: 1033, // Windows CP_WINUNICODE / en-US (was 0, but actual clients send proper code page)
         flags,
         compression_type: CompressionType::K8, // ignored if ClientInfoFlags::COMPRESSION is not set
         alternate_shell: String::new(),

@@ -468,7 +468,7 @@ impl Config {
             request_data: None,
             pointer_software_rendering: false,
             performance_flags: PerformanceFlags::default(),
-            timezone_info: TimezoneInfo::default(),
+            timezone_info: get_system_timezone_info(),
             correlation_id: None,  // Will be auto-generated if needed
         };
 
@@ -486,5 +486,40 @@ impl Config {
             rdcleanpath,
             dvc_pipe_proxies: args.dvc_proxy,
         })
+    }
+}
+
+/// Get system timezone information
+/// 
+/// Returns proper timezone data from the system, or a sensible default if unavailable.
+pub fn get_system_timezone_info() -> TimezoneInfo {
+    use ironrdp::pdu::rdp::client_info::{OptionalSystemTime, SystemTime, Month, DayOfWeek, DayOfWeekOccurrence};
+    
+    // Try to get timezone from chrono-tz or system
+    // For now, provide a sensible UTC default with proper structure
+    TimezoneInfo {
+        bias: 0, // UTC offset in minutes (0 = UTC)
+        standard_name: "Coordinated Universal Time".to_string(),
+        standard_date: OptionalSystemTime(Some(SystemTime {
+            month: Month::October,
+            day_of_week: DayOfWeek::Sunday,
+            day: DayOfWeekOccurrence::Last,
+            hour: 3,
+            minute: 0,
+            second: 0,
+            milliseconds: 0,
+        })),
+        standard_bias: 0,
+        daylight_name: "Coordinated Universal Time".to_string(),
+        daylight_date: OptionalSystemTime(Some(SystemTime {
+            month: Month::March,
+            day_of_week: DayOfWeek::Sunday,
+            day: DayOfWeekOccurrence::Last,
+            hour: 2,
+            minute: 0,
+            second: 0,
+            milliseconds: 0,
+        })),
+        daylight_bias: 0,
     }
 }

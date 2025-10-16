@@ -213,7 +213,7 @@ fn create_rdp_config(
 ) -> Config {
     use ironrdp::connector;
     use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
-    use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+    use ironrdp::pdu::rdp::client_info::PerformanceFlags;
 
     let destination = Destination::new(server.to_string()).unwrap();
 
@@ -265,9 +265,9 @@ fn create_rdp_config(
         },
         request_data: None,
         enable_audio_playback: false,
-        performance_flags: PerformanceFlags::empty(),
+        performance_flags: PerformanceFlags::default(),
         license_cache: None,
-        timezone_info: TimezoneInfo::default(),
+        timezone_info: crate::config::get_system_timezone_info(),
         correlation_id: None,  // Will be auto-generated if needed
     };
 
