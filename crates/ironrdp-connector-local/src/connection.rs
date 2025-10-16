@@ -372,28 +372,45 @@ impl Sequence for ClientConnector {
             //== Basic Settings Exchange ==//
             // Exchange basic settings including Core Data, Security Data and Network Data.
             ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol } => {
-                debug!("Basic Settings Exchange - Creating GCC blocks (ClientData)");
+                info!("📋 Basic Settings Exchange - Creating GCC blocks (ClientData)");
 
                 let client_gcc_blocks =
                     create_gcc_blocks(&self.config, selected_protocol, self.static_channels.values())?;
 
-                debug!(
-                    "GCC blocks created: core={:?}, security={:?}, network={:?}, cluster={:?}, multi_transport={:?}",
+                info!(
+                    "GCC blocks created: core={:?}, security={:?}, network={:?}, cluster={:?}, message_channel={:?}, multi_transport={:?}",
                     client_gcc_blocks.core.version,
                     !client_gcc_blocks.security.encryption_methods.is_empty(),
                     client_gcc_blocks.network.is_some(),
                     client_gcc_blocks.cluster.is_some(),
+                    client_gcc_blocks.message_channel.is_some(),
                     client_gcc_blocks.multi_transport_channel.as_ref().map(|mt| mt.flags.bits())
                 );
 
                 let connect_initial =
                     mcs::ConnectInitial::with_gcc_blocks(client_gcc_blocks).map_err(ConnectorError::decode)?;
 
-                debug!(message = ?connect_initial, "Sending MCS Connect Initial with ClientData");
-
+                info!("📤 Encoding MCS Connect Initial...");
+                
                 let written = encode_x224_packet(&connect_initial, output)?;
 
-                debug!("MCS Connect Initial sent: {} bytes", written);
+                info!("✅ MCS Connect Initial encoded: {} bytes", written);
+                
+                // Log detailed hex dump for comparison with reference
+                let hex_preview: String = output[..written]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        if i > 0 && i % 16 == 0 {
+                            format!("\n{:04x}: {:02x}", i, b)
+                        } else if i % 16 == 0 {
+                            format!("{:04x}: {:02x}", i, b)
+                        } else {
+                            format!(" {:02x}", b)
+                        }
+                    })
+                    .collect::<String>();
+                info!("📦 Packet hex dump:\n{}", hex_preview);
 
                 (
                     Written::from_size(written)?,
@@ -765,8 +782,9 @@ fn create_gcc_blocks<'a>(
             redirected_session_id: 0,
         }),
         monitor: None,
-        // TODO(#140): support for Client Message Channel Data (https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/f50e791c-de03-4b25-b17e-e914c9020bc3)
-        message_channel: None,
+        // Client Message Channel Data - required for RDP 10.0+ (Windows 10+)
+        // This advertises support for server-initiated messages and autodetect
+        message_channel: Some(gcc::ClientMessageChannelData),
         // Enable multitransport (UDP) support for video streaming
         // Advertise support for both Reliable (FECR) and Lossy (FECL) UDP transport
         // Flags value 0x305 matches real Windows RDP client:

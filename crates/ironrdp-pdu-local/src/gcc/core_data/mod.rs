@@ -42,7 +42,9 @@ impl RdpVersion {
     pub const V10_11: Self = Self(0x0008_0010);
     pub const V10_12: Self = Self(0x0008_0011);
     // Windows 11 24H2 (Build 26100) - version 17.8
-    pub const V11_24H2: Self = Self(0x0011_0008);
+    // Format: 0xMMMM_mmmm where MMMM=minor version, mmmm=major version
+    // (yes, this is backwards, but that's how RDP encodes it)
+    pub const V11_24H2: Self = Self(0x0008_0011);
 }
 
 #[derive(Debug, Error)]

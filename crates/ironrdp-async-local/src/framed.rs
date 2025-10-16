@@ -249,6 +249,10 @@ where
     buf.clear();
 
     if let Some(next_pdu_hint) = sequence.next_pdu_hint() {
+        use tracing::info;
+        
+        info!("📥 Waiting for server response (hint: {:?}, state: {})", next_pdu_hint, sequence.state().name());
+        
         debug!(
             connector.state = sequence.state().name(),
             hint = ?next_pdu_hint,
@@ -276,7 +280,10 @@ async fn single_sequence_step_write<S>(
 where
     S: FramedWrite,
 {
+    use tracing::info;
+    
     if let Some(response_len) = written.size() {
+        info!("📤 About to write {} bytes to connection", response_len);
         debug_assert_eq!(buf.filled_len(), response_len);
         let response = buf.filled();
         trace!(response_len, "Send response");
@@ -284,6 +291,7 @@ where
             .write_all(response)
             .await
             .map_err(|e| ironrdp_connector::custom_err!("write all", e))?;
+        info!("✅ Write completed successfully ({} bytes)", response_len);
     }
 
     Ok(())
