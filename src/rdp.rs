@@ -20,7 +20,7 @@ use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::PduResult;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
-use ironrdp::pdu::rdp::multitransport::{InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol};
+use ironrdp::pdu::rdp::multitransport::{InitiateMultitransportRequest, MultitransportProtocol};
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
@@ -1535,17 +1535,17 @@ async fn active_session<T: RdpEventSender>(
                         info!("   request_id={}, Cookie Hash (LE-swapped for UDP): {:02x?}", request_id, cookie_hash);
                     }
                     
-                    // CRITICAL DISCOVERY from TLS-decrypted capture analysis:
-                    // The working Windows client does NOT send a MultiTransportResponse over TCP!
-                    // It only:
-                    //   1. Receives MultiTransportRequest (server → client)
-                    //   2. Sends TCP ACK (automatic, handled by TCP stack)
-                    //   3. Sends UDP SYN packet with authentication
+                    // According to MS-RDPMT specification, the client MUST send an 
+                    // InitiateMultitransportResponse back to the server.
+                    // According to MS-RDPMT specification, the client MUST send an 
+                    // InitiateMultitransportResponse back to the server during connection phase.
+                    // HOWEVER: Working packet captures show that during ACTIVE SESSION, the response
+                    // is NOT sent. The server expects us to go directly to UDP SYN after receiving
+                    // the multitransport request. Only during connection phase (CapabilitiesExchange)
+                    // do we send the TCP response.
                     //
-                    // The MS-RDPBCGR spec mentions InitiateMultitransportResponse but the working
-                    // capture shows it's NOT sent. The TCP ACK is sufficient.
-                    
-                    info!("✅ Received MultiTransportRequest request_id={}, skipping TCP response (not in working capture)", request_id);
+                    // DO NOT SEND TCP RESPONSE HERE - it causes server error 0x10CA (UnknownPduType)
+                    info!("📝 Skipping TCP response in active session (only sent during connection phase)");
                     
                     // Only start UDP handshake if this is a new request (not a duplicate)
                     if !is_duplicate {
