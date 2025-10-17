@@ -13,7 +13,158 @@ members = [
     "crates/ironrdp-pdu-local",
     "crates/ironrdp-async-local",
     "crates/ironrdp-tokio-local",
+    "crates/ironrdp-session-local",
+    "crates/ironrdp-core-local",
+    "crates/ironrdp-cliprdr-local",
+    "crates/ironrdp-acceptor-local",
+    "crates/ironrdp-graphics-local",
+    "crates/ironrdp-input-local",
+    "crates/ironrdp-server-local",
+    "crates/ironrdp-svc-local",
+    "crates/ironrdp-rdpdr-local",
+    "crates/ironrdp-rdpsnd-local",
+    "crates/ironrdp-ainput-local",
+    "crates/ironrdp-local",
+    "crates/ironrdp-mstsgu-local",
+    "crates/ironrdp-tls-local",
+    "crates/ironrdp-cfg-local",
+    "crates/ironrdp-rdpfile-local",
+    "crates/ironrdp-rdcleanpath-local",
+    "crates/ironrdp-rdpsnd-native-local",
+    "crates/ironrdp-propertyset-local",
+    "crates/ironrdp-error-local",
 ]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/Devolutions/IronRDP"
+repository = "https://github.com/Devolutions/IronRDP"
+authors = ["Devolutions Inc.", "Teleport"]
+keywords = ["rdp", "remote-desktop", "network", "client", "protocol"]
+categories = ["network-programming"]
+
+[workspace.dependencies]
+expect-test = "1"
+proptest = "1.4"
+rstest = "0.25"
+lazy_static = "1.4"
+num-derive = "0.4"
+num-traits = "0.2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+invalid_reference_casting = "warn"
+unused_unsafe = "warn"
+missing_unsafe_on_extern = "warn"
+unsafe_attr_outside_unsafe = "warn"
+ambiguous_negative_literals  = "warn"
+keyword_idents_2024 = "warn"
+elided_lifetimes_in_paths = "warn"
+absolute_paths_not_starting_with_crate = "warn"
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+keyword_idents = "warn"
+noop_method_call = "warn"
+macro_use_extern_crate = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unused_crate_dependencies = "warn"
+unused_macro_rules = "warn"
+unit_bindings = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+multiple_unsafe_ops_per_block = "warn"
+missing_safety_doc = "warn"
+transmute_ptr_to_ptr = "warn"
+as_ptr_cast_mut = "warn"
+as_pointer_underscore = "warn"
+cast_ptr_alignment = "warn"
+fn_to_numeric_cast_any = "warn"
+ptr_cast_constness = "warn"
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+filetype_is_file = "warn"
+float_cmp = "warn"
+lossy_float_literal = "warn"
+float_cmp_const = "warn"
+as_underscore = "warn"
+unwrap_used = "warn"
+large_stack_frames = "warn"
+mem_forget = "warn"
+mixed_read_write_in_expression = "warn"
+needless_raw_strings = "warn"
+non_ascii_literal = "warn"
+panic = "warn"
+precedence_bits = "warn"
+rc_mutex = "warn"
+same_name_method = "warn"
+string_slice = "warn"
+suspicious_xor_used_as_pow = "warn"
+unused_result_ok = "warn"
+missing_panics_doc = "warn"
+semicolon_outside_block = "warn"
+clone_on_ref_ptr = "warn"
+cloned_instead_of_copied = "warn"
+pub_without_shorthand = "warn"
+infinite_loop = "warn"
+empty_enum_variants_with_brackets = "warn"
+deref_by_slicing = "warn"
+multiple_inherent_impl = "warn"
+map_with_unused_argument_over_ranges = "warn"
+trait_duplication_in_bounds = "warn"
+type_repetition_in_bounds = "warn"
+checked_conversions = "warn"
+get_unwrap = "warn"
+similar_names = "warn"
+str_to_string = "warn"
+string_to_string = "warn"
+std_instead_of_core = "warn"
+separated_literal_suffix = "warn"
+unused_self = "warn"
+useless_let_if_seq = "warn"
+string_add = "warn"
+range_plus_one = "warn"
+self_named_module_files = "warn"
+redundant_type_annotations = "warn"
+unnecessary_self_imports = "warn"
+try_err = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+doc_include_without_cfg = "warn"
+inline_always = "warn"
+large_include_file = "warn"
+or_fun_call = "warn"
+rc_buffer = "warn"
+string_lit_chars_any = "warn"
+unnecessary_box_returns = "warn"
+allow_attributes = "warn"
+cfg_not_test = "warn"
+disallowed_script_idents = "warn"
+non_zero_suggestions = "warn"
+renamed_function_params = "warn"
+unused_trait_names = "warn"
+collection_is_never_read = "warn"
+copy_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+implicit_clone = "warn"
+large_types_passed_by_value = "warn"
+redundant_clone = "warn"
+alloc_instead_of_core = "warn"
+empty_drop = "warn"
+return_self_not_must_use = "warn"
+wildcard_dependencies = "warn"
+wildcard_imports = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+dbg_macro = "warn"
+todo = "warn"
 
 [package]
 name = "irontsc"
@@ -30,8 +181,8 @@ dirs = "6.0.0"
 futures-util = "0.3"
 gtk = { version = "0.10.1", package = "gtk4", features = ["v4_18"] }
 inquire = "0.7"
-ironrdp = { git = "https://github.com/Devolutions/IronRDP", features = ["connector", "dvc", "input", "cliprdr", "displaycontrol", "graphics", "session", "svc", "rdpdr", "rdpsnd"] }
-ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", features = ["reqwest"] }
+ironrdp = { path = "crates/ironrdp-local", features = ["connector", "dvc", "input", "cliprdr", "displaycontrol", "graphics", "session", "svc", "rdpdr", "rdpsnd"] }
+ironrdp-tokio = { path = "crates/ironrdp-tokio-local", features = ["reqwest"] }
 picky = "=7.0.0-rc.17"
 picky-krb = "=0.11.1"
 semver = "1.0"
@@ -45,15 +196,15 @@ tracing = "0.1.41"
 url = "2.5"
 whoami = "1.5"
 x509-cert = "0.2"
-ironrdp-mstsgu = { git = "https://github.com/Devolutions/IronRDP" }
-ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", features = ["rustls"]}
-ironrdp-cfg = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.0" }
-ironrdp-rdpfile = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.0" }
-ironrdp-rdcleanpath = { git = "https://github.com/Devolutions/IronRDP", version = "0.2.1" }
-ironrdp-rdpsnd-native = { git = "https://github.com/Devolutions/IronRDP", version = "0.4.1", default-features = false }
-ironrdp-propertyset = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.0" }
-ironrdp-async = { git = "https://github.com/Devolutions/IronRDP", version = "0.7.0" }
-ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1.5" }
+ironrdp-mstsgu = { path = "crates/ironrdp-mstsgu-local" }
+ironrdp-tls = { path = "crates/ironrdp-tls-local", features = ["rustls"]}
+ironrdp-cfg = { path = "crates/ironrdp-cfg-local", version = "0.1.0" }
+ironrdp-rdpfile = { path = "crates/ironrdp-rdpfile-local", version = "0.1.0" }
+ironrdp-rdcleanpath = { path = "crates/ironrdp-rdcleanpath-local", version = "0.2.1" }
+ironrdp-rdpsnd-native = { path = "crates/ironrdp-rdpsnd-native-local", version = "0.4.1", default-features = false }
+ironrdp-propertyset = { path = "crates/ironrdp-propertyset-local", version = "0.1.0" }
+ironrdp-async = { path = "crates/ironrdp-async-local", version = "0.7.0" }
+ironrdp-core = { path = "crates/ironrdp-core-local", version = "0.1.5" }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 adw = { version = "0.8.0", package = "libadwaita", features = ["v1_6"] }
 arboard = "3.6.1"
@@ -64,7 +215,7 @@ zgfx = { path = "crates/zgfx" }
 ironrdp-gfx = { path = "crates/ironrdp-gfx" }
 ironrdp-h264 = { path = "crates/ironrdp-h264", optional = true }
 ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
-ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP" }
+ironrdp-pdu = { path = "crates/ironrdp-pdu-local" }
 # Video Redirection (MS-RDPEVOR) support
 ironrdp-video = { path = "crates/ironrdp-video", optional = true }
 ironrdp-geometry = { path = "crates/ironrdp-geometry", optional = true }
@@ -72,6 +223,7 @@ ironrdp-geometry = { path = "crates/ironrdp-geometry", optional = true }
 ironrdp-udp = { path = "crates/ironrdp-udp" }
 rand = "0.8"
 sha2 = "0.10"
+ironrdp-connector = { path = "crates/ironrdp-connector-local" }
 
 [features]
 default = []
@@ -79,11 +231,23 @@ h264 = ["ironrdp-h264"]
 video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264"]
 
 [patch."https://github.com/Devolutions/IronRDP"]
+ironrdp = { path = "crates/ironrdp-local" }
 ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
 ironrdp-connector = { path = "crates/ironrdp-connector-local" }
 ironrdp-pdu = { path = "crates/ironrdp-pdu-local" }
 ironrdp-async = { path = "crates/ironrdp-async-local" }
 ironrdp-tokio = { path = "crates/ironrdp-tokio-local" }
+ironrdp-session = { path = "crates/ironrdp-session-local" }
+ironrdp-cliprdr = { path = "crates/ironrdp-cliprdr-local" }
+ironrdp-acceptor = { path = "crates/ironrdp-acceptor-local" }
+ironrdp-graphics = { path = "crates/ironrdp-graphics-local" }
+ironrdp-input = { path = "crates/ironrdp-input-local" }
+ironrdp-server = { path = "crates/ironrdp-server-local" }
+ironrdp-svc = { path = "crates/ironrdp-svc-local" }
+ironrdp-rdpdr = { path = "crates/ironrdp-rdpdr-local" }
+ironrdp-rdpsnd = { path = "crates/ironrdp-rdpsnd-local" }
+ironrdp-ainput = { path = "crates/ironrdp-ainput-local" }
+ironrdp-displaycontrol = { path = "crates/ironrdp-displaycontrol-local" }
 
 [patch.crates-io]
-ironrdp-core = { git = "https://github.com/Devolutions/IronRDP" }
+ironrdp-core = { path = "crates/ironrdp-core-local" }
