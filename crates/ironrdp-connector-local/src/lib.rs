@@ -26,8 +26,8 @@ use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_pdu::x224::{X224, X224Data};
 use ironrdp_pdu::PduHint;
 use ironrdp_pdu::gcc::{
-    self, ClientClusterData, ClientMessageChannelData, MultiTransportChannelData,
-    MultiTransportFlags, RedirectionFlags, RedirectionVersion,
+    self, ClientClusterData, ClientMessageChannelData, MonitorOrientation,
+    MultiTransportChannelData, MultiTransportFlags, RedirectionFlags, RedirectionVersion,
 };
 pub use sspi;
 
@@ -458,6 +458,7 @@ pub fn create_client_data(
     config: &Config,
     _encryption_methods: u32,
     static_channels: Vec<gcc::ChannelDef>,
+    selected_protocol: ironrdp_pdu::nego::SecurityProtocol,
 ) -> gcc::ClientGccBlocks {
     use ironrdp_pdu::gcc::{
         ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags, ClientGccBlocks,
@@ -491,13 +492,17 @@ pub fn create_client_data(
                     | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU,
             ),
             connection_type: Some(ConnectionType::Autodetect),
-            server_selected_protocol: None,
+            server_selected_protocol: Some(selected_protocol),
             desktop_scale_factor: Some(config.desktop_scale_factor),
             device_scale_factor: None,
             dig_product_id: Some(config.dig_product_id.clone()),
-            desktop_physical_width: None,
-            desktop_physical_height: None,
-            desktop_orientation: None,
+            desktop_physical_width: Some(0),
+            desktop_physical_height: Some(0),
+            desktop_orientation: if config.desktop_size.width > config.desktop_size.height {
+                Some(MonitorOrientation::Landscape as u16)
+            } else {
+                Some(MonitorOrientation::Portrait as u16)
+            },
         },
     };
 

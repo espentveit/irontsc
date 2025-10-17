@@ -157,6 +157,9 @@ impl<'de> Decode<'de> for ShareControlHeader {
             .ok_or_else(|| {
                 eprintln!("❌ Invalid PDU type: 0x{:04x} ({})", pdu_type_value, pdu_type_value);
                 eprintln!("   Known types: DemandActivePdu=0x1, ConfirmActivePdu=0x3, DeactivateAllPdu=0x6, DataPdu=0x7, ServerRedirect=0xa");
+                eprintln!("   Full header so far: totalLength={}, pdu_type_with_version=0x{:04x}, pduSource=0x{:04x}, shareId=0x{:08x}", 
+                         total_length, pdu_type_with_version, pdu_source, share_id);
+                eprintln!("   This usually means frame misalignment or protocol version mismatch!");
                 invalid_field_err!("pdu_type", "invalid pdu type")
             })?;
         let pdu_version = pdu_type_with_version & !SHARE_CONTROL_HEADER_MASK;

@@ -114,7 +114,7 @@ impl Encode for ClientCoreData {
         ime_file_name_dst.resize(IME_FILE_NAME_SIZE - 2, 0);
         eprintln!("   ime_file_name_dst length: {} bytes", ime_file_name_dst.len());
 
-        let start_pos = dst.len();
+        let start_pos = dst.pos();
         eprintln!("   Buffer position at start: {}", start_pos);
 
         dst.write_u32(self.version.0);
@@ -126,21 +126,21 @@ impl Encode for ClientCoreData {
         dst.write_u32(self.client_build);
         dst.write_slice(client_name_dst.as_ref());
         dst.write_u16(0); // client name UTF-16 null terminator
-        eprintln!("   After client_name: written {} bytes", dst.len() - start_pos);
+        eprintln!("   After client_name: written {} bytes", dst.pos() - start_pos);
 
         dst.write_u32(self.keyboard_type.as_u32());
         dst.write_u32(self.keyboard_subtype);
         dst.write_u32(self.keyboard_functional_keys_count);
         dst.write_slice(ime_file_name_dst.as_ref());
-        eprintln!("   After ime_file_name buffer: written {} bytes", dst.len() - start_pos);
+        eprintln!("   After ime_file_name buffer: written {} bytes", dst.pos() - start_pos);
 
         dst.write_u16(0); // ime file name UTF-16 null terminator
         eprintln!("   After ime_file_name null terminator: written {} bytes (should be {})",
-                  dst.len() - start_pos, Self::FIXED_PART_SIZE);
+                  dst.pos() - start_pos, Self::FIXED_PART_SIZE);
 
         eprintln!("   About to encode optional_data...");
         self.optional_data.encode(dst)?;
-        eprintln!("   After optional_data: written {} bytes", dst.len() - start_pos);
+        eprintln!("   After optional_data: written {} bytes", dst.pos() - start_pos);
         eprintln!("🔧 ClientCoreData::encode - COMPLETE");
 
         Ok(())

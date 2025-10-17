@@ -406,11 +406,8 @@ impl Sequence for ClientConnector {
                     .map(ironrdp_svc::make_channel_definition)
                     .collect();
 
-                let client_gcc_blocks = crate::create_client_data(
-                    &self.config,
-                    selected_protocol.bits(),
-                    static_channel_defs,
-                );
+                let client_gcc_blocks =
+                    crate::create_client_data(&self.config, selected_protocol.bits(), static_channel_defs, selected_protocol);
 
                 info!(
                     "GCC blocks created: core version={:?}, security={}, network={}, cluster={}, message_channel={}, multi_transport={:?}",
