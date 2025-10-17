@@ -444,6 +444,10 @@ struct RdpSettings {
     username: String,
     #[serde(default)]
     domain: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    save_password: bool,
     #[serde(default = "default_width")]
     desktopwidth: u16,
     #[serde(default = "default_height")]
@@ -472,6 +476,8 @@ impl Default for RdpSettings {
             server: String::new(),
             username: String::new(),
             domain: String::new(),
+            password: String::new(),
+            save_password: false,
             desktopwidth: 1024,
             desktopheight: 768,
             session_bpp: 32,
@@ -519,6 +525,10 @@ impl RdpSettings {
                 "full address" => settings.server = value.to_string(),
                 "username" => settings.username = value.to_string(),
                 "domain" => settings.domain = value.to_string(),
+                "password 51" => {
+                    settings.password = value.to_string();
+                    settings.save_password = true;
+                }
                 "desktopwidth" => {
                     if let Ok(w) = value.parse() {
                         settings.desktopwidth = w;
@@ -614,6 +624,11 @@ impl RdpSettings {
             format!("username:s:{}", self.username),
             format!("domain:s:{}", self.domain),
         ]);
+
+        // Add password if save_password is enabled (plaintext for testing)
+        if self.save_password && !self.password.is_empty() {
+            lines.push(format!("password 51:b:{}", self.password));
+        }
 
         lines.join("\n")
     }
@@ -2489,11 +2504,100 @@ fn main() -> glib::ExitCode {
         .with_line_number(true)
         .init();
 
-    // Create a new application
-    let app = Application::builder().application_id(APP_ID).build();
+    // Create a new application with command-line handling
+    let app = Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+
+    // Add command line options
+    app.add_main_option(
+        "autologon",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Automatically connect using saved credentials",
+        None,
+    );
+
+    app.add_main_option(
+        "computer",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "Computer name or IP address",
+        Some("ADDRESS"),
+    );
+
+    app.add_main_option(
+        "username",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "Username for authentication",
+        Some("USERNAME"),
+    );
+
+    app.add_main_option(
+        "password",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "Password for authentication",
+        Some("PASSWORD"),
+    );
+
+    app.add_main_option(
+        "domain",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "Domain name",
+        Some("DOMAIN"),
+    );
+
+    // Handle command line
+    app.connect_command_line(|app, cmd_line| {
+        let options = cmd_line.options_dict();
+        let autologon = options.contains("autologon");
+        eprintln!("Command line handler: autologon={}", autologon);
+
+        // Extract command line parameters
+        let computer = options.lookup::<String>("computer").ok().flatten();
+        let username = options.lookup::<String>("username").ok().flatten();
+        let password = options.lookup::<String>("password").ok().flatten();
+        let domain = options.lookup::<String>("domain").ok().flatten();
+
+        // Store parameters in app data BEFORE activating
+        unsafe {
+            app.set_data("autologon", autologon);
+            if let Some(comp) = computer {
+                app.set_data("computer", comp);
+            }
+            if let Some(user) = username {
+                app.set_data("username", user);
+            }
+            if let Some(pass) = password {
+                app.set_data("password", pass);
+            }
+            if let Some(dom) = domain {
+                app.set_data("domain", dom);
+            }
+        }
+
+        app.activate();
+
+        glib::ExitCode::SUCCESS
+    });
 
     // Connect to "activate" signal of `app`
-    app.connect_activate(build_ui);
+    app.connect_activate(|app| {
+        let autologon = unsafe {
+            app.data::<bool>("autologon").map(|ptr| *ptr.as_ptr()).unwrap_or(false)
+        };
+        eprintln!("Activate handler: retrieved autologon={}", autologon);
+        build_ui(app, autologon);
+    });
 
     // Run the application
     app.run()
@@ -2501,7 +2605,9 @@ fn main() -> glib::ExitCode {
 
 // Complete replacement for build_ui function with tabbed interface
 
-fn build_ui(app: &Application) {
+fn build_ui(app: &Application, autologon: bool) {
+    eprintln!("build_ui called with autologon={}", autologon);
+
     let style_manager = adw::StyleManager::default();
     style_manager.set_color_scheme(adw::ColorScheme::Default);
 
@@ -2527,7 +2633,28 @@ fn build_ui(app: &Application) {
 
     // Load RDP settings
     let rdp_settings = Rc::new(RefCell::new(RdpSettings::load_default()));
-    let settings_for_ui = rdp_settings.borrow().clone();
+    let mut settings_for_ui = rdp_settings.borrow().clone();
+
+    // Override with command line parameters if provided
+    unsafe {
+        if let Some(computer) = app.data::<String>("computer") {
+            settings_for_ui.server = (*computer.as_ptr()).clone();
+            eprintln!("Overriding server with command line: {}", settings_for_ui.server);
+        }
+        if let Some(username) = app.data::<String>("username") {
+            settings_for_ui.username = (*username.as_ptr()).clone();
+            eprintln!("Overriding username with command line: {}", settings_for_ui.username);
+        }
+        if let Some(password) = app.data::<String>("password") {
+            settings_for_ui.password = (*password.as_ptr()).clone();
+            settings_for_ui.save_password = false; // Don't save command line passwords
+            eprintln!("Overriding password with command line value");
+        }
+        if let Some(domain) = app.data::<String>("domain") {
+            settings_for_ui.domain = (*domain.as_ptr()).clone();
+            eprintln!("Overriding domain with command line: {}", settings_for_ui.domain);
+        }
+    }
 
     // === BASIC FIELDS (Always visible when options are hidden) ===
     let basic_fields_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -2572,6 +2699,9 @@ fn build_ui(app: &Application) {
     let password_input = gtk::Entry::new();
     password_input.set_visibility(false);
     password_input.set_hexpand(true);
+    if !settings_for_ui.password.is_empty() {
+        password_input.set_text(&settings_for_ui.password);
+    }
     let password_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let password_label = gtk::Label::new(Some("Password:"));
     password_label.set_width_chars(12);
@@ -2579,6 +2709,16 @@ fn build_ui(app: &Application) {
     password_box.append(&password_label);
     password_box.append(&password_input);
     basic_fields_box.append(&password_box);
+
+    // Save password checkbox (basic)
+    let save_password_checkbox = gtk::CheckButton::with_label("Save password");
+    save_password_checkbox.set_active(settings_for_ui.save_password);
+    let save_password_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let save_password_label = gtk::Label::new(Some(""));
+    save_password_label.set_width_chars(12);
+    save_password_box.append(&save_password_label);
+    save_password_box.append(&save_password_checkbox);
+    basic_fields_box.append(&save_password_box);
 
     dialog_box.append(&basic_fields_box);
 
@@ -2633,6 +2773,9 @@ fn build_ui(app: &Application) {
     let password_input_tab = gtk::Entry::new();
     password_input_tab.set_visibility(false);
     password_input_tab.set_hexpand(true);
+    if !settings_for_ui.password.is_empty() {
+        password_input_tab.set_text(&settings_for_ui.password);
+    }
     let password_box_tab = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let password_label_tab = gtk::Label::new(Some("Password:"));
     password_label_tab.set_width_chars(12);
@@ -2640,6 +2783,16 @@ fn build_ui(app: &Application) {
     password_box_tab.append(&password_label_tab);
     password_box_tab.append(&password_input_tab);
     general_page.append(&password_box_tab);
+
+    // Save password checkbox (in tab - synced with basic field)
+    let save_password_checkbox_tab = gtk::CheckButton::with_label("Save password");
+    save_password_checkbox_tab.set_active(settings_for_ui.save_password);
+    let save_password_box_tab = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let save_password_label_tab = gtk::Label::new(Some(""));
+    save_password_label_tab.set_width_chars(12);
+    save_password_box_tab.append(&save_password_label_tab);
+    save_password_box_tab.append(&save_password_checkbox_tab);
+    general_page.append(&save_password_box_tab);
 
     // Sync basic fields with tab fields bidirectionally with guards to prevent infinite loops
     let server_updating = Rc::new(RefCell::new(false));
@@ -2729,6 +2882,27 @@ fn build_ui(app: &Application) {
                 *password_updating_clone.borrow_mut() = false;
             }
         });
+
+    // Sync save password checkboxes
+    let save_password_updating = Rc::new(RefCell::new(false));
+    let save_password_checkbox_tab_clone = save_password_checkbox_tab.clone();
+    let save_password_updating_clone = save_password_updating.clone();
+    save_password_checkbox.connect_toggled(move |checkbox| {
+        if !*save_password_updating_clone.borrow() {
+            *save_password_updating_clone.borrow_mut() = true;
+            save_password_checkbox_tab_clone.set_active(checkbox.is_active());
+            *save_password_updating_clone.borrow_mut() = false;
+        }
+    });
+    let save_password_checkbox_clone = save_password_checkbox.clone();
+    let save_password_updating_clone = save_password_updating.clone();
+    save_password_checkbox_tab.connect_toggled(move |checkbox| {
+        if !*save_password_updating_clone.borrow() {
+            *save_password_updating_clone.borrow_mut() = true;
+            save_password_checkbox_clone.set_active(checkbox.is_active());
+            *save_password_updating_clone.borrow_mut() = false;
+        }
+    });
 
     // Connection settings section
     let connection_settings_frame = gtk::Frame::new(Some("Connection settings"));
@@ -2946,12 +3120,16 @@ fn build_ui(app: &Application) {
     let server_input_for_save = server_input.clone();
     let username_input_for_save = username_input.clone();
     let domain_input_for_save = domain_input.clone();
+    let password_input_for_save = password_input.clone();
+    let save_password_checkbox_for_save = save_password_checkbox.clone();
     let dpi_dropdown_for_save = dpi_dropdown.clone();
     save_button.connect_clicked(move |_| {
         let mut settings = rdp_settings_for_save.borrow_mut();
         settings.server = server_input_for_save.buffer().text().to_string();
         settings.username = username_input_for_save.buffer().text().to_string();
         settings.domain = domain_input_for_save.buffer().text().to_string();
+        settings.password = password_input_for_save.buffer().text().to_string();
+        settings.save_password = save_password_checkbox_for_save.is_active();
         settings.set_dpi_scaling(dpi_value_from_index(dpi_dropdown_for_save.selected()));
 
         if let Err(e) = settings.save_as_default() {
@@ -2964,6 +3142,8 @@ fn build_ui(app: &Application) {
     let server_input_for_save_as = server_input.clone();
     let username_input_for_save_as = username_input.clone();
     let domain_input_for_save_as = domain_input.clone();
+    let password_input_for_save_as = password_input.clone();
+    let save_password_checkbox_for_save_as = save_password_checkbox.clone();
     let dpi_dropdown_for_save_as = dpi_dropdown.clone();
     let window_for_save_as = window_clone.clone();
     save_as_button.connect_clicked(move |_| {
@@ -2974,6 +3154,8 @@ fn build_ui(app: &Application) {
             let server_input = server_input_for_save_as.clone();
             let username_input = username_input_for_save_as.clone();
             let domain_input = domain_input_for_save_as.clone();
+            let password_input = password_input_for_save_as.clone();
+            let save_password_checkbox = save_password_checkbox_for_save_as.clone();
             let dpi_dropdown = dpi_dropdown_for_save_as.clone();
 
             move |result| {
@@ -2982,6 +3164,8 @@ fn build_ui(app: &Application) {
                     settings.server = server_input.buffer().text().to_string();
                     settings.username = username_input.buffer().text().to_string();
                     settings.domain = domain_input.buffer().text().to_string();
+                    settings.password = password_input.buffer().text().to_string();
+                    settings.save_password = save_password_checkbox.is_active();
                     settings.set_dpi_scaling(dpi_value_from_index(dpi_dropdown.selected()));
 
                     if let Some(path) = file.path() {
@@ -2999,6 +3183,8 @@ fn build_ui(app: &Application) {
     let server_input_for_open = server_input.clone();
     let username_input_for_open = username_input.clone();
     let domain_input_for_open = domain_input.clone();
+    let password_input_for_open = password_input.clone();
+    let save_password_checkbox_for_open = save_password_checkbox.clone();
     let resolution_slider_for_open = resolution_slider.clone();
     let colors_dropdown_for_open = colors_dropdown.clone();
     let resolution_value_label_for_open = resolution_value_label.clone();
@@ -3013,6 +3199,8 @@ fn build_ui(app: &Application) {
             let server_input = server_input_for_open.clone();
             let username_input = username_input_for_open.clone();
             let domain_input = domain_input_for_open.clone();
+            let password_input = password_input_for_open.clone();
+            let save_password_checkbox = save_password_checkbox_for_open.clone();
             let resolution_slider = resolution_slider_for_open.clone();
             let colors_dropdown = colors_dropdown_for_open.clone();
             let resolution_value_label = resolution_value_label_for_open.clone();
@@ -3025,6 +3213,12 @@ fn build_ui(app: &Application) {
                             server_input.buffer().set_text(&loaded_settings.server);
                             username_input.buffer().set_text(&loaded_settings.username);
                             domain_input.buffer().set_text(&loaded_settings.domain);
+                            if loaded_settings.save_password {
+                                password_input.buffer().set_text(&loaded_settings.password);
+                            } else {
+                                password_input.buffer().set_text("");
+                            }
+                            save_password_checkbox.set_active(loaded_settings.save_password);
 
                             let resolution = loaded_settings.get_resolution();
                             resolution_slider.set_value(resolution.to_index() as f64);
@@ -3050,6 +3244,7 @@ fn build_ui(app: &Application) {
     let username_input_for_connect = username_input.clone();
     let domain_input_for_connect = domain_input.clone();
     let password_input_for_connect = password_input.clone();
+    let save_password_checkbox_for_connect = save_password_checkbox.clone();
     let dpi_dropdown_for_connect = dpi_dropdown.clone();
     let window_for_connect = window_clone.clone();
     let app_for_connect = app.clone();
@@ -3074,6 +3269,8 @@ fn build_ui(app: &Application) {
         settings.server = server_text.to_string();
         settings.username = username_text.to_string();
         settings.domain = domain_text.to_string();
+        settings.password = password_text.to_string();
+        settings.save_password = save_password_checkbox_for_connect.is_active();
         settings.set_dpi_scaling(dpi_value_from_index(dpi_dropdown_for_connect.selected()));
 
         if let Err(err) = settings.save_as_default() {
@@ -3101,6 +3298,17 @@ fn build_ui(app: &Application) {
     window_clone.set_child(Some(&dialog_box));
     window_clone.set_default_widget(Some(&connect_button));
     window.present();
+
+    // Auto-connect if autologon flag is set
+    if autologon {
+        eprintln!("Autologon is enabled, scheduling auto-connect");
+        let connect_button_for_autologon = connect_button.clone();
+        // Use a timeout to ensure the UI is fully initialized
+        glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+            eprintln!("Auto-clicking connect button");
+            connect_button_for_autologon.emit_clicked();
+        });
+    }
 
     // Clear selection
     glib::idle_add_local_once(move || {

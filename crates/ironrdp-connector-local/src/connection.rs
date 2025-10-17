@@ -893,7 +893,7 @@ fn create_client_info_pdu(config: &Config, client_addr: &SocketAddr) -> rdp::Cli
         | ClientInfoFlags::DISABLE_CTRL_ALT_DEL
         | ClientInfoFlags::LOGON_NOTIFY
         | ClientInfoFlags::LOGON_ERRORS
-        | ClientInfoFlags::VIDEO_DISABLE
+        // VIDEO_DISABLE is removed to enable H.264 video support via RDPEGFX or Video Redirection
         | ClientInfoFlags::ENABLE_WINDOWS_KEY
         | ClientInfoFlags::MAXIMIZE_SHELL;
 
