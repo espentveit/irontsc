@@ -1,10 +1,10 @@
+use ironrdp_core::{encode_vec, Decode, ReadCursor};
 use ironrdp_pdu::rdp::client_info::{
     AddressFamily, ClientInfo, ClientInfoFlags, CompressionType, Credentials, ExtendedClientInfo,
     ExtendedClientOptionalInfo, PerformanceFlags, TimezoneInfo,
 };
 use ironrdp_pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
 use ironrdp_pdu::rdp::ClientInfoPdu;
-use ironrdp_core::{encode_vec, Decode, ReadCursor};
 
 #[test]
 fn test_client_info_field_order() {
@@ -61,7 +61,7 @@ fn test_client_info_field_order() {
     // Parse the length fields (after codePage and flags)
     let code_page = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
     let flags_raw = u32::from_le_bytes([encoded[4], encoded[5], encoded[6], encoded[7]]);
-    
+
     let cb_domain = u16::from_le_bytes([encoded[8], encoded[9]]);
     let cb_username = u16::from_le_bytes([encoded[10], encoded[11]]);
     let cb_password = u16::from_le_bytes([encoded[12], encoded[13]]);
@@ -74,8 +74,14 @@ fn test_client_info_field_order() {
     println!("cbDomain: 0x{:04x} ({} bytes)", cb_domain, cb_domain);
     println!("cbUserName: 0x{:04x} ({} bytes)", cb_username, cb_username);
     println!("cbPassword: 0x{:04x} ({} bytes)", cb_password, cb_password);
-    println!("cbAlternateShell: 0x{:04x} ({} bytes)", cb_alternate_shell, cb_alternate_shell);
-    println!("cbWorkingDir: 0x{:04x} ({} bytes)", cb_work_dir, cb_work_dir);
+    println!(
+        "cbAlternateShell: 0x{:04x} ({} bytes)",
+        cb_alternate_shell, cb_alternate_shell
+    );
+    println!(
+        "cbWorkingDir: 0x{:04x} ({} bytes)",
+        cb_work_dir, cb_work_dir
+    );
 
     // Verify expected values
     // For Unicode encoding:
@@ -87,14 +93,20 @@ fn test_client_info_field_order() {
 
     assert_eq!(code_page, 0, "Code page should be 0");
     assert_eq!(cb_domain, 0, "Domain length should be 0 (empty domain)");
-    assert_eq!(cb_username, 10, "Username length should be 10 bytes (5 Unicode chars)");
-    assert_eq!(cb_password, 14, "Password length should be 14 bytes (7 Unicode chars)");
+    assert_eq!(
+        cb_username, 10,
+        "Username length should be 10 bytes (5 Unicode chars)"
+    );
+    assert_eq!(
+        cb_password, 14,
+        "Password length should be 14 bytes (7 Unicode chars)"
+    );
     assert_eq!(cb_alternate_shell, 0, "Alternate shell length should be 0");
     assert_eq!(cb_work_dir, 0, "Work dir length should be 0");
 
     // Verify the actual string data starts at the right position
     let strings_start = 18; // After the 5 length fields
-    
+
     // Domain (empty, just null terminator: 2 bytes for Unicode)
     let domain_start = strings_start;
     let domain_null = u16::from_le_bytes([encoded[domain_start], encoded[domain_start + 1]]);
@@ -226,14 +238,20 @@ fn test_client_info_pdu_with_security_header() {
 
     // Check security header (first 4 bytes)
     let sec_flags = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
-    assert_eq!(sec_flags, 0x00000040, "Security header should be INFO_PKT (0x40)");
+    assert_eq!(
+        sec_flags, 0x00000040,
+        "Security header should be INFO_PKT (0x40)"
+    );
 
     // Decode
     let mut cursor = ReadCursor::new(&encoded);
     let decoded = ClientInfoPdu::decode(&mut cursor).expect("Failed to decode ClientInfoPdu");
 
     assert_eq!(decoded.security_header.flags, pdu.security_header.flags);
-    assert_eq!(decoded.client_info.credentials.username, pdu.client_info.credentials.username);
+    assert_eq!(
+        decoded.client_info.credentials.username,
+        pdu.client_info.credentials.username
+    );
 
     println!("✅ ClientInfoPdu test passed!");
 }

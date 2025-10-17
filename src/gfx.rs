@@ -3,14 +3,14 @@
 //! This module implements RDPEGFX support with H.264 decoding, allowing
 //! the client to receive and render high-quality graphics from the server.
 
-use anyhow::{Result, Context as _};
+use anyhow::{Context as _, Result};
 use ironrdp_gfx::{GfxClient, GfxContext, codec};
 #[cfg(feature = "h264")]
-use ironrdp_h264::{H264Decoder, FfmpegDecoder, AvcKind};
+use ironrdp_h264::{AvcKind, FfmpegDecoder, H264Decoder};
 use std::collections::HashMap;
 use tracing::{debug, trace, warn};
 
-use crate::rdp::{RdpOutputEvent, RdpEventSender};
+use crate::rdp::{RdpEventSender, RdpOutputEvent};
 use core::num::NonZeroU16;
 
 /// GFX surface information
@@ -51,8 +51,9 @@ impl GfxState {
         #[cfg(feature = "h264")]
         let h264_decoder = {
             info!("🎬 Initializing FFmpeg H.264 decoder...");
-            let decoder = FfmpegDecoder::new()
-                .context("Failed to initialize H.264 decoder - ensure FFmpeg libraries are installed")?;
+            let decoder = FfmpegDecoder::new().context(
+                "Failed to initialize H.264 decoder - ensure FFmpeg libraries are installed",
+            )?;
             info!("✅ FFmpeg H.264 decoder initialized successfully");
             SendFfmpegDecoder(decoder)
         };
@@ -163,18 +164,24 @@ impl GfxContext for GfxState {
             bitmap_data.len()
         );
 
-        let surface = self.surfaces.get_mut(&surface_id)
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown surface: {}", surface_id))?;
 
         match codec_id {
             #[cfg(feature = "h264")]
             codec::codec_id::AVC420 => {
-                info!("🎬 Decoding H.264/AVC420 frame ({} bytes)...", bitmap_data.len());
+                info!(
+                    "🎬 Decoding H.264/AVC420 frame ({} bytes)...",
+                    bitmap_data.len()
+                );
                 // Decode H.264/AVC420
-                let frame = self.h264_decoder.0.decode_gfx_stream(
-                    AvcKind::Avc420,
-                    bitmap_data,
-                ).context("Failed to decode AVC420 frame")?;
+                let frame = self
+                    .h264_decoder
+                    .0
+                    .decode_gfx_stream(AvcKind::Avc420, bitmap_data)
+                    .context("Failed to decode AVC420 frame")?;
 
                 info!("✅ H.264 decode complete, blitting to surface");
                 Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
@@ -188,7 +195,10 @@ impl GfxContext for GfxState {
                     AvcKind::Avc444v2
                 };
 
-                let frame = self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data)
+                let frame = self
+                    .h264_decoder
+                    .0
+                    .decode_gfx_stream(kind, bitmap_data)
                     .context("Failed to decode AVC444 frame")?;
 
                 Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
@@ -199,14 +209,25 @@ impl GfxContext for GfxState {
             }
             _ => {
                 #[cfg(not(feature = "h264"))]
-                if matches!(codec_id, codec::codec_id::AVC420 | codec::codec_id::AVC444 | codec::codec_id::AVC444V2) {
+                if matches!(
+                    codec_id,
+                    codec::codec_id::AVC420 | codec::codec_id::AVC444 | codec::codec_id::AVC444V2
+                ) {
                     warn!("H.264 codec not supported - rebuild with 'h264' feature enabled");
                 } else {
-                    warn!("Unsupported codec: 0x{:04X} ({})", codec_id, codec::codec_name(codec_id));
+                    warn!(
+                        "Unsupported codec: 0x{:04X} ({})",
+                        codec_id,
+                        codec::codec_name(codec_id)
+                    );
                 }
 
                 #[cfg(feature = "h264")]
-                warn!("Unsupported codec: 0x{:04X} ({})", codec_id, codec::codec_name(codec_id));
+                warn!(
+                    "Unsupported codec: 0x{:04X} ({})",
+                    codec_id,
+                    codec::codec_name(codec_id)
+                );
             }
         }
 
@@ -221,10 +242,15 @@ impl GfxContext for GfxState {
         pixel_format: u8,
         bitmap_data: &[u8],
     ) -> Result<()> {
-        trace!(surface_id, codec_id, codec_context_id, "GFX full surface command");
+        trace!(
+            surface_id,
+            codec_id, codec_context_id, "GFX full surface command"
+        );
 
         // Full surface update (typically for progressive codecs like RFX)
-        let surface = self.surfaces.get(&surface_id)
+        let surface = self
+            .surfaces
+            .get(&surface_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown surface: {}", surface_id))?;
 
         // Create full-surface rect
@@ -246,7 +272,9 @@ impl GfxContext for GfxState {
     ) -> Result<()> {
         trace!(surface_id, "GFX solid fill: {} rects", fill_rects.len());
 
-        let surface = self.surfaces.get_mut(&surface_id)
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown surface: {}", surface_id))?;
 
         // Fill each rectangle with the solid color

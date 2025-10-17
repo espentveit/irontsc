@@ -2,8 +2,8 @@ use std::io;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -28,7 +28,8 @@ pub struct ClientSecurityData {
 impl ClientSecurityData {
     const NAME: &'static str = "ClientSecurityData";
 
-    const FIXED_PART_SIZE: usize = CLIENT_ENCRYPTION_METHODS_SIZE + CLIENT_EXT_ENCRYPTION_METHODS_SIZE;
+    const FIXED_PART_SIZE: usize =
+        CLIENT_ENCRYPTION_METHODS_SIZE + CLIENT_EXT_ENCRYPTION_METHODS_SIZE;
 
     pub fn no_security() -> Self {
         Self {
@@ -152,31 +153,37 @@ impl<'de> Decode<'de> for ServerSecurityData {
         let encryption_level = EncryptionLevel::from_u32(src.read_u32())
             .ok_or_else(|| invalid_field_err!("encryptionLevel", "invalid encryption level"))?;
 
-        let (server_random, server_cert) = if encryption_method.is_empty() && encryption_level == EncryptionLevel::None
-        {
-            (None, Vec::new())
-        } else {
-            ensure_size!(in: src, size: 4 + 4);
+        let (server_random, server_cert) =
+            if encryption_method.is_empty() && encryption_level == EncryptionLevel::None {
+                (None, Vec::new())
+            } else {
+                ensure_size!(in: src, size: 4 + 4);
 
-            let server_random_len: usize = cast_length!("serverRandomLen", src.read_u32())?;
-            if server_random_len != SERVER_RANDOM_LEN {
-                return Err(invalid_field_err!("serverRandomLen", "Invalid server random length"));
-            }
+                let server_random_len: usize = cast_length!("serverRandomLen", src.read_u32())?;
+                if server_random_len != SERVER_RANDOM_LEN {
+                    return Err(invalid_field_err!(
+                        "serverRandomLen",
+                        "Invalid server random length"
+                    ));
+                }
 
-            let server_cert_len = cast_length!("serverCertLen", src.read_u32())?;
+                let server_cert_len = cast_length!("serverCertLen", src.read_u32())?;
 
-            if server_cert_len > MAX_SERVER_CERT_LEN {
-                return Err(invalid_field_err!("serverCetLen", "Invalid server certificate length"));
-            }
+                if server_cert_len > MAX_SERVER_CERT_LEN {
+                    return Err(invalid_field_err!(
+                        "serverCetLen",
+                        "Invalid server certificate length"
+                    ));
+                }
 
-            ensure_size!(in: src, size: SERVER_RANDOM_LEN);
-            let server_random = src.read_array();
+                ensure_size!(in: src, size: SERVER_RANDOM_LEN);
+                let server_random = src.read_array();
 
-            ensure_size!(in: src, size: server_cert_len);
-            let server_cert = src.read_slice(server_cert_len);
+                ensure_size!(in: src, size: server_cert_len);
+                let server_cert = src.read_slice(server_cert_len);
 
-            (Some(server_random), server_cert.into())
-        };
+                (Some(server_random), server_cert.into())
+            };
 
         Ok(Self {
             encryption_method,

@@ -33,7 +33,10 @@ fn from_buffer_correctly_parses_virtual_channel_incomplete_capset() {
 
 #[test]
 fn from_buffer_correctly_parses_virtual_channel_capset() {
-    assert_eq!(*VIRTUAL_CHANNEL, decode(VIRTUAL_CHANNEL_BUFFER.as_ref()).unwrap());
+    assert_eq!(
+        *VIRTUAL_CHANNEL,
+        decode(VIRTUAL_CHANNEL_BUFFER.as_ref()).unwrap()
+    );
 }
 
 #[test]

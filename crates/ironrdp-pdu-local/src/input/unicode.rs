@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, read_padding, write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    ensure_fixed_part_size, read_padding, write_padding, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +44,10 @@ impl<'de> Decode<'de> for UnicodePdu {
         let unicode_code = src.read_u16();
         read_padding!(src, 2);
 
-        Ok(Self { flags, unicode_code })
+        Ok(Self {
+            flags,
+            unicode_code,
+        })
     }
 }
 

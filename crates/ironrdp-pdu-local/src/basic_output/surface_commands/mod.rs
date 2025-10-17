@@ -3,8 +3,8 @@ mod tests;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -63,9 +63,13 @@ impl<'de> Decode<'de> for SurfaceCommand<'de> {
             .ok_or_else(|| invalid_field_err!("cmdType", "invalid surface command"))?;
 
         match cmd_type {
-            SurfaceCommandType::SetSurfaceBits => Ok(Self::SetSurfaceBits(SurfaceBitsPdu::decode(src)?)),
+            SurfaceCommandType::SetSurfaceBits => {
+                Ok(Self::SetSurfaceBits(SurfaceBitsPdu::decode(src)?))
+            }
             SurfaceCommandType::FrameMarker => Ok(Self::FrameMarker(FrameMarkerPdu::decode(src)?)),
-            SurfaceCommandType::StreamSurfaceBits => Ok(Self::StreamSurfaceBits(SurfaceBitsPdu::decode(src)?)),
+            SurfaceCommandType::StreamSurfaceBits => {
+                Ok(Self::StreamSurfaceBits(SurfaceBitsPdu::decode(src)?))
+            }
         }
     }
 }
@@ -160,7 +164,10 @@ impl<'de> Decode<'de> for FrameMarkerPdu {
             Some(src.read_u32())
         };
 
-        Ok(Self { frame_action, frame_id })
+        Ok(Self {
+            frame_action,
+            frame_id,
+        })
     }
 }
 
@@ -240,11 +247,12 @@ impl<'de> Decode<'de> for ExtendedBitmapDataPdu<'de> {
         let height = src.read_u16();
         let data_length = cast_length!("bitmap data length", src.read_u32())?;
 
-        let expected_remaining_size = if flags.contains(BitmapDataFlags::COMPRESSED_BITMAP_HEADER_PRESENT) {
-            data_length + BitmapDataHeader::ENCODED_SIZE
-        } else {
-            data_length
-        };
+        let expected_remaining_size =
+            if flags.contains(BitmapDataFlags::COMPRESSED_BITMAP_HEADER_PRESENT) {
+                data_length + BitmapDataHeader::ENCODED_SIZE
+            } else {
+                data_length
+            };
 
         ensure_size!(in: src, size: expected_remaining_size);
 

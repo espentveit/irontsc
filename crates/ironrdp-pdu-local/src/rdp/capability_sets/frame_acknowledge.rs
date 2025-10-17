@@ -1,4 +1,6 @@
-use ironrdp_core::{ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor};
+use ironrdp_core::{
+    ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameAcknowledge {
@@ -70,6 +72,9 @@ mod test {
 
     #[test]
     fn buffer_length_is_correct_for_frame_acknowledge() {
-        assert_eq!(FRAME_ACKNOWLEDGE_PDU_BUFFER.len(), FRAME_ACKNOWLEDGE_PDU.size());
+        assert_eq!(
+            FRAME_ACKNOWLEDGE_PDU_BUFFER.len(),
+            FRAME_ACKNOWLEDGE_PDU.size()
+        );
     }
 }

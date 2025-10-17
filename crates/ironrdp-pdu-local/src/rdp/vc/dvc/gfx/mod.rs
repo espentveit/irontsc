@@ -1,17 +1,18 @@
 mod graphics_messages;
 
 pub use graphics_messages::{
-    Avc420BitmapStream, Avc444BitmapStream, CacheImportReplyPdu, CacheToSurfacePdu, CapabilitiesAdvertisePdu,
-    CapabilitiesConfirmPdu, CapabilitiesV103Flags, CapabilitiesV104Flags, CapabilitiesV107Flags, CapabilitiesV10Flags,
-    CapabilitiesV81Flags, CapabilitiesV8Flags, CapabilitySet, Codec1Type, Codec2Type, Color, CreateSurfacePdu,
-    DeleteEncodingContextPdu, DeleteSurfacePdu, Encoding, EndFramePdu, EvictCacheEntryPdu, FrameAcknowledgePdu,
-    MapSurfaceToOutputPdu, MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu, PixelFormat, Point, QuantQuality,
-    QueueDepth, ResetGraphicsPdu, SolidFillPdu, StartFramePdu, SurfaceToCachePdu, SurfaceToSurfacePdu, Timestamp,
-    WireToSurface1Pdu, WireToSurface2Pdu,
+    Avc420BitmapStream, Avc444BitmapStream, CacheImportReplyPdu, CacheToSurfacePdu,
+    CapabilitiesAdvertisePdu, CapabilitiesConfirmPdu, CapabilitiesV103Flags, CapabilitiesV104Flags,
+    CapabilitiesV107Flags, CapabilitiesV10Flags, CapabilitiesV81Flags, CapabilitiesV8Flags,
+    CapabilitySet, Codec1Type, Codec2Type, Color, CreateSurfacePdu, DeleteEncodingContextPdu,
+    DeleteSurfacePdu, Encoding, EndFramePdu, EvictCacheEntryPdu, FrameAcknowledgePdu,
+    MapSurfaceToOutputPdu, MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu, PixelFormat,
+    Point, QuantQuality, QueueDepth, ResetGraphicsPdu, SolidFillPdu, StartFramePdu,
+    SurfaceToCachePdu, SurfaceToSurfacePdu, Timestamp, WireToSurface1Pdu, WireToSurface2Pdu,
 };
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -121,23 +122,45 @@ impl<'a> Decode<'a> for ServerPdu {
                 ServerPduType::DeleteEncodingContext => {
                     ServerPdu::DeleteEncodingContext(DeleteEncodingContextPdu::decode(src)?)
                 }
-                ServerPduType::WireToSurface1 => ServerPdu::WireToSurface1(WireToSurface1Pdu::decode(src)?),
-                ServerPduType::WireToSurface2 => ServerPdu::WireToSurface2(WireToSurface2Pdu::decode(src)?),
+                ServerPduType::WireToSurface1 => {
+                    ServerPdu::WireToSurface1(WireToSurface1Pdu::decode(src)?)
+                }
+                ServerPduType::WireToSurface2 => {
+                    ServerPdu::WireToSurface2(WireToSurface2Pdu::decode(src)?)
+                }
                 ServerPduType::SolidFill => ServerPdu::SolidFill(SolidFillPdu::decode(src)?),
-                ServerPduType::SurfaceToSurface => ServerPdu::SurfaceToSurface(SurfaceToSurfacePdu::decode(src)?),
-                ServerPduType::SurfaceToCache => ServerPdu::SurfaceToCache(SurfaceToCachePdu::decode(src)?),
-                ServerPduType::CacheToSurface => ServerPdu::CacheToSurface(CacheToSurfacePdu::decode(src)?),
-                ServerPduType::EvictCacheEntry => ServerPdu::EvictCacheEntry(EvictCacheEntryPdu::decode(src)?),
-                ServerPduType::CreateSurface => ServerPdu::CreateSurface(CreateSurfacePdu::decode(src)?),
-                ServerPduType::DeleteSurface => ServerPdu::DeleteSurface(DeleteSurfacePdu::decode(src)?),
+                ServerPduType::SurfaceToSurface => {
+                    ServerPdu::SurfaceToSurface(SurfaceToSurfacePdu::decode(src)?)
+                }
+                ServerPduType::SurfaceToCache => {
+                    ServerPdu::SurfaceToCache(SurfaceToCachePdu::decode(src)?)
+                }
+                ServerPduType::CacheToSurface => {
+                    ServerPdu::CacheToSurface(CacheToSurfacePdu::decode(src)?)
+                }
+                ServerPduType::EvictCacheEntry => {
+                    ServerPdu::EvictCacheEntry(EvictCacheEntryPdu::decode(src)?)
+                }
+                ServerPduType::CreateSurface => {
+                    ServerPdu::CreateSurface(CreateSurfacePdu::decode(src)?)
+                }
+                ServerPduType::DeleteSurface => {
+                    ServerPdu::DeleteSurface(DeleteSurfacePdu::decode(src)?)
+                }
                 ServerPduType::StartFrame => ServerPdu::StartFrame(StartFramePdu::decode(src)?),
                 ServerPduType::EndFrame => ServerPdu::EndFrame(EndFramePdu::decode(src)?),
-                ServerPduType::ResetGraphics => ServerPdu::ResetGraphics(ResetGraphicsPdu::decode(src)?),
-                ServerPduType::MapSurfaceToOutput => ServerPdu::MapSurfaceToOutput(MapSurfaceToOutputPdu::decode(src)?),
+                ServerPduType::ResetGraphics => {
+                    ServerPdu::ResetGraphics(ResetGraphicsPdu::decode(src)?)
+                }
+                ServerPduType::MapSurfaceToOutput => {
+                    ServerPdu::MapSurfaceToOutput(MapSurfaceToOutputPdu::decode(src)?)
+                }
                 ServerPduType::CapabilitiesConfirm => {
                     ServerPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu::decode(src)?)
                 }
-                ServerPduType::CacheImportReply => ServerPdu::CacheImportReply(CacheImportReplyPdu::decode(src)?),
+                ServerPduType::CacheImportReply => {
+                    ServerPdu::CacheImportReply(CacheImportReplyPdu::decode(src)?)
+                }
                 ServerPduType::MapSurfaceToScaledOutput => {
                     ServerPdu::MapSurfaceToScaledOutput(MapSurfaceToScaledOutputPdu::decode(src)?)
                 }
@@ -206,7 +229,9 @@ impl<'a> Decode<'a> for ClientPdu {
         let pdu_length = cast_length!("bufferLen", src.read_u32())?;
 
         let client_pdu = match pdu_type {
-            ClientPduType::FrameAcknowledge => ClientPdu::FrameAcknowledge(FrameAcknowledgePdu::decode(src)?),
+            ClientPduType::FrameAcknowledge => {
+                ClientPdu::FrameAcknowledge(FrameAcknowledgePdu::decode(src)?)
+            }
             ClientPduType::CapabilitiesAdvertise => {
                 ClientPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu::decode(src)?)
             }

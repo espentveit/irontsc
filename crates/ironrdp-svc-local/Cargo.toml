@@ -1,0 +1,23 @@
+[package]
+name = "ironrdp-svc"
+version = "0.5.0"
+readme = "README.md"
+description = "IronRDP traits to implement RDP static virtual channels"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = []
+std = []
+
+[dependencies]
+ironrdp-core = { path = "../ironrdp-core-local", version = "0.1" } # public
+ironrdp-pdu = { path = "../ironrdp-pdu-local", version = "0.6", features = ["alloc", "std"] } # public
+bitflags = "2.9"
+
+
+

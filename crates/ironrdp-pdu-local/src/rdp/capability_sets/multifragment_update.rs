@@ -1,4 +1,6 @@
-use ironrdp_core::{ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor};
+use ironrdp_core::{
+    ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct MultifragmentUpdate {
@@ -68,6 +70,9 @@ mod test {
 
     #[test]
     fn buffer_length_is_correct_for_multifragment_update() {
-        assert_eq!(MULTIFRAGMENT_UPDATE_PDU_BUFFER.len(), MULTIFRAGMENT_UPDATE_PDU.size());
+        assert_eq!(
+            MULTIFRAGMENT_UPDATE_PDU_BUFFER.len(),
+            MULTIFRAGMENT_UPDATE_PDU.size()
+        );
     }
 }

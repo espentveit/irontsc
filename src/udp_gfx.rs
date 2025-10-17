@@ -1,8 +1,7 @@
 /// UDP-enabled GFX channel for H.264 video streaming
-/// 
+///
 /// This module integrates UDP transport with the RDPEGFX channel to enable
 /// low-latency H.264 video streaming over UDP instead of TCP.
-
 use anyhow::{Context as _, Result};
 use ironrdp_udp::CorrelationId;
 use std::net::SocketAddr;
@@ -10,9 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::udp_transport::{
-    create_video_udp_transport, UdpTransportCommand, UdpTransportEvent,
-};
+use crate::udp_transport::{UdpTransportCommand, UdpTransportEvent, create_video_udp_transport};
 
 /// UDP-enabled GFX channel manager
 pub struct UdpGfxChannel {
@@ -117,7 +114,7 @@ impl Drop for UdpGfxChannel {
 }
 
 /// Example usage for integrating UDP transport with GFX channel
-/// 
+///
 /// This shows how to create a UDP transport for H.264 video data and use it
 /// alongside the regular TCP-based RDP connection.
 pub async fn example_udp_gfx_integration() -> Result<()> {

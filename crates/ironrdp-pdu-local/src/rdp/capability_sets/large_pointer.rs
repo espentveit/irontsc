@@ -1,5 +1,7 @@
 use bitflags::bitflags;
-use ironrdp_core::{ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor};
+use ironrdp_core::{
+    ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct LargePointer {
@@ -61,7 +63,10 @@ mod test {
 
     #[test]
     fn from_buffer_correctly_parses_large_pointer() {
-        assert_eq!(LARGE_POINTER_PDU, decode(LARGE_POINTER_PDU_BUFFER.as_ref()).unwrap());
+        assert_eq!(
+            LARGE_POINTER_PDU,
+            decode(LARGE_POINTER_PDU_BUFFER.as_ref()).unwrap()
+        );
     }
 
     #[test]

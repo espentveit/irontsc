@@ -16,7 +16,10 @@ lazy_static! {
 
 #[test]
 fn from_buffer_correctly_parses_surface_commands_capset() {
-    assert_eq!(*SURFACE_COMMANDS, decode(SURFACE_COMMANDS_BUFFER.as_ref()).unwrap());
+    assert_eq!(
+        *SURFACE_COMMANDS,
+        decode(SURFACE_COMMANDS_BUFFER.as_ref()).unwrap()
+    );
 }
 
 #[test]

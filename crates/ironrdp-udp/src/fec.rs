@@ -1,5 +1,5 @@
 /// Forward Error Correction (FEC) implementation based on MS-RDPEUDP spec section 3.1.1.6
-/// 
+///
 /// This module implements Galois Field (GF(2^8)) arithmetic and FEC encoding/decoding
 /// using Reed-Solomon-like codes over GF(2^8).
 
@@ -17,24 +17,27 @@ impl GaloisField {
     pub fn new() -> Self {
         let mut log_table = [0u8; 256];
         let mut exp_table = [0u8; 256];
-        
+
         // Generator for GF(2^8) is 2
         let generator = 2u8;
         let mut x = 1u8;
-        
+
         // Build logarithm and exponent tables
         for i in 0..255 {
             exp_table[i] = x;
             log_table[x as usize] = i as u8;
-            
+
             // Multiply by generator in GF(2^8)
             x = Self::gf_multiply_raw(x, generator);
         }
-        
+
         // Extend exp table for easier computation
         exp_table[255] = exp_table[0];
-        
-        Self { log_table, exp_table }
+
+        Self {
+            log_table,
+            exp_table,
+        }
     }
 
     /// Raw GF(2^8) multiplication without using tables
@@ -43,23 +46,23 @@ impl GaloisField {
         let mut p = 0u8;
         let mut a = a;
         let mut b = b;
-        
+
         for _ in 0..8 {
             if b & 1 != 0 {
                 p ^= a;
             }
-            
+
             let hi_bit_set = a & 0x80 != 0;
             a <<= 1;
-            
+
             if hi_bit_set {
                 // XOR with irreducible polynomial 0x11D (without the high bit)
                 a ^= 0x1D;
             }
-            
+
             b >>= 1;
         }
-        
+
         p
     }
 
@@ -80,11 +83,11 @@ impl GaloisField {
         if a == 0 || b == 0 {
             return 0;
         }
-        
+
         let log_a = self.log_table[a as usize] as usize;
         let log_b = self.log_table[b as usize] as usize;
         let log_result = (log_a + log_b) % 255;
-        
+
         self.exp_table[log_result]
     }
 
@@ -96,11 +99,11 @@ impl GaloisField {
         if b == 0 {
             panic!("Division by zero in GF(2^8)");
         }
-        
+
         let log_a = self.log_table[a as usize] as usize;
         let log_b = self.log_table[b as usize] as usize;
         let log_result = (log_a + 255 - log_b) % 255;
-        
+
         self.exp_table[log_result]
     }
 
@@ -109,10 +112,10 @@ impl GaloisField {
         if a == 0 {
             return 0;
         }
-        
+
         let log_a = self.log_table[a as usize] as usize;
         let log_result = (log_a * n as usize) % 255;
-        
+
         self.exp_table[log_result]
     }
 }
@@ -137,11 +140,11 @@ impl FecCodec {
     }
 
     /// Encode source packets to generate an FEC packet
-    /// 
+    ///
     /// # Arguments
     /// * `source_packets` - Source packet data to encode (all must be same length)
     /// * `fec_index` - Index of the FEC packet to generate (0-based)
-    /// 
+    ///
     /// # Returns
     /// FEC packet data
     pub fn encode(&self, source_packets: &[Vec<u8>], fec_index: u8) -> Vec<u8> {
@@ -155,7 +158,7 @@ impl FecCodec {
         // For each byte position in the packets
         for byte_pos in 0..packet_len {
             let mut sum = 0u8;
-            
+
             // Combine source packets using coefficients
             for (i, source) in source_packets.iter().enumerate() {
                 if byte_pos < source.len() {
@@ -164,7 +167,7 @@ impl FecCodec {
                     sum = self.gf.add(sum, product);
                 }
             }
-            
+
             fec_packet[byte_pos] = sum;
         }
 
@@ -172,13 +175,13 @@ impl FecCodec {
     }
 
     /// Decode missing source packet using received source packets and FEC packet
-    /// 
+    ///
     /// # Arguments
     /// * `received_packets` - List of (index, data) for received source packets
     /// * `fec_packet` - The FEC packet data
     /// * `missing_index` - Index of the missing source packet to recover
     /// * `fec_index` - Index of the FEC packet
-    /// 
+    ///
     /// # Returns
     /// Recovered source packet data
     pub fn decode(
@@ -194,7 +197,7 @@ impl FecCodec {
         // For each byte position
         for byte_pos in 0..packet_len {
             let mut sum = fec_packet[byte_pos];
-            
+
             // Subtract contributions from known source packets
             for (idx, source) in received_packets {
                 if byte_pos < source.len() {
@@ -203,7 +206,7 @@ impl FecCodec {
                     sum = self.gf.sub(sum, product);
                 }
             }
-            
+
             // Divide by the coefficient of the missing packet
             let missing_coeff = self.get_coefficient(missing_index, fec_index);
             decoded[byte_pos] = self.gf.divide(sum, missing_coeff);
@@ -213,7 +216,7 @@ impl FecCodec {
     }
 
     /// Get the coefficient for encoding based on source index and FEC index
-    /// 
+    ///
     /// According to the spec (section 3.1.1.6.4), we use a Vandermonde-like matrix
     /// where coefficient[i][j] = (i+1)^j
     fn get_coefficient(&self, source_index: u8, fec_index: u8) -> u8 {
@@ -252,7 +255,7 @@ mod tests {
         // Test multiplication
         assert_eq!(gf.multiply(0, 100), 0);
         assert_eq!(gf.multiply(1, 100), 100);
-        
+
         // Test multiplication is associative
         let a = 23u8;
         let b = 45u8;
@@ -265,7 +268,7 @@ mod tests {
         // Test division
         assert_eq!(gf.divide(100, 100), 1);
         assert_eq!(gf.divide(0, 100), 0);
-        
+
         // Test a * (a / b) == a for non-zero b
         let divisor = 50u8;
         let result = gf.divide(100, divisor);
@@ -280,7 +283,7 @@ mod tests {
         let source1 = vec![1, 2, 3, 4, 5];
         let source2 = vec![6, 7, 8, 9, 10];
         let source3 = vec![11, 12, 13, 14, 15];
-        
+
         let sources = vec![source1.clone(), source2.clone(), source3.clone()];
 
         // Generate FEC packet
@@ -288,11 +291,8 @@ mod tests {
         assert_eq!(fec.len(), 5);
 
         // Simulate losing source2, recover it from source1, source3, and FEC
-        let received = vec![
-            (0, source1.clone()),
-            (2, source3.clone()),
-        ];
-        
+        let received = vec![(0, source1.clone()), (2, source3.clone())];
+
         let recovered = codec.decode(&received, &fec, 1, 0);
         assert_eq!(recovered, source2);
     }
@@ -303,7 +303,7 @@ mod tests {
 
         let source1 = vec![100, 200];
         let source2 = vec![50, 150];
-        
+
         let sources = vec![source1.clone(), source2.clone()];
 
         // Generate FEC packet with index 1 (uses different coefficients)
@@ -312,7 +312,7 @@ mod tests {
         // Lose source2, recover with FEC index 1
         let received = vec![(0, source1.clone())];
         let recovered = codec.decode(&received, &fec, 1, 1);
-        
+
         assert_eq!(recovered, source2);
     }
 
@@ -323,14 +323,14 @@ mod tests {
         // Packets with same max size but different data
         let source1 = vec![1, 2, 3, 4, 5, 6, 7, 8];
         let source2 = vec![10, 20, 30, 40, 50, 60, 70, 80];
-        
+
         let sources = vec![source1.clone(), source2.clone()];
         let fec = codec.encode(&sources, 0);
 
         // Recover source1 from source2 and FEC
         let received = vec![(1, source2.clone())];
         let recovered = codec.decode(&received, &fec, 0, 0);
-        
+
         assert_eq!(recovered, source1);
     }
 }

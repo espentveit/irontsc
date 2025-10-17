@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 #![allow(clippy::arithmetic_side_effects)] // FIXME: remove
 
 mod macros;
@@ -120,5 +122,17 @@ impl<T> SessionResultExt for SessionResult<T> {
         E: core::error::Error + Sync + Send + 'static,
     {
         self.map_err(|e| e.with_source(source))
+    }
+}
+
+use ironrdp_pdu::gcc::ClientGccBlocks;
+
+pub struct GccClientData {
+    client_gcc_blocks: ClientGccBlocks,
+}
+
+impl GccClientData {
+    pub fn new(client_gcc_blocks: ClientGccBlocks) -> Self {
+        Self { client_gcc_blocks }
     }
 }

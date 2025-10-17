@@ -5,16 +5,17 @@ use std::io::Write as _;
 
 use byteorder::{LittleEndian, WriteBytesExt as _};
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
 
 use super::{
-    BasicSecurityHeader, BasicSecurityHeaderFlags, BlobHeader, BlobType, LicenseEncryptionData, LicenseHeader,
-    PreambleFlags, PreambleType, PreambleVersion, ServerLicenseError, ServerPlatformChallenge, BLOB_LENGTH_SIZE,
-    BLOB_TYPE_SIZE, MAC_SIZE, PLATFORM_ID, PREAMBLE_SIZE,
+    BasicSecurityHeader, BasicSecurityHeaderFlags, BlobHeader, BlobType, LicenseEncryptionData,
+    LicenseHeader, PreambleFlags, PreambleType, PreambleVersion, ServerLicenseError,
+    ServerPlatformChallenge, BLOB_LENGTH_SIZE, BLOB_TYPE_SIZE, MAC_SIZE, PLATFORM_ID,
+    PREAMBLE_SIZE,
 };
 use crate::crypto::rc4::Rc4;
 
@@ -43,10 +44,13 @@ impl ClientPlatformChallengeResponse {
         encryption_data: &LicenseEncryptionData,
     ) -> Result<Self, ServerLicenseError> {
         let mut rc4 = Rc4::new(&encryption_data.license_key);
-        let decrypted_challenge = rc4.process(platform_challenge.encrypted_platform_challenge.as_slice());
+        let decrypted_challenge =
+            rc4.process(platform_challenge.encrypted_platform_challenge.as_slice());
 
-        let decrypted_challenge_mac =
-            super::compute_mac_data(encryption_data.mac_salt_key.as_slice(), decrypted_challenge.as_slice())?;
+        let decrypted_challenge_mac = super::compute_mac_data(
+            encryption_data.mac_salt_key.as_slice(),
+            decrypted_challenge.as_slice(),
+        )?;
 
         if decrypted_challenge_mac != platform_challenge.mac_data {
             return Err(ServerLicenseError::InvalidMacData);
@@ -108,7 +112,11 @@ impl ClientPlatformChallengeResponse {
 
         self.license_header.encode(dst)?;
 
-        BlobHeader::new(BlobType::ENCRYPTED_DATA, self.encrypted_challenge_response_data.len()).encode(dst)?;
+        BlobHeader::new(
+            BlobType::ENCRYPTED_DATA,
+            self.encrypted_challenge_response_data.len(),
+        )
+        .encode(dst)?;
         dst.write_slice(&self.encrypted_challenge_response_data);
 
         BlobHeader::new(BlobType::ENCRYPTED_DATA, self.encrypted_hwid.len()).encode(dst)?;
@@ -132,7 +140,8 @@ impl ClientPlatformChallengeResponse {
             return Err(invalid_field_err!("blobType", "unexpected blob type"));
         }
         ensure_size!(in: src, size: encrypted_challenge_blob.length);
-        let encrypted_challenge_response_data = src.read_slice(encrypted_challenge_blob.length).into();
+        let encrypted_challenge_response_data =
+            src.read_slice(encrypted_challenge_blob.length).into();
 
         let encrypted_hwid_blob = BlobHeader::decode(src)?;
         if encrypted_hwid_blob.blob_type != BlobType::ENCRYPTED_DATA {
@@ -241,14 +250,19 @@ impl<'de> Decode<'de> for PlatformChallengeResponseData {
 
         let version = src.read_u16();
         if version != RESPONSE_DATA_VERSION {
-            return Err(invalid_field_err!("version", "invalid challenge response version"));
+            return Err(invalid_field_err!(
+                "version",
+                "invalid challenge response version"
+            ));
         }
 
         let client_type = ClientType::from_u16(src.read_u16())
             .ok_or_else(|| invalid_field_err!("clientType", "invalid client type"))?;
 
-        let license_detail_level = LicenseDetailLevel::from_u16(src.read_u16())
-            .ok_or_else(|| invalid_field_err!("licenseDetailLevel", "invalid license detail level"))?;
+        let license_detail_level =
+            LicenseDetailLevel::from_u16(src.read_u16()).ok_or_else(|| {
+                invalid_field_err!("licenseDetailLevel", "invalid license detail level")
+            })?;
 
         let challenge_len: usize = cast_length!("len", src.read_u16())?;
         ensure_size!(in: src, size: challenge_len);

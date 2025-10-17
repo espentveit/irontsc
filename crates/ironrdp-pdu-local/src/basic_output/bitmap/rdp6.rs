@@ -1,6 +1,6 @@
 use ironrdp_core::{
-    ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 
 const NON_RLE_PADDING_SIZE: usize = 1;
@@ -56,7 +56,8 @@ impl Encode for BitmapStreamHeader {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: self.size());
 
-        let mut header = (u8::from(self.enable_rle_compression) << 4) | (u8::from(!self.use_alpha) << 5);
+        let mut header =
+            (u8::from(self.enable_rle_compression) << 4) | (u8::from(!self.use_alpha) << 5);
 
         match self.color_plane_definition {
             ColorPlaneDefinition::Argb => {
@@ -110,7 +111,8 @@ impl<'a> BitmapStream<'a> {
         match self.header.color_plane_definition {
             ColorPlaneDefinition::Argb => false,
             ColorPlaneDefinition::AYCoCg {
-                use_chroma_subsampling, ..
+                use_chroma_subsampling,
+                ..
             } => use_chroma_subsampling,
         }
     }
@@ -136,7 +138,10 @@ impl<'a> Decode<'a> for BitmapStream<'a> {
 
         let color_planes = src.read_slice(color_planes_size);
 
-        Ok(Self { header, color_planes })
+        Ok(Self {
+            header,
+            color_planes,
+        })
     }
 }
 
@@ -184,7 +189,9 @@ mod tests {
     }
 
     fn assert_parsing_failure(buffer: &[u8], expected: Expect) {
-        let error = ironrdp_core::decode::<BitmapStream<'_>>(buffer).err().unwrap();
+        let error = ironrdp_core::decode::<BitmapStream<'_>>(buffer)
+            .err()
+            .unwrap();
         expected.assert_debug_eq(&error);
     }
 

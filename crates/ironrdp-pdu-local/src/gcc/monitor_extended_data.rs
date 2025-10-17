@@ -1,6 +1,6 @@
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -30,7 +30,10 @@ impl Encode for ClientMonitorExtendedData {
 
         dst.write_u32(0); // flags
         dst.write_u32(MONITOR_ATTRIBUTE_SIZE); // flags
-        dst.write_u32(cast_length!("nMonitors", self.extended_monitors_info.len())?);
+        dst.write_u32(cast_length!(
+            "nMonitors",
+            self.extended_monitors_info.len()
+        )?);
 
         for extended_monitor_info in self.extended_monitors_info.iter().take(MONITOR_COUNT_MAX) {
             extended_monitor_info.encode(dst)?;
@@ -70,7 +73,9 @@ impl<'de> Decode<'de> for ClientMonitorExtendedData {
             extended_monitors_info.push(ExtendedMonitorInfo::decode(src)?);
         }
 
-        Ok(Self { extended_monitors_info })
+        Ok(Self {
+            extended_monitors_info,
+        })
     }
 }
 

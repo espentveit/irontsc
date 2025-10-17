@@ -5,7 +5,8 @@ use ironrdp_pdu::rdp::capability_sets::CapabilitySet;
 use tracing::{debug, warn};
 
 use crate::{
-    general_err, legacy, Config, ConnectionFinalizationSequence, ConnectorResult, DesktopSize, Sequence, State, Written,
+    general_err, legacy, Config, ConnectionFinalizationSequence, ConnectorResult, DesktopSize,
+    Sequence, State, Written,
 };
 
 /// Represents the Capability Exchange and Connection Finalization phases
@@ -87,7 +88,11 @@ impl Sequence for ConnectionActivationSequence {
         &self.state
     }
 
-    fn step(&mut self, input: &[u8], output: &mut ironrdp_core::WriteBuf) -> ConnectorResult<Written> {
+    fn step(
+        &mut self,
+        input: &[u8],
+        output: &mut ironrdp_core::WriteBuf,
+    ) -> ConnectorResult<Written> {
         let (written, next_state) = match mem::take(&mut self.state) {
             ConnectionActivationState::Consumed | ConnectionActivationState::Finalized { .. } => {
                 return Err(general_err!(
@@ -101,24 +106,29 @@ impl Sequence for ConnectionActivationSequence {
                 debug!("Capabilities Exchange");
 
                 let send_data_indication_ctx = legacy::decode_send_data_indication(input)?;
-                
+
                 // Check if this is an Initiate Multitransport Request (28 bytes)
                 if send_data_indication_ctx.user_data.len() == 28 {
-                    use ironrdp_pdu::rdp::multitransport::{InitiateMultitransportRequest, InitiateMultitransportResponse};
                     use ironrdp_core::decode;
-                    
-                    if let Ok(mt_request) = decode::<InitiateMultitransportRequest>(send_data_indication_ctx.user_data) {
+                    use ironrdp_pdu::rdp::multitransport::{
+                        InitiateMultitransportRequest, InitiateMultitransportResponse,
+                    };
+
+                    if let Ok(mt_request) =
+                        decode::<InitiateMultitransportRequest>(send_data_indication_ctx.user_data)
+                    {
                         warn!(
                             "🔥 Received Initiate Multitransport Request: request_id={}, protocol={:?}",
                             mt_request.request_id, mt_request.requested_protocol
                         );
                         warn!("   Security cookie: {:02x?}", mt_request.security_cookie);
-                        
+
                         // Send success response - UDP will be established separately
-                        let response = InitiateMultitransportResponse::success(mt_request.request_id);
-                        
+                        let response =
+                            InitiateMultitransportResponse::success(mt_request.request_id);
+
                         warn!("   Sending SUCCESS response - UDP transport will be established");
-                        
+
                         // Encode and send the response
                         let written = legacy::encode_send_data_request(
                             user_channel_id,
@@ -126,18 +136,18 @@ impl Sequence for ConnectionActivationSequence {
                             &response,
                             output,
                         )?;
-                        
+
                         // Stay in CapabilitiesExchange state to receive the actual DemandActivePdu next
                         let next_state = ConnectionActivationState::CapabilitiesExchange {
                             io_channel_id,
                             user_channel_id,
                         };
-                        
+
                         self.state = next_state;
                         return Ok(Written::from_size(written)?);
                     }
                 }
-                
+
                 // Decode as ShareControlHeader (normal capabilities exchange)
                 let share_control_ctx = legacy::decode_share_control(send_data_indication_ctx)?;
 
@@ -146,12 +156,14 @@ impl Sequence for ConnectionActivationSequence {
                 if share_control_ctx.channel_id != io_channel_id {
                     warn!(
                         io_channel_id,
-                        share_control_ctx.channel_id, "Unexpected channel ID for received Share Control Pdu"
+                        share_control_ctx.channel_id,
+                        "Unexpected channel ID for received Share Control Pdu"
                     );
                 }
 
-                let capability_sets = if let rdp::headers::ShareControlPdu::ServerDemandActive(server_demand_active) =
-                    share_control_ctx.pdu
+                let capability_sets = if let rdp::headers::ShareControlPdu::ServerDemandActive(
+                    server_demand_active,
+                ) = share_control_ctx.pdu
                 {
                     server_demand_active.pdu.capability_sets
                 } else {
@@ -212,7 +224,10 @@ impl Sequence for ConnectionActivationSequence {
                         io_channel_id,
                         user_channel_id,
                         desktop_size,
-                        connection_finalization: ConnectionFinalizationSequence::new(io_channel_id, user_channel_id),
+                        connection_finalization: ConnectionFinalizationSequence::new(
+                            io_channel_id,
+                            user_channel_id,
+                        ),
                     },
                 )
             }
@@ -303,15 +318,17 @@ fn create_client_confirm_active(
     desktop_size: DesktopSize,
 ) -> rdp::capability_sets::ClientConfirmActive {
     use ironrdp_pdu::rdp::capability_sets::{
-        client_codecs_capabilities, Bitmap, BitmapCache, BitmapDrawingFlags, Brush, CacheDefinition, CacheEntry,
-        ClientConfirmActive, CmdFlags, DemandActive, FrameAcknowledge, General, GeneralExtraFlags, GlyphCache,
-        GlyphSupportLevel, Input, InputFlags, LargePointer, LargePointerSupportFlags, MultifragmentUpdate,
-        OffscreenBitmapCache, Order, OrderFlags, OrderSupportExFlags, Pointer, Sound, SoundFlags, SupportLevel,
-        SurfaceCommands, VirtualChannel, VirtualChannelFlags, BITMAP_CACHE_ENTRIES_NUM, GLYPH_CACHE_NUM,
+        client_codecs_capabilities, Bitmap, BitmapCache, BitmapDrawingFlags, Brush,
+        CacheDefinition, CacheEntry, ClientConfirmActive, CmdFlags, DemandActive, FrameAcknowledge,
+        General, GeneralExtraFlags, GlyphCache, GlyphSupportLevel, Input, InputFlags, LargePointer,
+        LargePointerSupportFlags, MultifragmentUpdate, OffscreenBitmapCache, Order, OrderFlags,
+        OrderSupportExFlags, Pointer, Sound, SoundFlags, SupportLevel, SurfaceCommands,
+        VirtualChannel, VirtualChannelFlags, BITMAP_CACHE_ENTRIES_NUM, GLYPH_CACHE_NUM,
         SERVER_CHANNEL_ID,
     };
 
-    server_capability_sets.retain(|capability_set| matches!(capability_set, CapabilitySet::MultiFragmentUpdate(_)));
+    server_capability_sets
+        .retain(|capability_set| matches!(capability_set, CapabilitySet::MultiFragmentUpdate(_)));
 
     let lossy_bitmap_compression = config
         .bitmap
@@ -330,9 +347,9 @@ fn create_client_confirm_active(
     server_capability_sets.extend_from_slice(&[
         CapabilitySet::General(General {
             major_platform_type: config.platform,
-            extra_flags: GeneralExtraFlags::FASTPATH_OUTPUT_SUPPORTED 
+            extra_flags: GeneralExtraFlags::FASTPATH_OUTPUT_SUPPORTED
                 | GeneralExtraFlags::NO_BITMAP_COMPRESSION_HDR
-                | GeneralExtraFlags::MULTITRANSPORT_SUPPORTED,  // Enable UDP multitransport
+                | GeneralExtraFlags::MULTITRANSPORT_SUPPORTED, // Enable UDP multitransport
             ..Default::default()
         }),
         CapabilitySet::Bitmap(Bitmap {
@@ -400,10 +417,13 @@ fn create_client_confirm_active(
             // rendering of pointers bigger than 96x96 pixels.
             // `LargePointerSupportFlags::UP_TO_96X96_PIXELS` is needed for proper cursor behavior
             // in Windows 2019 and older
-            flags: LargePointerSupportFlags::UP_TO_96X96_PIXELS | LargePointerSupportFlags::UP_TO_384X384_PIXELS,
+            flags: LargePointerSupportFlags::UP_TO_96X96_PIXELS
+                | LargePointerSupportFlags::UP_TO_384X384_PIXELS,
         }),
         CapabilitySet::SurfaceCommands(SurfaceCommands {
-            flags: CmdFlags::SET_SURFACE_BITS | CmdFlags::STREAM_SURFACE_BITS | CmdFlags::FRAME_MARKER,
+            flags: CmdFlags::SET_SURFACE_BITS
+                | CmdFlags::STREAM_SURFACE_BITS
+                | CmdFlags::FRAME_MARKER,
         }),
         CapabilitySet::BitmapCodecs(match config.bitmap.as_ref().map(|b| b.codecs.clone()) {
             Some(codecs) => codecs,

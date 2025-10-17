@@ -3,8 +3,8 @@ use std::io;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, write_padding, Decode, DecodeResult, Encode,
-    EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, write_padding, Decode,
+    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -24,11 +24,11 @@ pub const USE_DYNAMIC_REST: bool = false;
 /// Inputs you may vary per connection.
 #[derive(Debug, Clone)]
 pub struct ClientInfoInputs {
-    pub client_address: String,        // e.g., "172.30.80.1"
-    pub domain: Option<String>,        // e.g., None or Some("ACME")
-    pub username: String,              // e.g., "user"
-    pub password: String,              // e.g., ""
-    pub client_session_id: u32,        // e.g., 2
+    pub client_address: String, // e.g., "172.30.80.1"
+    pub domain: Option<String>, // e.g., None or Some("ACME")
+    pub username: String,       // e.g., "user"
+    pub password: String,       // e.g., ""
+    pub client_session_id: u32, // e.g., 2
 }
 
 /// Build a ClientInfo that is byte-for-byte aligned with the working reference,
@@ -40,10 +40,12 @@ pub fn make_client_info(inputs: &ClientInfoInputs) -> ClientInfo {
     const REF_OPTION_FLAGS: u32 = 0x0001_47BB;
     const COMPRESSION_TYPE_MASK: u32 = 0x0000_1E00;
     let ref_flags_bits = REF_OPTION_FLAGS & !COMPRESSION_TYPE_MASK;
-    let ref_compr = CompressionType::from_u32((REF_OPTION_FLAGS & COMPRESSION_TYPE_MASK) >> 9).unwrap_or(CompressionType::Rdp61);
+    let ref_compr = CompressionType::from_u32((REF_OPTION_FLAGS & COMPRESSION_TYPE_MASK) >> 9)
+        .unwrap_or(CompressionType::Rdp61);
 
     // Performance flags = 0x00000006
-    let ref_perf = PerformanceFlags::DISABLE_FULLWINDOWDRAG | PerformanceFlags::DISABLE_MENUANIMATIONS;
+    let ref_perf =
+        PerformanceFlags::DISABLE_FULLWINDOWDRAG | PerformanceFlags::DISABLE_MENUANIMATIONS;
 
     // Client dir path (UTF-16 w/ NT, length includes NT)
     const REF_CLIENT_DIR: &str = r"C:\WINDOWS\system32\mstscax.dll";
@@ -65,7 +67,11 @@ pub fn make_client_info(inputs: &ClientInfoInputs) -> ClientInfo {
         } else {
             ClientInfoFlags::from_bits_truncate(ref_flags_bits)
         },
-        compression_type: if USE_DYNAMIC_REST { ref_compr } else { ref_compr },
+        compression_type: if USE_DYNAMIC_REST {
+            ref_compr
+        } else {
+            ref_compr
+        },
 
         // --- Dynamic (per your request) ---
         credentials: Credentials {
@@ -75,21 +81,33 @@ pub fn make_client_info(inputs: &ClientInfoInputs) -> ClientInfo {
         },
 
         // --- Reference values (zero-length, still terminated on wire) ---
-        alternate_shell: if USE_DYNAMIC_REST { String::new() } else { String::new() },
-        work_dir: if USE_DYNAMIC_REST { String::new() } else { String::new() },
+        alternate_shell: if USE_DYNAMIC_REST {
+            String::new()
+        } else {
+            String::new()
+        },
+        work_dir: if USE_DYNAMIC_REST {
+            String::new()
+        } else {
+            String::new()
+        },
 
         // --- Extended info: clientAddress dynamic; dir static to reference; tail matches reference ---
         extra_info: ExtendedClientInfo {
             address_family: AddressFamily::INET,
-            address: inputs.client_address.clone(),          // dynamic
-            dir: if USE_DYNAMIC_REST { REF_CLIENT_DIR.into() } else { REF_CLIENT_DIR.into() }, // static
+            address: inputs.client_address.clone(), // dynamic
+            dir: if USE_DYNAMIC_REST {
+                REF_CLIENT_DIR.into()
+            } else {
+                REF_CLIENT_DIR.into()
+            }, // static
             optional_data: ExtendedClientOptionalInfo {
-                timezone: Some(ref_tz),                      // static to reference (W. Europe)
-                session_id: Some(inputs.client_session_id),  // dynamic
-                performance_flags: Some(ref_perf),           // static
-                reconnect_cookie: None,                      // reference had cbAutoReconnect=0
-                reserved1: Some(REF_RESERVED1),              // static
-                reserved2: Some(REF_RESERVED2),              // static
+                timezone: Some(ref_tz),                     // static to reference (W. Europe)
+                session_id: Some(inputs.client_session_id), // dynamic
+                performance_flags: Some(ref_perf),          // static
+                reconnect_cookie: None,                     // reference had cbAutoReconnect=0
+                reserved1: Some(REF_RESERVED1),             // static
+                reserved2: Some(REF_RESERVED2),             // static
                 dynamic_dst_tz_key_name: Some(REF_DYN_DST_KEY.into()), // static (no NT)
                 dynamic_daylight_time_disabled: Some(REF_DYN_DST_DISABLED), // static
             },
@@ -131,8 +149,18 @@ trait CharsetExt {
     fn as_u16_units(self) -> u16;
 }
 impl CharsetExt for CharacterSet {
-    #[inline] fn unit_bytes(self) -> usize { if matches!(self, CharacterSet::Unicode) { 2 } else { 1 } }
-    #[inline] fn as_u16_units(self) -> u16 { self.unit_bytes() as u16 }
+    #[inline]
+    fn unit_bytes(self) -> usize {
+        if matches!(self, CharacterSet::Unicode) {
+            2
+        } else {
+            1
+        }
+    }
+    #[inline]
+    fn as_u16_units(self) -> u16 {
+        self.unit_bytes() as u16
+    }
 }
 #[inline]
 fn encoded_len(value: &str, cs: CharacterSet) -> usize {
@@ -188,16 +216,29 @@ impl Encode for ClientInfo {
         dst.write_u32(self.code_page);
 
         // optionFlags with compression type packed into [13:9]
-        let flags_with_compression = self.flags.bits() | (u32::from(self.compression_type.as_u8()) << 9);
+        let flags_with_compression =
+            self.flags.bits() | (u32::from(self.compression_type.as_u8()) << 9);
         dst.write_u32(flags_with_compression);
 
         // Lengths exclude NT
         let domain = self.credentials.domain.as_deref().unwrap_or_default();
         dst.write_u16(cast_length!("domain length", encoded_len(domain, cs))?);
-        dst.write_u16(cast_length!("username length", encoded_len(&self.credentials.username, cs))?);
-        dst.write_u16(cast_length!("password length", encoded_len(&self.credentials.password, cs))?);
-        dst.write_u16(cast_length!("alternate shell length", encoded_len(&self.alternate_shell, cs))?);
-        dst.write_u16(cast_length!("work dir length", encoded_len(&self.work_dir, cs))?);
+        dst.write_u16(cast_length!(
+            "username length",
+            encoded_len(&self.credentials.username, cs)
+        )?);
+        dst.write_u16(cast_length!(
+            "password length",
+            encoded_len(&self.credentials.password, cs)
+        )?);
+        dst.write_u16(cast_length!(
+            "alternate shell length",
+            encoded_len(&self.alternate_shell, cs)
+        )?);
+        dst.write_u16(cast_length!(
+            "work dir length",
+            encoded_len(&self.work_dir, cs)
+        )?);
 
         // Strings including NT
         utils::write_string_to_cursor(dst, domain, cs, true)?;
@@ -210,7 +251,9 @@ impl Encode for ClientInfo {
         Ok(())
     }
 
-    fn name(&self) -> &'static str { Self::NAME }
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
 
     fn size(&self) -> usize {
         let cs = self.charset();
@@ -237,10 +280,15 @@ impl<'de> Decode<'de> for ClientInfo {
         let flags = ClientInfoFlags::from_bits(flags_bits)
             .ok_or_else(|| invalid_field_err!("flags", "invalid ClientInfoFlags"))?;
 
-        let compression_type = CompressionType::from_u32((flags_with_compression & COMPRESSION_TYPE_MASK) >> 9)
-            .ok_or_else(|| invalid_field_err!("flags", "invalid CompressionType"))?;
+        let compression_type =
+            CompressionType::from_u32((flags_with_compression & COMPRESSION_TYPE_MASK) >> 9)
+                .ok_or_else(|| invalid_field_err!("flags", "invalid CompressionType"))?;
 
-        let cs = if flags.contains(ClientInfoFlags::UNICODE) { CharacterSet::Unicode } else { CharacterSet::Ansi };
+        let cs = if flags.contains(ClientInfoFlags::UNICODE) {
+            CharacterSet::Unicode
+        } else {
+            CharacterSet::Ansi
+        };
 
         let read_lp = |src: &mut ReadCursor<'_>, cs: CharacterSet| -> DecodeResult<String> {
             let with_nt = usize::from(src.read_u16()) + cs.unit_bytes();
@@ -248,16 +296,35 @@ impl<'de> Decode<'de> for ClientInfo {
             utils::decode_string(src.read_slice(with_nt), cs, true)
         };
 
-        let domain = { let s = read_lp(src, cs)?; if s.is_empty() { None } else { Some(s) } };
+        let domain = {
+            let s = read_lp(src, cs)?;
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        };
         let username = read_lp(src, cs)?;
         let password = read_lp(src, cs)?;
         let alternate_shell = read_lp(src, cs)?;
         let work_dir = read_lp(src, cs)?;
 
-        let credentials = Credentials { username, password, domain };
+        let credentials = Credentials {
+            username,
+            password,
+            domain,
+        };
         let extra_info = ExtendedClientInfo::decode(src, cs)?;
 
-        Ok(Self { credentials, code_page, flags, compression_type, alternate_shell, work_dir, extra_info })
+        Ok(Self {
+            credentials,
+            code_page,
+            flags,
+            compression_type,
+            alternate_shell,
+            work_dir,
+            extra_info,
+        })
     }
 }
 
@@ -305,7 +372,12 @@ impl ExtendedClientInfo {
         let dir = utils::decode_string(src.read_slice(dir_with_nt), cs, false)?;
 
         let optional_data = ExtendedClientOptionalInfo::decode(src)?;
-        Ok(Self { address_family, address, dir, optional_data })
+        Ok(Self {
+            address_family,
+            address,
+            dir,
+            optional_data,
+        })
     }
 
     fn encode(&self, dst: &mut WriteCursor<'_>, cs: CharacterSet) -> EncodeResult<()> {
@@ -315,10 +387,10 @@ impl ExtendedClientInfo {
         let dir_len_no_nt: u16 = cast_length!("dir length", encoded_len(&self.dir, cs))?;
 
         dst.write_u16(self.address_family.as_u16());
-        dst.write_u16(addr_len_no_nt + cs.as_u16_units());    // INCLUDE NT
+        dst.write_u16(addr_len_no_nt + cs.as_u16_units()); // INCLUDE NT
         utils::write_string_to_cursor(dst, &self.address, cs, true)?;
 
-        dst.write_u16(dir_len_no_nt + cs.as_u16_units());     // INCLUDE NT
+        dst.write_u16(dir_len_no_nt + cs.as_u16_units()); // INCLUDE NT
         utils::write_string_to_cursor(dst, &self.dir, cs, true)?;
 
         self.optional_data.encode(dst)?;
@@ -345,7 +417,7 @@ pub struct ExtendedClientOptionalInfo {
     pub reconnect_cookie: Option<[u8; RECONNECT_COOKIE_LEN]>,
     pub reserved1: Option<u16>,
     pub reserved2: Option<u16>,
-    pub dynamic_dst_tz_key_name: Option<String>,     // no NT on wire
+    pub dynamic_dst_tz_key_name: Option<String>, // no NT on wire
     pub dynamic_daylight_time_disabled: Option<u16>, // 0 or 1
 }
 
@@ -354,16 +426,24 @@ impl Encode for ExtendedClientOptionalInfo {
         ensure_size!(in: dst, size: self.size());
 
         // Time zone first (fixed 172 bytes)
-        if let Some(tz) = &self.timezone { tz.encode(dst)?; }
+        if let Some(tz) = &self.timezone {
+            tz.encode(dst)?;
+        }
 
         // Session ID (dynamic)
-        if let Some(session_id) = self.session_id { dst.write_u32(session_id); }
+        if let Some(session_id) = self.session_id {
+            dst.write_u32(session_id);
+        }
 
         // The rest matches the reference packet (or dynamic if you flip USE_DYNAMIC_REST)
-        if let Some(perf) = self.performance_flags { dst.write_u32(perf.bits()); }
+        if let Some(perf) = self.performance_flags {
+            dst.write_u32(perf.bits());
+        }
 
         if let Some(cookie) = self.reconnect_cookie {
-            dst.write_u16(u16::try_from(RECONNECT_COOKIE_LEN).expect("RECONNECT_COOKIE_LEN fits u16"));
+            dst.write_u16(
+                u16::try_from(RECONNECT_COOKIE_LEN).expect("RECONNECT_COOKIE_LEN fits u16"),
+            );
             dst.write_array(cookie);
         } else {
             // Reference uses cbAutoReconnectCookie = 0 (i.e., skips cookie bytes).
@@ -375,8 +455,14 @@ impl Encode for ExtendedClientOptionalInfo {
         dst.write_u16(self.reserved2.unwrap_or(0x0000));
 
         // Dynamic DST key name: UTF-16LE, NO NT + u16 flag
-        let mut utf16 = utils::to_utf16_bytes(self.dynamic_dst_tz_key_name.as_deref().unwrap_or("W. Europe Standard Time"));
-        if utf16.ends_with(&[0, 0]) { utf16.truncate(utf16.len() - 2); }
+        let mut utf16 = utils::to_utf16_bytes(
+            self.dynamic_dst_tz_key_name
+                .as_deref()
+                .unwrap_or("W. Europe Standard Time"),
+        );
+        if utf16.ends_with(&[0, 0]) {
+            utf16.truncate(utf16.len() - 2);
+        }
         dst.write_u16(u16::try_from(utf16.len()).expect("dyn DST key len fits u16"));
         dst.write_slice(&utf16);
         dst.write_u16(self.dynamic_daylight_time_disabled.unwrap_or(0));
@@ -384,21 +470,37 @@ impl Encode for ExtendedClientOptionalInfo {
         Ok(())
     }
 
-    fn name(&self) -> &'static str { "ExtendedClientOptionalInfo" }
+    fn name(&self) -> &'static str {
+        "ExtendedClientOptionalInfo"
+    }
 
     fn size(&self) -> usize {
         let mut size = 0;
-        if let Some(ref tz) = self.timezone { size += tz.size(); }
-        if self.session_id.is_some() { size += SESSION_ID_SIZE; }
-        if self.performance_flags.is_some() { size += PERFORMANCE_FLAGS_SIZE; }
+        if let Some(ref tz) = self.timezone {
+            size += tz.size();
+        }
+        if self.session_id.is_some() {
+            size += SESSION_ID_SIZE;
+        }
+        if self.performance_flags.is_some() {
+            size += PERFORMANCE_FLAGS_SIZE;
+        }
         // We always write a u16 for cbAutoReconnectCookie (0 if None)
         size += RECONNECT_COOKIE_LENGTH_SIZE;
-        if self.reconnect_cookie.is_some() { size += RECONNECT_COOKIE_LEN; }
+        if self.reconnect_cookie.is_some() {
+            size += RECONNECT_COOKIE_LEN;
+        }
 
         // reserved + dynamic DST (cb + name + flag)
         size += 2 + 2;
-        let mut utf16 = utils::to_utf16_bytes(self.dynamic_dst_tz_key_name.as_deref().unwrap_or("W. Europe Standard Time"));
-        if utf16.ends_with(&[0, 0]) { utf16.truncate(utf16.len() - 2); }
+        let mut utf16 = utils::to_utf16_bytes(
+            self.dynamic_dst_tz_key_name
+                .as_deref()
+                .unwrap_or("W. Europe Standard Time"),
+        );
+        if utf16.ends_with(&[0, 0]) {
+            utf16.truncate(utf16.len() - 2);
+        }
         size += 2 + utf16.len() + 2;
 
         size
@@ -409,37 +511,53 @@ impl<'de> Decode<'de> for ExtendedClientOptionalInfo {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
         let mut out = Self::default();
 
-        if src.len() < TimezoneInfo::FIXED_PART_SIZE { return Ok(out); }
+        if src.len() < TimezoneInfo::FIXED_PART_SIZE {
+            return Ok(out);
+        }
         out.timezone = Some(TimezoneInfo::decode(src)?);
 
-        if src.len() >= U32 { out.session_id = Some(src.read_u32()); }
         if src.len() >= U32 {
-            out.performance_flags = Some(
-                PerformanceFlags::from_bits(src.read_u32())
-                    .ok_or_else(|| invalid_field_err!("performanceFlags", "invalid performance flags"))?,
-            );
+            out.session_id = Some(src.read_u32());
+        }
+        if src.len() >= U32 {
+            out.performance_flags =
+                Some(PerformanceFlags::from_bits(src.read_u32()).ok_or_else(|| {
+                    invalid_field_err!("performanceFlags", "invalid performance flags")
+                })?);
         }
         if src.len() >= U16 {
             let cb = src.read_u16();
             if cb != 0 && cb != RECONNECT_COOKIE_LEN as u16 {
-                return Err(invalid_field_err!("cbAutoReconnectCookie", "invalid cookie size"));
+                return Err(invalid_field_err!(
+                    "cbAutoReconnectCookie",
+                    "invalid cookie size"
+                ));
             }
             if cb != 0 {
                 ensure_size!(in: src, size: RECONNECT_COOKIE_LEN);
                 out.reconnect_cookie = Some(src.read_array());
             }
         }
-        if src.len() >= 2 { out.reserved1 = Some(src.read_u16()); }
-        if src.len() >= 2 { out.reserved2 = Some(src.read_u16()); }
+        if src.len() >= 2 {
+            out.reserved1 = Some(src.read_u16());
+        }
+        if src.len() >= 2 {
+            out.reserved2 = Some(src.read_u16());
+        }
         if src.len() >= 2 {
             let cb_dyn = src.read_u16() as usize;
             ensure_size!(in: src, size: cb_dyn);
             if cb_dyn > 0 {
                 let dyn_bytes = src.read_slice(cb_dyn);
-                let units = dyn_bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>();
+                let units = dyn_bytes
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect::<Vec<_>>();
                 out.dynamic_dst_tz_key_name = Some(String::from_utf16_lossy(&units));
             }
-            if src.len() >= 2 { out.dynamic_daylight_time_disabled = Some(src.read_u16()); }
+            if src.len() >= 2 {
+                out.dynamic_daylight_time_disabled = Some(src.read_u16());
+            }
         }
         Ok(out)
     }
@@ -490,8 +608,12 @@ impl Encode for TimezoneInfo {
         Ok(())
     }
 
-    fn name(&self) -> &'static str { "TimezoneInfo" }
-    fn size(&self) -> usize { Self::FIXED_PART_SIZE }
+    fn name(&self) -> &'static str {
+        "TimezoneInfo"
+    }
+    fn size(&self) -> usize {
+        Self::FIXED_PART_SIZE
+    }
 }
 
 impl<'de> Decode<'de> for TimezoneInfo {
@@ -499,15 +621,31 @@ impl<'de> Decode<'de> for TimezoneInfo {
         ensure_fixed_part_size!(in: src);
 
         let bias = src.read_i32();
-        let standard_name = utils::decode_string(src.read_slice(TIMEZONE_INFO_NAME_LEN), CharacterSet::Unicode, false)?;
+        let standard_name = utils::decode_string(
+            src.read_slice(TIMEZONE_INFO_NAME_LEN),
+            CharacterSet::Unicode,
+            false,
+        )?;
         let standard_date = OptionalSystemTime::decode(src)?;
         let standard_bias = src.read_i32();
 
-        let daylight_name = utils::decode_string(src.read_slice(TIMEZONE_INFO_NAME_LEN), CharacterSet::Unicode, false)?;
+        let daylight_name = utils::decode_string(
+            src.read_slice(TIMEZONE_INFO_NAME_LEN),
+            CharacterSet::Unicode,
+            false,
+        )?;
         let daylight_date = OptionalSystemTime::decode(src)?;
         let daylight_bias = src.read_i32();
 
-        Ok(Self { bias, standard_name, standard_date, standard_bias, daylight_name, daylight_date, daylight_bias })
+        Ok(Self {
+            bias,
+            standard_name,
+            standard_date,
+            standard_bias,
+            daylight_name,
+            daylight_date,
+            daylight_bias,
+        })
     }
 }
 
@@ -517,14 +655,24 @@ pub fn w_europe_timezone() -> TimezoneInfo {
         bias: -60,
         standard_name: "W. Europe Standard Time".into(),
         standard_date: OptionalSystemTime(Some(SystemTime {
-            month: Month::October, day_of_week: DayOfWeek::Sunday, day: DayOfWeekOccurrence::Last,
-            hour: 3, minute: 0, second: 0, milliseconds: 0,
+            month: Month::October,
+            day_of_week: DayOfWeek::Sunday,
+            day: DayOfWeekOccurrence::Last,
+            hour: 3,
+            minute: 0,
+            second: 0,
+            milliseconds: 0,
         })),
         standard_bias: 0,
         daylight_name: "W. Europe Daylight Time".into(),
         daylight_date: OptionalSystemTime(Some(SystemTime {
-            month: Month::March, day_of_week: DayOfWeek::Sunday, day: DayOfWeekOccurrence::Last,
-            hour: 2, minute: 0, second: 0, milliseconds: 0,
+            month: Month::March,
+            day_of_week: DayOfWeek::Sunday,
+            day: DayOfWeekOccurrence::Last,
+            hour: 2,
+            minute: 0,
+            second: 0,
+            milliseconds: 0,
         })),
         daylight_bias: -60,
     }
@@ -564,8 +712,12 @@ impl Encode for OptionalSystemTime {
         }
         Ok(())
     }
-    fn name(&self) -> &'static str { "SystemTime" }
-    fn size(&self) -> usize { SystemTime::FIXED_PART_SIZE }
+    fn name(&self) -> &'static str {
+        "SystemTime"
+    }
+    fn size(&self) -> usize {
+        SystemTime::FIXED_PART_SIZE
+    }
 }
 impl<'de> Decode<'de> for OptionalSystemTime {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
@@ -578,9 +730,19 @@ impl<'de> Decode<'de> for OptionalSystemTime {
         let minute = src.read_u16();
         let second = src.read_u16();
         let milliseconds = src.read_u16();
-        match (Month::from_u16(month), DayOfWeek::from_u16(day_of_week), DayOfWeekOccurrence::from_u16(day)) {
+        match (
+            Month::from_u16(month),
+            DayOfWeek::from_u16(day_of_week),
+            DayOfWeekOccurrence::from_u16(day),
+        ) {
             (Some(month), Some(dow), Some(dooc)) => Ok(Self(Some(SystemTime {
-                month, day_of_week: dow, day: dooc, hour, minute, second, milliseconds,
+                month,
+                day_of_week: dow,
+                day: dooc,
+                hour,
+                minute,
+                second,
+                milliseconds,
             }))),
             _ => Ok(Self(None)),
         }
@@ -591,18 +753,57 @@ impl<'de> Decode<'de> for OptionalSystemTime {
 
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, FromPrimitive)]
-pub enum Month { January=1, February, March, April, May, June, July, August, September, October, November, December }
-impl Month { fn as_u16(self) -> u16 { self as u16 } }
+pub enum Month {
+    January = 1,
+    February,
+    March,
+    April,
+    May,
+    June,
+    July,
+    August,
+    September,
+    October,
+    November,
+    December,
+}
+impl Month {
+    fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
 
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, FromPrimitive)]
-pub enum DayOfWeek { Sunday=0, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday }
-impl DayOfWeek { fn as_u16(self) -> u16 { self as u16 } }
+pub enum DayOfWeek {
+    Sunday = 0,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+}
+impl DayOfWeek {
+    fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
 
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, FromPrimitive)]
-pub enum DayOfWeekOccurrence { First=1, Second, Third, Fourth, Last }
-impl DayOfWeekOccurrence { fn as_u16(self) -> u16 { self as u16 } }
+pub enum DayOfWeekOccurrence {
+    First = 1,
+    Second,
+    Third,
+    Fourth,
+    Last,
+}
+impl DayOfWeekOccurrence {
+    fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -626,8 +827,12 @@ pub struct AddressFamily(u16);
 impl AddressFamily {
     pub const INET: Self = Self(0x0002);
     pub const INET_6: Self = Self(0x0017);
-    pub fn from_u16(val: u16) -> Self { Self(val) }
-    pub fn as_u16(self) -> u16 { self.0 }
+    pub fn from_u16(val: u16) -> Self {
+        Self(val)
+    }
+    pub fn as_u16(self) -> u16 {
+        self.0
+    }
 }
 
 bitflags! {
@@ -659,7 +864,12 @@ bitflags! {
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, FromPrimitive)]
-pub enum CompressionType { K8=0, K64=1, Rdp6=2, Rdp61=3 }
+pub enum CompressionType {
+    K8 = 0,
+    K64 = 1,
+    Rdp6 = 2,
+    Rdp61 = 3,
+}
 impl CompressionType {
     #[inline]
     pub const fn as_u8(self) -> u8 {
@@ -696,18 +906,20 @@ pub enum ClientInfoError {
 }
 
 impl From<PduError> for ClientInfoError {
-    fn from(e: PduError) -> Self { Self::Pdu(e) }
+    fn from(e: PduError) -> Self {
+        Self::Pdu(e)
+    }
 }
 
 impl ExtendedClientOptionalInfo {
     /// State-machine builder entrypoint kept for backward compatibility.
     /// Matches previous API so `ExtendedClientOptionalInfo::builder()` works.
-    pub fn builder(
-    ) -> builder::ExtendedClientOptionalInfoBuilder<builder::ExtendedClientOptionalInfoBuilderStateSetTimeZone> {
+    pub fn builder() -> builder::ExtendedClientOptionalInfoBuilder<
+        builder::ExtendedClientOptionalInfoBuilderStateSetTimeZone,
+    > {
         builder::ExtendedClientOptionalInfoBuilder::new()
     }
 }
-
 
 pub mod builder {
     use core::marker::PhantomData;
@@ -740,9 +952,13 @@ pub mod builder {
         pub fn timezone(
             mut self,
             timezone: TimezoneInfo,
-        ) -> ExtendedClientOptionalInfoBuilder<ExtendedClientOptionalInfoBuilderStateSetSessionId> {
+        ) -> ExtendedClientOptionalInfoBuilder<ExtendedClientOptionalInfoBuilderStateSetSessionId>
+        {
             self.inner.timezone = Some(timezone);
-            ExtendedClientOptionalInfoBuilder { inner: self.inner, _phantom: PhantomData }
+            ExtendedClientOptionalInfoBuilder {
+                inner: self.inner,
+                _phantom: PhantomData,
+            }
         }
     }
 
@@ -750,9 +966,14 @@ pub mod builder {
         pub fn session_id(
             mut self,
             session_id: u32,
-        ) -> ExtendedClientOptionalInfoBuilder<ExtendedClientOptionalInfoBuilderStateSetPerformanceFlags> {
+        ) -> ExtendedClientOptionalInfoBuilder<
+            ExtendedClientOptionalInfoBuilderStateSetPerformanceFlags,
+        > {
             self.inner.session_id = Some(session_id);
-            ExtendedClientOptionalInfoBuilder { inner: self.inner, _phantom: PhantomData }
+            ExtendedClientOptionalInfoBuilder {
+                inner: self.inner,
+                _phantom: PhantomData,
+            }
         }
     }
 
@@ -760,9 +981,14 @@ pub mod builder {
         pub fn performance_flags(
             mut self,
             performance_flags: PerformanceFlags,
-        ) -> ExtendedClientOptionalInfoBuilder<ExtendedClientOptionalInfoBuilderStateSetReconnectCookie> {
+        ) -> ExtendedClientOptionalInfoBuilder<
+            ExtendedClientOptionalInfoBuilderStateSetReconnectCookie,
+        > {
             self.inner.performance_flags = Some(performance_flags);
-            ExtendedClientOptionalInfoBuilder { inner: self.inner, _phantom: PhantomData }
+            ExtendedClientOptionalInfoBuilder {
+                inner: self.inner,
+                _phantom: PhantomData,
+            }
         }
     }
 
@@ -770,9 +996,13 @@ pub mod builder {
         pub fn reconnect_cookie(
             mut self,
             reconnect_cookie: [u8; RECONNECT_COOKIE_LEN],
-        ) -> ExtendedClientOptionalInfoBuilder<ExtendedClientOptionalInfoBuilderStateFinal> {
+        ) -> ExtendedClientOptionalInfoBuilder<ExtendedClientOptionalInfoBuilderStateFinal>
+        {
             self.inner.reconnect_cookie = Some(reconnect_cookie);
-            ExtendedClientOptionalInfoBuilder { inner: self.inner, _phantom: PhantomData }
+            ExtendedClientOptionalInfoBuilder {
+                inner: self.inner,
+                _phantom: PhantomData,
+            }
         }
     }
 

@@ -6,7 +6,9 @@ mod tests;
 use std::{io, str};
 
 use bitflags::bitflags;
-use ironrdp_core::{ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor};
+use ironrdp_core::{
+    ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+};
 use thiserror::Error;
 
 use crate::PduError;

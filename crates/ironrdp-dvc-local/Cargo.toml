@@ -15,8 +15,8 @@ default = []
 std = []
 
 [dependencies]
-ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1", features = ["alloc"] } # public
-ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", version = "0.5" } # public
-ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", version = "0.6", features = ["alloc"] } # public
+ironrdp-core = { path = "../ironrdp-core-local", version = "0.1", features = ["alloc"] } # public
+ironrdp-svc = { path = "../ironrdp-svc-local", version = "0.5" } # public
+ironrdp-pdu = { path = "../ironrdp-pdu-local", version = "0.6", features = ["alloc"] } # public
 tracing = { version = "0.1", features = ["log"] }
 slab = "0.4"

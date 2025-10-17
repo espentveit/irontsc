@@ -1,6 +1,6 @@
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, write_padding, Decode,
-    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding,
+    write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 use crate::utils;
@@ -47,7 +47,10 @@ impl Encode for LogonInfoVersion1 {
         )?);
         dst.write_slice(domain_name_buffer.as_ref());
         dst.write_u16(0); // UTF-16 null terminator
-        dst.write_u32(cast_length!("userNameSize", (self.logon_info.user_name.len() + 1) * 2)?);
+        dst.write_u32(cast_length!(
+            "userNameSize",
+            (self.logon_info.user_name.len() + 1) * 2
+        )?);
         dst.write_slice(user_name_buffer.as_ref());
         dst.write_u16(0); // UTF-16 null terminator
         dst.write_u32(self.logon_info.session_id);
@@ -70,18 +73,28 @@ impl<'de> Decode<'de> for LogonInfoVersion1 {
 
         let domain_name_size: usize = cast_length!("domainNameSize", src.read_u32())?;
         if domain_name_size > DOMAIN_NAME_SIZE_V1 {
-            return Err(invalid_field_err!("domainNameSize", "invalid domain name size"));
+            return Err(invalid_field_err!(
+                "domainNameSize",
+                "invalid domain name size"
+            ));
         }
 
-        let domain_name =
-            utils::decode_string(src.read_slice(DOMAIN_NAME_SIZE_V1), utils::CharacterSet::Unicode, false)?;
+        let domain_name = utils::decode_string(
+            src.read_slice(DOMAIN_NAME_SIZE_V1),
+            utils::CharacterSet::Unicode,
+            false,
+        )?;
 
         let user_name_size: usize = cast_length!("userNameSize", src.read_u32())?;
         if user_name_size > USER_NAME_SIZE_V1 {
             return Err(invalid_field_err!("userNameSize", "invalid user name size"));
         }
 
-        let user_name = utils::decode_string(src.read_slice(USER_NAME_SIZE_V1), utils::CharacterSet::Unicode, false)?;
+        let user_name = utils::decode_string(
+            src.read_slice(USER_NAME_SIZE_V1),
+            utils::CharacterSet::Unicode,
+            false,
+        )?;
 
         let session_id = src.read_u32();
 
@@ -117,7 +130,10 @@ impl Encode for LogonInfoVersion2 {
             "domainNameSize",
             (self.logon_info.domain_name.len() + 1) * 2
         )?);
-        dst.write_u32(cast_length!("userNameSize", (self.logon_info.user_name.len() + 1) * 2)?);
+        dst.write_u32(cast_length!(
+            "userNameSize",
+            (self.logon_info.user_name.len() + 1) * 2
+        )?);
         write_padding!(dst, LOGON_INFO_V2_PADDING_SIZE);
 
         utils::write_string_to_cursor(
@@ -141,7 +157,9 @@ impl Encode for LogonInfoVersion2 {
     }
 
     fn size(&self) -> usize {
-        Self::FIXED_PART_SIZE + (self.logon_info.domain_name.len() + 1) * 2 + (self.logon_info.user_name.len() + 1) * 2
+        Self::FIXED_PART_SIZE
+            + (self.logon_info.domain_name.len() + 1) * 2
+            + (self.logon_info.user_name.len() + 1) * 2
     }
 }
 
@@ -156,13 +174,19 @@ impl<'de> Decode<'de> for LogonInfoVersion2 {
 
         let size: usize = cast_length!("LogonInfoSize", src.read_u32())?;
         if size != LOGON_INFO_V2_SIZE {
-            return Err(invalid_field_err!("domainNameSize", "invalid logon info size"));
+            return Err(invalid_field_err!(
+                "domainNameSize",
+                "invalid logon info size"
+            ));
         }
 
         let session_id = src.read_u32();
         let domain_name_size: usize = cast_length!("domainNameSize", src.read_u32())?;
         if domain_name_size > DOMAIN_NAME_SIZE_V2 {
-            return Err(invalid_field_err!("domainNameSize", "invalid domain name size"));
+            return Err(invalid_field_err!(
+                "domainNameSize",
+                "invalid domain name size"
+            ));
         }
 
         let user_name_size: usize = cast_length!("userNameSize", src.read_u32())?;
@@ -173,10 +197,18 @@ impl<'de> Decode<'de> for LogonInfoVersion2 {
         read_padding!(src, LOGON_INFO_V2_PADDING_SIZE);
 
         ensure_size!(in: src, size: domain_name_size);
-        let domain_name = utils::decode_string(src.read_slice(domain_name_size), utils::CharacterSet::Unicode, false)?;
+        let domain_name = utils::decode_string(
+            src.read_slice(domain_name_size),
+            utils::CharacterSet::Unicode,
+            false,
+        )?;
 
         ensure_size!(in: src, size: user_name_size);
-        let user_name = utils::decode_string(src.read_slice(user_name_size), utils::CharacterSet::Unicode, false)?;
+        let user_name = utils::decode_string(
+            src.read_slice(user_name_size),
+            utils::CharacterSet::Unicode,
+            false,
+        )?;
 
         Ok(Self {
             logon_info: LogonInfo {

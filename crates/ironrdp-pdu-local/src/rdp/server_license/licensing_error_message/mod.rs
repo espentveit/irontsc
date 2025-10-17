@@ -2,14 +2,19 @@
 mod test;
 
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode as _, DecodeResult, Encode as _,
-    EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode as _, DecodeResult,
+    Encode as _, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
 
-use super::{BlobHeader, BlobType, LicenseHeader, PreambleFlags, PreambleVersion, BLOB_LENGTH_SIZE, BLOB_TYPE_SIZE};
-use crate::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags, BASIC_SECURITY_HEADER_SIZE};
+use super::{
+    BlobHeader, BlobType, LicenseHeader, PreambleFlags, PreambleVersion, BLOB_LENGTH_SIZE,
+    BLOB_TYPE_SIZE,
+};
+use crate::rdp::headers::{
+    BasicSecurityHeader, BasicSecurityHeaderFlags, BASIC_SECURITY_HEADER_SIZE,
+};
 use crate::rdp::server_license::PreambleType;
 
 const ERROR_CODE_SIZE: usize = 4;
@@ -70,7 +75,10 @@ impl LicensingErrorMessage {
 
     pub fn decode(license_header: LicenseHeader, src: &mut ReadCursor<'_>) -> DecodeResult<Self> {
         if license_header.preamble_message_type != PreambleType::ErrorAlert {
-            return Err(invalid_field_err!("preambleMessageType", "unexpected preamble type"));
+            return Err(invalid_field_err!(
+                "preambleMessageType",
+                "unexpected preamble type"
+            ));
         }
 
         ensure_fixed_part_size!(in: src);
@@ -99,7 +107,11 @@ impl LicensingErrorMessage {
     }
 
     pub fn size(&self) -> usize {
-        self.license_header.size() + Self::FIXED_PART_SIZE + self.error_info.len() + BLOB_LENGTH_SIZE + BLOB_TYPE_SIZE
+        self.license_header.size()
+            + Self::FIXED_PART_SIZE
+            + self.error_info.len()
+            + BLOB_LENGTH_SIZE
+            + BLOB_TYPE_SIZE
     }
 }
 

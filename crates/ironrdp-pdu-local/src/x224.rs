@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 
 use ironrdp_core::{
-    cast_length, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, IntoOwned, ReadCursor,
-    WriteCursor,
+    cast_length, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
+    IntoOwned, ReadCursor, WriteCursor,
 };
 
 use crate::tpdu::{TpduCode, TpduHeader};
@@ -16,7 +16,11 @@ pub trait X224Pdu<'de>: Sized {
 
     fn x224_body_encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()>;
 
-    fn x224_body_decode(src: &mut ReadCursor<'de>, tpkt: &TpktHeader, tpdu: &TpduHeader) -> DecodeResult<Self>;
+    fn x224_body_decode(
+        src: &mut ReadCursor<'de>,
+        tpkt: &TpktHeader,
+        tpdu: &TpduHeader,
+    ) -> DecodeResult<Self>;
 
     fn tpdu_header_variable_part_size(&self) -> usize;
 
@@ -52,7 +56,11 @@ where
             (T::TPDU_CODE.header_fixed_part_size() + self.0.tpdu_header_variable_part_size() - 1)
         )?;
 
-        TpduHeader { li, code: T::TPDU_CODE }.write(dst)?;
+        TpduHeader {
+            li,
+            code: T::TPDU_CODE,
+        }
+        .write(dst)?;
 
         self.0.x224_body_encode(dst)
     }
@@ -121,7 +129,11 @@ impl<'de> X224Pdu<'de> for X224Data<'de> {
         Ok(())
     }
 
-    fn x224_body_decode(src: &mut ReadCursor<'de>, tpkt: &TpktHeader, tpdu: &TpduHeader) -> DecodeResult<Self> {
+    fn x224_body_decode(
+        src: &mut ReadCursor<'de>,
+        tpkt: &TpktHeader,
+        tpdu: &TpduHeader,
+    ) -> DecodeResult<Self> {
         let user_data_size = user_data_size(tpkt, tpdu);
 
         ensure_size!(in: src, size: user_data_size);

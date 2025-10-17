@@ -105,7 +105,10 @@ pub(crate) fn write_length(dst: &mut WriteCursor<'_>, length: u16) {
     if length > 0x7f {
         write_long_length(dst, length);
     } else {
-        dst.write_u8(u8::try_from(length).expect("length is guaranteed to fit into u8 due to the prior check"));
+        dst.write_u8(
+            u8::try_from(length)
+                .expect("length is guaranteed to fit into u8 due to the prior check"),
+        );
     }
 }
 
@@ -187,10 +190,15 @@ pub(crate) fn read_u32(src: &mut ReadCursor<'_>) -> Result<u32, PerError> {
 pub(crate) fn write_u32(dst: &mut WriteCursor<'_>, value: u32) {
     if value <= 0xff {
         write_length(dst, 1);
-        dst.write_u8(u8::try_from(value).expect("value is guaranteed to fit into u8 due to the prior check"));
+        dst.write_u8(
+            u8::try_from(value).expect("value is guaranteed to fit into u8 due to the prior check"),
+        );
     } else if value <= 0xffff {
         write_length(dst, 2);
-        dst.write_u16_be(u16::try_from(value).expect("value is guaranteed to fit into u16 due to the prior check"));
+        dst.write_u16_be(
+            u16::try_from(value)
+                .expect("value is guaranteed to fit into u16 due to the prior check"),
+        );
     } else {
         write_length(dst, 4);
         dst.write_u32_be(value);
@@ -256,14 +264,21 @@ pub(crate) fn write_object_id(dst: &mut WriteCursor<'_>, object_ids: [u8; OBJECT
     }
 }
 
-pub(crate) fn read_octet_string<'a>(src: &mut ReadCursor<'a>, min: usize) -> Result<&'a [u8], PerError> {
+pub(crate) fn read_octet_string<'a>(
+    src: &mut ReadCursor<'a>,
+    min: usize,
+) -> Result<&'a [u8], PerError> {
     let (length, _) = read_length(src)?;
     let read_len = min + usize::from(length);
     let octet_string = try_read_slice(src, read_len)?;
     Ok(octet_string)
 }
 
-pub(crate) fn write_octet_string(dst: &mut WriteCursor<'_>, octet_string: &[u8], min: usize) -> Result<(), PerError> {
+pub(crate) fn write_octet_string(
+    dst: &mut WriteCursor<'_>,
+    octet_string: &[u8],
+    min: usize,
+) -> Result<(), PerError> {
     if octet_string.len() < min {
         return Err(PerError::OctetStringTooSmall);
     }
@@ -292,7 +307,11 @@ pub(crate) fn read_numeric_string(src: &mut ReadCursor<'_>, min: u16) -> Result<
     }
 }
 
-pub(crate) fn write_numeric_string(dst: &mut WriteCursor<'_>, num_str: &[u8], min: usize) -> Result<(), PerError> {
+pub(crate) fn write_numeric_string(
+    dst: &mut WriteCursor<'_>,
+    num_str: &[u8],
+    min: usize,
+) -> Result<(), PerError> {
     if num_str.len() < min {
         return Err(PerError::NumericStringTooSmall);
     }
@@ -384,7 +403,10 @@ pub(crate) mod legacy {
         stream.read_u8()
     }
 
-    pub(crate) fn write_number_of_sets(mut stream: impl io::Write, number_of_sets: u8) -> io::Result<usize> {
+    pub(crate) fn write_number_of_sets(
+        mut stream: impl io::Write,
+        number_of_sets: u8,
+    ) -> io::Result<usize> {
         stream.write_u8(number_of_sets)?;
 
         Ok(1)
@@ -397,7 +419,10 @@ pub(crate) mod legacy {
         Ok(())
     }
 
-    pub(crate) fn write_padding(mut stream: impl io::Write, padding_length: usize) -> io::Result<()> {
+    pub(crate) fn write_padding(
+        mut stream: impl io::Write,
+        padding_length: usize,
+    ) -> io::Result<()> {
         let buf = vec![0; padding_length];
         stream.write_all(buf.as_ref())?;
 
@@ -509,7 +534,10 @@ pub(crate) mod legacy {
         Ok(read_object_ids)
     }
 
-    pub(crate) fn write_object_id(mut stream: impl io::Write, object_ids: [u8; OBJECT_ID_SIZE]) -> io::Result<usize> {
+    pub(crate) fn write_object_id(
+        mut stream: impl io::Write,
+        object_ids: [u8; OBJECT_ID_SIZE],
+    ) -> io::Result<usize> {
         let object_oid_size: u16 = OBJECT_ID_SIZE
             .try_into()
             .expect("OBJECT_ID_SIZE is known to fit into u16");
@@ -534,15 +562,20 @@ pub(crate) mod legacy {
         Ok(read_octet_string)
     }
 
-    pub(crate) fn write_octet_string(mut stream: impl io::Write, octet_string: &[u8], min: usize) -> io::Result<usize> {
+    pub(crate) fn write_octet_string(
+        mut stream: impl io::Write,
+        octet_string: &[u8],
+        min: usize,
+    ) -> io::Result<usize> {
         let length = if octet_string.len() >= min {
             octet_string.len() - min
         } else {
             min
         };
 
-        let length = u16::try_from(length)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid octet string length"))?;
+        let length = u16::try_from(length).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid octet string length")
+        })?;
         let size = write_length(&mut stream, length)?;
         stream.write_all(octet_string)?;
 
@@ -560,11 +593,20 @@ pub(crate) mod legacy {
         Ok(())
     }
 
-    pub(crate) fn write_numeric_string(mut stream: impl io::Write, num_str: &[u8], min: usize) -> io::Result<usize> {
-        let length = if num_str.len() >= min { num_str.len() - min } else { min };
+    pub(crate) fn write_numeric_string(
+        mut stream: impl io::Write,
+        num_str: &[u8],
+        min: usize,
+    ) -> io::Result<usize> {
+        let length = if num_str.len() >= min {
+            num_str.len() - min
+        } else {
+            min
+        };
 
-        let length = u16::try_from(length)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid numeric string length"))?;
+        let length = u16::try_from(length).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid numeric string length")
+        })?;
         let mut size = write_length(&mut stream, length)?;
 
         let magic_transform = |elem| (elem - 0x30) % 10;

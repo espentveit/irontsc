@@ -11,7 +11,9 @@ use rand::RngCore as _;
 use tracing::{debug, error, info, trace};
 
 use super::{custom_err, general_err, legacy, ConnectorError, ConnectorErrorExt as _};
-use crate::{encode_send_data_request, ConnectorResult, ConnectorResultExt as _, Sequence, State, Written};
+use crate::{
+    encode_send_data_request, ConnectorResult, ConnectorResultExt as _, Sequence, State, Written,
+};
 
 #[derive(Default, Debug)]
 #[non_exhaustive]
@@ -150,7 +152,10 @@ impl Sequence for LicenseExchangeSequence {
                                     .get_license(LicenseInformation {
                                         version: license_request.product_info.version,
                                         scope: scope.0.clone(),
-                                        company_name: license_request.product_info.company_name.clone(),
+                                        company_name: license_request
+                                            .product_info
+                                            .company_name
+                                            .clone(),
                                         product_id: license_request.product_info.product_id.clone(),
                                         license_info: vec![],
                                     })
@@ -168,7 +173,10 @@ impl Sequence for LicenseExchangeSequence {
                                 info,
                             ) {
                                 Ok((client_license_info, encryption_data)) => {
-                                    trace!(?encryption_data, "Successfully generated Client License Info");
+                                    trace!(
+                                        ?encryption_data,
+                                        "Successfully generated Client License Info"
+                                    );
                                     trace!(message = ?client_license_info, "Send");
 
                                     let written = encode_send_data_request::<LicensePdu>(
@@ -242,7 +250,9 @@ impl Sequence for LicenseExchangeSequence {
                         }
                     }
                     LicensePdu::LicensingErrorMessage(error_message) => {
-                        if error_message.error_code != server_license::LicenseErrorCode::StatusValidClient {
+                        if error_message.error_code
+                            != server_license::LicenseErrorCode::StatusValidClient
+                        {
                             return Err(custom_err!(
                                 "LicensingErrorMessage",
                                 ServerLicenseError::from(error_message)
@@ -293,7 +303,9 @@ impl Sequence for LicenseExchangeSequence {
                         )
                     }
                     LicensePdu::LicensingErrorMessage(error_message) => {
-                        if error_message.error_code != server_license::LicenseErrorCode::StatusValidClient {
+                        if error_message.error_code
+                            != server_license::LicenseErrorCode::StatusValidClient
+                        {
                             return Err(custom_err!(
                                 "LicensingErrorMessage",
                                 ServerLicenseError::from(error_message)
@@ -316,7 +328,9 @@ impl Sequence for LicenseExchangeSequence {
 
                 let license_pdu = send_data_indication_ctx
                     .decode_user_data::<LicensePdu>()
-                    .with_context("decode during SERVER_NEW_LICENSE/LicenseExchangeState::UpgradeLicense")?;
+                    .with_context(
+                        "decode during SERVER_NEW_LICENSE/LicenseExchangeState::UpgradeLicense",
+                    )?;
 
                 match license_pdu {
                     LicensePdu::ServerUpgradeLicense(upgrade_license) => {
@@ -335,7 +349,9 @@ impl Sequence for LicenseExchangeSequence {
                         self.license_cache.store_license(license_info)?
                     }
                     LicensePdu::LicensingErrorMessage(error_message) => {
-                        if error_message.error_code != server_license::LicenseErrorCode::StatusValidClient {
+                        if error_message.error_code
+                            != server_license::LicenseErrorCode::StatusValidClient
+                        {
                             return Err(custom_err!(
                                 "LicensingErrorMessage",
                                 ServerLicenseError::from(error_message)
@@ -355,7 +371,9 @@ impl Sequence for LicenseExchangeSequence {
                 (Written::Nothing, LicenseExchangeState::LicenseExchanged)
             }
 
-            LicenseExchangeState::LicenseExchanged => return Err(general_err!("license already exchanged")),
+            LicenseExchangeState::LicenseExchanged => {
+                return Err(general_err!("license already exchanged"))
+            }
         };
 
         self.state = next_state;

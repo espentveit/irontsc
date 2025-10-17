@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "video-redirection")]
-use ironrdp_h264::{FfmpegDecoder, H264Decoder, AvcKind};
+use ironrdp_h264::{AvcKind, FfmpegDecoder, H264Decoder};
 
 use crate::rdp::{RdpEventSender, RdpOutputEvent};
 
@@ -79,7 +79,10 @@ impl VideoRedirectionManager {
                     Some(SendFfmpegDecoder(decoder))
                 }
                 Err(e) => {
-                    warn!("⚠️ Video Redirection: H.264 decoder initialization failed: {}", e);
+                    warn!(
+                        "⚠️ Video Redirection: H.264 decoder initialization failed: {}",
+                        e
+                    );
                     None
                 }
             }
@@ -169,7 +172,10 @@ impl VideoRedirectionManager {
     /// Stop a video presentation
     fn stop_presentation(&mut self, presentation_id: u8) -> Result<()> {
         if self.presentations.remove(&presentation_id).is_some() {
-            info!("🛑 Video Redirection: Presentation {} stopped", presentation_id);
+            info!(
+                "🛑 Video Redirection: Presentation {} stopped",
+                presentation_id
+            );
         }
         Ok(())
     }
@@ -189,7 +195,8 @@ impl VideoRedirectionManager {
         match geometry.update_type {
             ironrdp_geometry::UpdateType::Update => {
                 // Update geometry
-                self.geometries.insert(geometry.mapping_id, geometry.clone());
+                self.geometries
+                    .insert(geometry.mapping_id, geometry.clone());
 
                 // Update any presentations using this geometry
                 for presentation in self.presentations.values_mut() {
@@ -245,7 +252,12 @@ impl VideoRedirectionManager {
 
             if data.is_complete() {
                 // Single-packet sample
-                Some((data.sample_data.clone(), data.timestamp, data.duration, data.flags.is_keyframe()))
+                Some((
+                    data.sample_data.clone(),
+                    data.timestamp,
+                    data.duration,
+                    data.flags.is_keyframe(),
+                ))
             } else {
                 // Multi-packet sample - reassemble
                 Self::reassemble_sample(presentation, &data)?
@@ -255,12 +267,21 @@ impl VideoRedirectionManager {
         // Decode and render if we have a complete sample
         if let Some((sample_data, timestamp, duration, is_keyframe)) = complete_sample {
             // Extract geometry before calling decode_and_render to avoid borrowing issues
-            let geometry = self.presentations.get(&data.presentation_id)
+            let geometry = self
+                .presentations
+                .get(&data.presentation_id)
                 .and_then(|p| p.geometry.clone());
 
             let presentation_id = data.presentation_id;
 
-            self.decode_and_render(presentation_id, geometry, &sample_data, timestamp, duration, is_keyframe)?;
+            self.decode_and_render(
+                presentation_id,
+                geometry,
+                &sample_data,
+                timestamp,
+                duration,
+                is_keyframe,
+            )?;
         }
 
         Ok(())

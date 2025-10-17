@@ -3,8 +3,9 @@ use std::fmt;
 
 use bit_field::BitField as _;
 use ironrdp_core::{
-    cast_length, decode_cursor, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, write_padding,
-    Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, decode_cursor, ensure_fixed_part_size, ensure_size, invalid_field_err,
+    read_padding, write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
+    WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -72,8 +73,8 @@ impl<'a> Decode<'a> for WireToSurface1Pdu {
         ensure_fixed_part_size!(in: src);
 
         let surface_id = src.read_u16();
-        let codec_id =
-            Codec1Type::from_u16(src.read_u16()).ok_or_else(|| invalid_field_err!("CodecId", "invalid codec ID"))?;
+        let codec_id = Codec1Type::from_u16(src.read_u16())
+            .ok_or_else(|| invalid_field_err!("CodecId", "invalid codec ID"))?;
         let pixel_format = PixelFormat::from_u8(src.read_u8())
             .ok_or_else(|| invalid_field_err!("PixelFormat", "invalid pixel format"))?;
         let destination_rectangle = InclusiveRectangle::decode(src)?;
@@ -147,8 +148,8 @@ impl<'a> Decode<'a> for WireToSurface2Pdu {
         ensure_fixed_part_size!(in: src);
 
         let surface_id = src.read_u16();
-        let codec_id =
-            Codec2Type::from_u16(src.read_u16()).ok_or_else(|| invalid_field_err!("CodecId", "invalid codec ID"))?;
+        let codec_id = Codec2Type::from_u16(src.read_u16())
+            .ok_or_else(|| invalid_field_err!("CodecId", "invalid codec ID"))?;
         let codec_context_id = src.read_u32();
         let pixel_format = PixelFormat::from_u8(src.read_u8())
             .ok_or_else(|| invalid_field_err!("PixelFormat", "invalid pixel format"))?;
@@ -292,7 +293,10 @@ impl Encode for SurfaceToSurfacePdu {
         dst.write_u16(self.destination_surface_id);
         self.source_rectangle.encode(dst)?;
 
-        dst.write_u16(cast_length!("DestinationPoints", self.destination_points.len())?);
+        dst.write_u16(cast_length!(
+            "DestinationPoints",
+            self.destination_points.len()
+        )?);
         for rectangle in self.destination_points.iter() {
             rectangle.encode(dst)?;
         }
@@ -305,7 +309,12 @@ impl Encode for SurfaceToSurfacePdu {
     }
 
     fn size(&self) -> usize {
-        Self::FIXED_PART_SIZE + self.destination_points.iter().map(|r| r.size()).sum::<usize>()
+        Self::FIXED_PART_SIZE
+            + self
+                .destination_points
+                .iter()
+                .map(|r| r.size())
+                .sum::<usize>()
     }
 }
 
@@ -416,7 +425,12 @@ impl Encode for CacheToSurfacePdu {
     }
 
     fn size(&self) -> usize {
-        Self::FIXED_PART_SIZE + self.destination_points.iter().map(|p| p.size()).sum::<usize>()
+        Self::FIXED_PART_SIZE
+            + self
+                .destination_points
+                .iter()
+                .map(|p| p.size())
+                .sum::<usize>()
     }
 }
 
@@ -546,7 +560,10 @@ impl ResetGraphicsPdu {
     const FIXED_PART_SIZE: usize = 4 /* Width */ + 4 /* Height */;
 
     fn padding_size(&self) -> usize {
-        RESET_GRAPHICS_PDU_SIZE - RDP_GFX_HEADER_SIZE - 12 - self.monitors.iter().map(|m| m.size()).sum::<usize>()
+        RESET_GRAPHICS_PDU_SIZE
+            - RDP_GFX_HEADER_SIZE
+            - 12
+            - self.monitors.iter().map(|m| m.size()).sum::<usize>()
     }
 }
 
@@ -587,12 +604,18 @@ impl<'a> Decode<'a> for ResetGraphicsPdu {
 
         let height = src.read_u32();
         if height > MAX_RESET_GRAPHICS_WIDTH_HEIGHT {
-            return Err(invalid_field_err!("height", "invalid reset graphics height"));
+            return Err(invalid_field_err!(
+                "height",
+                "invalid reset graphics height"
+            ));
         }
 
         let monitor_count = cast_length!("monitor count", src.read_u32())?;
         if monitor_count > MONITOR_COUNT_MAX {
-            return Err(invalid_field_err!("height", "invalid reset graphics monitor count"));
+            return Err(invalid_field_err!(
+                "height",
+                "invalid reset graphics monitor count"
+            ));
         }
 
         let monitors = iter::repeat_with(|| Monitor::decode(src))
@@ -857,7 +880,10 @@ impl<'a> Decode<'a> for StartFramePdu {
         let timestamp = Timestamp::decode(src)?;
         let frame_id = src.read_u32();
 
-        Ok(Self { timestamp, frame_id })
+        Ok(Self {
+            timestamp,
+            frame_id,
+        })
     }
 }
 

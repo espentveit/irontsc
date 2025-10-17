@@ -3,7 +3,9 @@
 use core::fmt;
 
 use bitflags::bitflags;
-use ironrdp_core::{ensure_size, invalid_field_err, unexpected_message_type_err, ReadCursor, WriteCursor};
+use ironrdp_core::{
+    ensure_size, invalid_field_err, unexpected_message_type_err, ReadCursor, WriteCursor,
+};
 use tap::prelude::*;
 
 use crate::tpdu::{TpduCode, TpduHeader};
@@ -144,7 +146,10 @@ impl fmt::Display for FailureCode {
                 write!(f, "CredSSP enhanced RDP security required by server")
             }
             Self::SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER => {
-                write!(f, "TLS certificate-based client authentication required by server")
+                write!(
+                    f,
+                    "TLS certificate-based client authentication required by server"
+                )
             }
             _ => write!(f, "unknown failure code: {}", self.0),
         }
@@ -200,7 +205,9 @@ impl Cookie {
     const PREFIX: &'static str = "Cookie: mstshash=";
 
     pub fn read(src: &mut ReadCursor<'_>) -> DecodeResult<Option<Self>> {
-        read_nego_data(src, "Cookie", Self::PREFIX)?.map(Self).pipe(Ok)
+        read_nego_data(src, "Cookie", Self::PREFIX)?
+            .map(Self)
+            .pipe(Ok)
     }
 
     pub fn write(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
@@ -219,7 +226,9 @@ impl RoutingToken {
     const PREFIX: &'static str = "Cookie: msts=";
 
     pub fn read(src: &mut ReadCursor<'_>) -> DecodeResult<Option<Self>> {
-        read_nego_data(src, "RoutingToken", Self::PREFIX)?.map(Self).pipe(Ok)
+        read_nego_data(src, "RoutingToken", Self::PREFIX)?
+            .map(Self)
+            .pipe(Ok)
     }
 
     pub fn write(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
@@ -291,7 +300,11 @@ impl<'de> X224Pdu<'de> for ConnectionRequest {
         Ok(())
     }
 
-    fn x224_body_decode(src: &mut ReadCursor<'de>, _: &TpktHeader, tpdu: &TpduHeader) -> DecodeResult<Self> {
+    fn x224_body_decode(
+        src: &mut ReadCursor<'de>,
+        _: &TpktHeader,
+        tpdu: &TpduHeader,
+    ) -> DecodeResult<Self> {
         let variable_part_size = tpdu.variable_part_size();
 
         ensure_size!(in: src, size: variable_part_size);
@@ -322,7 +335,8 @@ impl<'de> X224Pdu<'de> for ConnectionRequest {
             // Decode correlation info if present
             let correlation_info = if flags.contains(RequestFlags::CORRELATION_INFO_PRESENT) {
                 // Calculate remaining bytes after RDP_NEG_REQ
-                let consumed = nego_data.as_ref().map(|d| d.size()).unwrap_or(0) + usize::from(Self::RDP_NEG_REQ_SIZE);
+                let consumed = nego_data.as_ref().map(|d| d.size()).unwrap_or(0)
+                    + usize::from(Self::RDP_NEG_REQ_SIZE);
                 if variable_part_size >= consumed + CorrelationInfo::SIZE as usize {
                     Some(CorrelationInfo::decode(src)?)
                 } else {
@@ -354,7 +368,11 @@ impl<'de> X224Pdu<'de> for ConnectionRequest {
 
     fn tpdu_header_variable_part_size(&self) -> usize {
         let optional_nego_data_size = self.nego_data.as_ref().map(|data| data.size()).unwrap_or(0);
-        let correlation_size = self.correlation_info.as_ref().map(|c| c.size()).unwrap_or(0);
+        let correlation_size = self
+            .correlation_info
+            .as_ref()
+            .map(|c| c.size())
+            .unwrap_or(0);
         optional_nego_data_size + usize::from(Self::RDP_NEG_REQ_SIZE) + correlation_size
     }
 
@@ -406,7 +424,11 @@ impl<'de> X224Pdu<'de> for ConnectionConfirm {
         Ok(())
     }
 
-    fn x224_body_decode(src: &mut ReadCursor<'de>, _: &TpktHeader, tpdu: &TpduHeader) -> DecodeResult<Self> {
+    fn x224_body_decode(
+        src: &mut ReadCursor<'de>,
+        _: &TpktHeader,
+        tpdu: &TpduHeader,
+    ) -> DecodeResult<Self> {
         let variable_part_size = tpdu.variable_part_size();
 
         ensure_size!(in: src, size: variable_part_size);
@@ -429,7 +451,10 @@ impl<'de> X224Pdu<'de> for ConnectionConfirm {
 
                     Ok(Self::Failure { code })
                 }
-                unexpected => Err(unexpected_message_type_err!(Self::X224_NAME, u8::from(unexpected))),
+                unexpected => Err(unexpected_message_type_err!(
+                    Self::X224_NAME,
+                    u8::from(unexpected)
+                )),
             }
         } else {
             Ok(Self::Response {
@@ -451,7 +476,11 @@ impl<'de> X224Pdu<'de> for ConnectionConfirm {
     }
 }
 
-fn read_nego_data(src: &mut ReadCursor<'_>, ctx: &'static str, prefix: &str) -> DecodeResult<Option<String>> {
+fn read_nego_data(
+    src: &mut ReadCursor<'_>,
+    ctx: &'static str,
+    prefix: &str,
+) -> DecodeResult<Option<String>> {
     if src.len() < prefix.len() + 2 {
         return Ok(None);
     }
@@ -480,7 +509,12 @@ fn read_nego_data(src: &mut ReadCursor<'_>, ctx: &'static str, prefix: &str) -> 
     Ok(Some(data))
 }
 
-fn write_nego_data(dst: &mut WriteCursor<'_>, ctx: &'static str, prefix: &str, value: &str) -> EncodeResult<()> {
+fn write_nego_data(
+    dst: &mut WriteCursor<'_>,
+    ctx: &'static str,
+    prefix: &str,
+    value: &str,
+) -> EncodeResult<()> {
     ensure_size!(ctx: ctx, in: dst, size: prefix.len() + value.len() + 2);
 
     dst.write_slice(prefix.as_bytes());
@@ -508,60 +542,64 @@ pub struct CorrelationInfo {
 impl CorrelationInfo {
     const TYPE: u8 = 0x06; // TYPE_RDP_CORRELATION_INFO
     const SIZE: u16 = 36; // Total structure size in bytes
-    
+
     /// Creates a new CorrelationInfo with a random correlation ID
     pub fn new_random() -> Self {
         use rand::RngCore;
         let mut correlation_id = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut correlation_id);
-        
+
         // Follow spec recommendations: first byte should not be 0x00 or 0xF4
         if correlation_id[0] == 0x00 || correlation_id[0] == 0xF4 {
             correlation_id[0] = 0x01;
         }
-        
+
         // Avoid 0x0D in all bytes
         for byte in &mut correlation_id {
             if *byte == 0x0D {
                 *byte = 0x0E;
             }
         }
-        
+
         Self { correlation_id }
     }
-    
+
     /// Creates a CorrelationInfo from an existing correlation ID
     pub fn from_id(correlation_id: [u8; 16]) -> Self {
         Self { correlation_id }
     }
-    
+
     /// Encodes the correlation info into the provided cursor
     pub fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: usize::from(Self::SIZE));
-        
+
         dst.write_u8(Self::TYPE);
         dst.write_u8(0x00); // flags (must be 0x00)
         dst.write_u16(Self::SIZE);
         dst.write_slice(&self.correlation_id);
         dst.write_slice(&[0u8; 16]); // reserved (must be zero)
-        
+
         Ok(())
     }
-    
+
     /// Decodes correlation info from the provided cursor
     pub fn decode(src: &mut ReadCursor<'_>) -> DecodeResult<Self> {
         ensure_size!(in: src, size: usize::from(Self::SIZE));
-        
+
         let msg_type = src.read_u8();
         if msg_type != Self::TYPE {
             return Err(unexpected_message_type_err!("CorrelationInfo", msg_type));
         }
-        
+
         let flags = src.read_u8();
         if flags != 0x00 {
-            return Err(invalid_field_err("CorrelationInfo", "flags", "must be 0x00"));
+            return Err(invalid_field_err(
+                "CorrelationInfo",
+                "flags",
+                "must be 0x00",
+            ));
         }
-        
+
         let length = src.read_u16();
         if length != Self::SIZE {
             return Err(invalid_field_err(
@@ -570,17 +608,17 @@ impl CorrelationInfo {
                 "length mismatch",
             ));
         }
-        
+
         let correlation_id_bytes = src.read_slice(16);
         let mut correlation_id = [0u8; 16];
         correlation_id.copy_from_slice(correlation_id_bytes);
-        
+
         // Skip reserved bytes (16 bytes)
         src.advance(16);
-        
+
         Ok(Self { correlation_id })
     }
-    
+
     /// Returns the size of the structure in bytes
     pub fn size(&self) -> usize {
         usize::from(Self::SIZE)

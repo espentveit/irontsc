@@ -2,10 +2,10 @@ use ironrdp_connector::credssp::{CredsspProcessGenerator, CredsspSequence, Kerbe
 use ironrdp_connector::sspi::credssp::ClientState;
 use ironrdp_connector::sspi::generator::GeneratorState;
 use ironrdp_connector::{
-    custom_err, general_err, ClientConnector, ClientConnectorState, ConnectionResult, ConnectorError, ConnectorResult,
-    ServerName, State as _,
+    custom_err, general_err, ClientConnector, ClientConnectorState, ConnectionResult,
+    ConnectorError, ConnectorResult, ServerName, State as _,
 };
-use ironrdp_core::WriteBuf;
+use ironrdp_pdu::WriteBuf;
 use tracing::{debug, info, instrument, trace};
 
 use crate::framed::{Framed, FramedRead, FramedWrite};
@@ -15,7 +15,10 @@ use crate::{single_sequence_step, AsyncNetworkClient};
 pub struct ShouldUpgrade;
 
 #[instrument(skip_all)]
-pub async fn connect_begin<S>(framed: &mut Framed<S>, connector: &mut ClientConnector) -> ConnectorResult<ShouldUpgrade>
+pub async fn connect_begin<S>(
+    framed: &mut Framed<S>,
+    connector: &mut ClientConnector,
+) -> ConnectorResult<ShouldUpgrade>
 where
     S: Sync + FramedRead + FramedWrite,
 {
@@ -102,8 +105,12 @@ async fn resolve_generator(
                 state = generator.resume(Ok(response));
             }
             GeneratorState::Completed(client_state) => {
-                break client_state
-                    .map_err(|e| ConnectorError::new("CredSSP", ironrdp_connector::ConnectorErrorKind::Credssp(e)))
+                break client_state.map_err(|e| {
+                    ConnectorError::new(
+                        "CredSSP",
+                        ironrdp_connector::ConnectorErrorKind::Credssp(e),
+                    )
+                })
             }
         }
     }
@@ -125,7 +132,9 @@ where
     assert!(connector.should_perform_credssp());
 
     let selected_protocol = match connector.state {
-        ClientConnectorState::Credssp { selected_protocol, .. } => selected_protocol,
+        ClientConnectorState::Credssp {
+            selected_protocol, ..
+        } => selected_protocol,
         _ => return Err(general_err!("invalid connector state for CredSSP sequence")),
     };
 

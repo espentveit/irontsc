@@ -1,7 +1,8 @@
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, not_enough_bytes_err, other_err, read_padding,
-    write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, not_enough_bytes_err,
+    other_err, read_padding, write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
+    WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -89,7 +90,8 @@ impl Encode for ShareControlHeader {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: self.size());
 
-        let pdu_type_with_version = PROTOCOL_VERSION | self.share_control_pdu.share_header_type().as_u16();
+        let pdu_type_with_version =
+            PROTOCOL_VERSION | self.share_control_pdu.share_header_type().as_u16();
 
         dst.write_u16(cast_length!(
             "len",
@@ -119,13 +121,21 @@ impl<'de> Decode<'de> for ShareControlHeader {
         eprintln!("   Remaining bytes: {}", remaining_bytes.len());
         if remaining_bytes.len() >= 32 {
             let preview = &remaining_bytes[..32];
-            let hex: String = preview.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let hex: String = preview
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
             eprintln!("   First 32 bytes: {}", hex);
         } else if !remaining_bytes.is_empty() {
-            let hex: String = remaining_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let hex: String = remaining_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
             eprintln!("   All {} bytes: {}", remaining_bytes.len(), hex);
         }
-        
+
         ensure_fixed_part_size!(in: src);
 
         let total_length = usize::from(src.read_u16());
@@ -136,10 +146,13 @@ impl<'de> Decode<'de> for ShareControlHeader {
         let pdu_type_value = pdu_type_with_version & SHARE_CONTROL_HEADER_MASK;
         eprintln!("   total_length: {}", total_length);
         eprintln!("   pdu_type_with_version: 0x{:04x}", pdu_type_with_version);
-        eprintln!("   pdu_type_value (masked): 0x{:04x} ({})", pdu_type_value, pdu_type_value);
+        eprintln!(
+            "   pdu_type_value (masked): 0x{:04x} ({})",
+            pdu_type_value, pdu_type_value
+        );
         eprintln!("   pdu_source: 0x{:04x}", pdu_source);
         eprintln!("   share_id: 0x{:08x}", share_id);
-        
+
         let pdu_type = ShareControlPduType::from_u16(pdu_type_value)
             .ok_or_else(|| {
                 eprintln!("❌ Invalid PDU type: 0x{:04x} ({})", pdu_type_value, pdu_type_value);
@@ -208,19 +221,27 @@ impl ShareControlPdu {
         }
     }
 
-    pub fn from_type(src: &mut ReadCursor<'_>, share_type: ShareControlPduType) -> DecodeResult<Self> {
+    pub fn from_type(
+        src: &mut ReadCursor<'_>,
+        share_type: ShareControlPduType,
+    ) -> DecodeResult<Self> {
         match share_type {
-            ShareControlPduType::DemandActivePdu => {
-                Ok(ShareControlPdu::ServerDemandActive(ServerDemandActive::decode(src)?))
+            ShareControlPduType::DemandActivePdu => Ok(ShareControlPdu::ServerDemandActive(
+                ServerDemandActive::decode(src)?,
+            )),
+            ShareControlPduType::ConfirmActivePdu => Ok(ShareControlPdu::ClientConfirmActive(
+                ClientConfirmActive::decode(src)?,
+            )),
+            ShareControlPduType::DataPdu => {
+                Ok(ShareControlPdu::Data(ShareDataHeader::decode(src)?))
             }
-            ShareControlPduType::ConfirmActivePdu => {
-                Ok(ShareControlPdu::ClientConfirmActive(ClientConfirmActive::decode(src)?))
-            }
-            ShareControlPduType::DataPdu => Ok(ShareControlPdu::Data(ShareDataHeader::decode(src)?)),
-            ShareControlPduType::DeactivateAllPdu => {
-                Ok(ShareControlPdu::ServerDeactivateAll(ServerDeactivateAll::decode(src)?))
-            }
-            _ => Err(invalid_field_err!("share_type", "unexpected share control PDU type")),
+            ShareControlPduType::DeactivateAllPdu => Ok(ShareControlPdu::ServerDeactivateAll(
+                ServerDeactivateAll::decode(src)?,
+            )),
+            _ => Err(invalid_field_err!(
+                "share_type",
+                "unexpected share control PDU type"
+            )),
         }
     }
 }
@@ -273,7 +294,8 @@ impl Encode for ShareDataHeader {
         ensure_size!(in: dst, size: self.size());
 
         if self.compression_flags.is_empty() {
-            let compression_flags_with_type = self.compression_flags.bits() | self.compression_type.as_u8();
+            let compression_flags_with_type =
+                self.compression_flags.bits() | self.compression_type.as_u8();
 
             write_padding!(dst, 1);
             dst.write_u8(self.stream_priority.as_u8());
@@ -315,11 +337,13 @@ impl<'de> Decode<'de> for ShareDataHeader {
             .ok_or_else(|| invalid_field_err!("pduType", "Invalid pdu type"))?;
         let compression_flags_with_type = src.read_u8();
 
-        let compression_flags =
-            CompressionFlags::from_bits_truncate(compression_flags_with_type & !SHARE_DATA_HEADER_COMPRESSION_MASK);
-        let compression_type =
-            client_info::CompressionType::from_u8(compression_flags_with_type & SHARE_DATA_HEADER_COMPRESSION_MASK)
-                .ok_or_else(|| invalid_field_err!("compressionType", "Invalid compression type"))?;
+        let compression_flags = CompressionFlags::from_bits_truncate(
+            compression_flags_with_type & !SHARE_DATA_HEADER_COMPRESSION_MASK,
+        );
+        let compression_type = client_info::CompressionType::from_u8(
+            compression_flags_with_type & SHARE_DATA_HEADER_COMPRESSION_MASK,
+        )
+        .ok_or_else(|| invalid_field_err!("compressionType", "Invalid compression type"))?;
         let _compressed_length = src.read_u16();
 
         let share_data_pdu = ShareDataPdu::from_type(src, pdu_type)?;
@@ -414,7 +438,9 @@ impl ShareDataPdu {
             ShareDataPdu::Pointer(_) => ShareDataPduType::Pointer,
             ShareDataPdu::PlaySound(_) => ShareDataPduType::PlaySound,
             ShareDataPdu::SetKeyboardIndicators(_) => ShareDataPduType::SetKeyboardIndicators,
-            ShareDataPdu::BitmapCachePersistentList(_) => ShareDataPduType::BitmapCachePersistentList,
+            ShareDataPdu::BitmapCachePersistentList(_) => {
+                ShareDataPduType::BitmapCachePersistentList
+            }
             ShareDataPdu::BitmapCacheErrorPdu(_) => ShareDataPduType::BitmapCacheErrorPdu,
             ShareDataPdu::SetKeyboardImeStatus(_) => ShareDataPduType::SetKeyboardImeStatus,
             ShareDataPdu::OffscreenCacheErrorPdu(_) => ShareDataPduType::OffscreenCacheErrorPdu,
@@ -427,41 +453,63 @@ impl ShareDataPdu {
 
     fn from_type(src: &mut ReadCursor<'_>, share_type: ShareDataPduType) -> DecodeResult<Self> {
         match share_type {
-            ShareDataPduType::Synchronize => Ok(ShareDataPdu::Synchronize(SynchronizePdu::decode(src)?)),
+            ShareDataPduType::Synchronize => {
+                Ok(ShareDataPdu::Synchronize(SynchronizePdu::decode(src)?))
+            }
             ShareDataPduType::Control => Ok(ShareDataPdu::Control(ControlPdu::decode(src)?)),
             ShareDataPduType::FontList => Ok(ShareDataPdu::FontList(FontPdu::decode(src)?)),
             ShareDataPduType::FontMap => Ok(ShareDataPdu::FontMap(FontPdu::decode(src)?)),
-            ShareDataPduType::MonitorLayoutPdu => Ok(ShareDataPdu::MonitorLayout(MonitorLayoutPdu::decode(src)?)),
-            ShareDataPduType::SaveSessionInfo => Ok(ShareDataPdu::SaveSessionInfo(SaveSessionInfoPdu::decode(src)?)),
-            ShareDataPduType::FrameAcknowledgePdu => {
-                Ok(ShareDataPdu::FrameAcknowledge(FrameAcknowledgePdu::decode(src)?))
+            ShareDataPduType::MonitorLayoutPdu => {
+                Ok(ShareDataPdu::MonitorLayout(MonitorLayoutPdu::decode(src)?))
             }
-            ShareDataPduType::SetErrorInfoPdu => {
-                Ok(ShareDataPdu::ServerSetErrorInfo(ServerSetErrorInfoPdu::decode(src)?))
-            }
+            ShareDataPduType::SaveSessionInfo => Ok(ShareDataPdu::SaveSessionInfo(
+                SaveSessionInfoPdu::decode(src)?,
+            )),
+            ShareDataPduType::FrameAcknowledgePdu => Ok(ShareDataPdu::FrameAcknowledge(
+                FrameAcknowledgePdu::decode(src)?,
+            )),
+            ShareDataPduType::SetErrorInfoPdu => Ok(ShareDataPdu::ServerSetErrorInfo(
+                ServerSetErrorInfoPdu::decode(src)?,
+            )),
             ShareDataPduType::Input => Ok(ShareDataPdu::Input(InputEventPdu::decode(src)?)),
             ShareDataPduType::ShutdownRequest => Ok(ShareDataPdu::ShutdownRequest),
             ShareDataPduType::ShutdownDenied => Ok(ShareDataPdu::ShutdownDenied),
-            ShareDataPduType::SuppressOutput => Ok(ShareDataPdu::SuppressOutput(SuppressOutputPdu::decode(src)?)),
-            ShareDataPduType::RefreshRectangle => Ok(ShareDataPdu::RefreshRectangle(RefreshRectanglePdu::decode(src)?)),
+            ShareDataPduType::SuppressOutput => Ok(ShareDataPdu::SuppressOutput(
+                SuppressOutputPdu::decode(src)?,
+            )),
+            ShareDataPduType::RefreshRectangle => Ok(ShareDataPdu::RefreshRectangle(
+                RefreshRectanglePdu::decode(src)?,
+            )),
             ShareDataPduType::Update => Ok(ShareDataPdu::Update(src.remaining().to_vec())),
             ShareDataPduType::Pointer => Ok(ShareDataPdu::Pointer(src.remaining().to_vec())),
             ShareDataPduType::PlaySound => Ok(ShareDataPdu::PlaySound(src.remaining().to_vec())),
-            ShareDataPduType::SetKeyboardIndicators => {
-                Ok(ShareDataPdu::SetKeyboardIndicators(src.remaining().to_vec()))
+            ShareDataPduType::SetKeyboardIndicators => Ok(ShareDataPdu::SetKeyboardIndicators(
+                src.remaining().to_vec(),
+            )),
+            ShareDataPduType::BitmapCachePersistentList => Ok(
+                ShareDataPdu::BitmapCachePersistentList(src.remaining().to_vec()),
+            ),
+            ShareDataPduType::BitmapCacheErrorPdu => {
+                Ok(ShareDataPdu::BitmapCacheErrorPdu(src.remaining().to_vec()))
             }
-            ShareDataPduType::BitmapCachePersistentList => {
-                Ok(ShareDataPdu::BitmapCachePersistentList(src.remaining().to_vec()))
+            ShareDataPduType::SetKeyboardImeStatus => {
+                Ok(ShareDataPdu::SetKeyboardImeStatus(src.remaining().to_vec()))
             }
-            ShareDataPduType::BitmapCacheErrorPdu => Ok(ShareDataPdu::BitmapCacheErrorPdu(src.remaining().to_vec())),
-            ShareDataPduType::SetKeyboardImeStatus => Ok(ShareDataPdu::SetKeyboardImeStatus(src.remaining().to_vec())),
-            ShareDataPduType::OffscreenCacheErrorPdu => {
-                Ok(ShareDataPdu::OffscreenCacheErrorPdu(src.remaining().to_vec()))
+            ShareDataPduType::OffscreenCacheErrorPdu => Ok(ShareDataPdu::OffscreenCacheErrorPdu(
+                src.remaining().to_vec(),
+            )),
+            ShareDataPduType::DrawNineGridErrorPdu => {
+                Ok(ShareDataPdu::DrawNineGridErrorPdu(src.remaining().to_vec()))
             }
-            ShareDataPduType::DrawNineGridErrorPdu => Ok(ShareDataPdu::DrawNineGridErrorPdu(src.remaining().to_vec())),
-            ShareDataPduType::DrawGdiPusErrorPdu => Ok(ShareDataPdu::DrawGdiPusErrorPdu(src.remaining().to_vec())),
-            ShareDataPduType::ArcStatusPdu => Ok(ShareDataPdu::ArcStatusPdu(src.remaining().to_vec())),
-            ShareDataPduType::StatusInfoPdu => Ok(ShareDataPdu::StatusInfoPdu(src.remaining().to_vec())),
+            ShareDataPduType::DrawGdiPusErrorPdu => {
+                Ok(ShareDataPdu::DrawGdiPusErrorPdu(src.remaining().to_vec()))
+            }
+            ShareDataPduType::ArcStatusPdu => {
+                Ok(ShareDataPdu::ArcStatusPdu(src.remaining().to_vec()))
+            }
+            ShareDataPduType::StatusInfoPdu => {
+                Ok(ShareDataPdu::StatusInfoPdu(src.remaining().to_vec()))
+            }
         }
     }
 }

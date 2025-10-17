@@ -1,8 +1,9 @@
 //! This module contains the RDP_PRECONNECTION_PDU_V1 and RDP_PRECONNECTION_PDU_V2 structures.
 
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, invalid_field_err_with_source, read_padding,
-    write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err,
+    invalid_field_err_with_source, read_padding, write_padding, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 
 use crate::Pdu;
@@ -86,8 +87,10 @@ impl<'de> Decode<'de> for PreconnectionBlob {
 
             let wsz_pcb_utf16 = src.read_slice(cb_pcb);
 
-            let payload = crate::utf16::read_utf16_string(wsz_pcb_utf16, Some(cch_pcb))
-                .map_err(|e| invalid_field_err_with_source(Self::NAME, "wszPCB", "bad UTF-16 string", e))?;
+            let payload =
+                crate::utf16::read_utf16_string(wsz_pcb_utf16, Some(cch_pcb)).map_err(|e| {
+                    invalid_field_err_with_source(Self::NAME, "wszPCB", "bad UTF-16 string", e)
+                })?;
 
             let leftover_size = remaining_size - 2 - cb_pcb;
             src.advance(leftover_size); // Consume (unused) leftover data

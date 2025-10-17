@@ -14,7 +14,13 @@ pub trait GfxContext {
     fn send(&mut self, data: &[u8]) -> Result<()>;
 
     /// Called when a surface is created
-    fn on_create_surface(&mut self, surface_id: u16, width: u16, height: u16, pixel_format: u8) -> Result<()>;
+    fn on_create_surface(
+        &mut self,
+        surface_id: u16,
+        width: u16,
+        height: u16,
+        pixel_format: u8,
+    ) -> Result<()>;
 
     /// Called when a surface is deleted
     fn on_delete_surface(&mut self, surface_id: u16) -> Result<()>;
@@ -46,7 +52,12 @@ pub trait GfxContext {
     ) -> Result<()>;
 
     /// Called for solid fill operations
-    fn on_solid_fill(&mut self, surface_id: u16, fill_pixel: Color32, fill_rects: &[Rectangle]) -> Result<()>;
+    fn on_solid_fill(
+        &mut self,
+        surface_id: u16,
+        fill_pixel: Color32,
+        fill_rects: &[Rectangle],
+    ) -> Result<()>;
 }
 
 /// Frame tracking state
@@ -215,7 +226,11 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
     fn handle_start_frame(&mut self, data: &mut &[u8]) -> Result<()> {
         let frame = StartFrame::parse(data)?;
 
-        trace!("START_FRAME: id={}, timestamp={}", frame.frame_id, frame.timestamp);
+        trace!(
+            "START_FRAME: id={}, timestamp={}",
+            frame.frame_id,
+            frame.timestamp
+        );
 
         self.current_frame = Some(FrameState {
             frame_id: frame.frame_id,

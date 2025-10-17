@@ -3,8 +3,8 @@ mod tests;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, read_padding, write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    ensure_fixed_part_size, read_padding, write_padding, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 
 pub const BITMAP_CACHE_ENTRIES_NUM: usize = 3;
@@ -102,7 +102,10 @@ impl<'de> Decode<'de> for CacheEntry {
         let entries = src.read_u16();
         let max_cell_size = src.read_u16();
 
-        Ok(CacheEntry { entries, max_cell_size })
+        Ok(CacheEntry {
+            entries,
+            max_cell_size,
+        })
     }
 }
 

@@ -1,6 +1,6 @@
 use ironrdp_core::{
-    cast_int, cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode,
-    EncodeResult, ReadCursor, WriteCursor,
+    cast_int, cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode,
+    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 // Represents `TS_POINT16` described in [MS-RDPBCGR] 2.2.9.1.1.4.1
@@ -61,8 +61,7 @@ pub struct ColorPointerAttribute<'a> {
 
 impl ColorPointerAttribute<'_> {
     const NAME: &'static str = "TS_COLORPOINTERATTRIBUTE";
-    const FIXED_PART_SIZE: usize =
-        2 /* cacheIdx */ + 2 /* width */ + 2 /* height */ + 2 /* lenAnd */ + 2 /* lenOr */ + Point16::FIXED_PART_SIZE;
+    const FIXED_PART_SIZE: usize = 2 /* cacheIdx */ + 2 /* width */ + 2 /* height */ + 2 /* lenAnd */ + 2 /* lenOr */ + Point16::FIXED_PART_SIZE;
 }
 
 macro_rules! check_masks_alignment {
@@ -78,13 +77,22 @@ macro_rules! check_masks_alignment {
                 return Err(invalid_field_err!(field, "pointer height cannot be zero"));
             }
             if $large_ptr && (mask.len() > U32_MAX) {
-                return Err(invalid_field_err!(field, "pointer mask is too big for u32 size"));
+                return Err(invalid_field_err!(
+                    field,
+                    "pointer mask is too big for u32 size"
+                ));
             }
             if !$large_ptr && (mask.len() > usize::from(u16::MAX)) {
-                return Err(invalid_field_err!(field, "pointer mask is too big for u16 size"));
+                return Err(invalid_field_err!(
+                    field,
+                    "pointer mask is too big for u16 size"
+                ));
             }
             if (mask.len() % pointer_height) != 0 {
-                return Err(invalid_field_err!(field, "pointer mask have incomplete scanlines"));
+                return Err(invalid_field_err!(
+                    field,
+                    "pointer mask have incomplete scanlines"
+                ));
             }
             if (mask.len() / pointer_height) % 2 != 0 {
                 return Err(invalid_field_err!(
@@ -199,7 +207,10 @@ impl<'a> Decode<'a> for PointerAttribute<'a> {
         let xor_bpp = src.read_u16();
         let color_pointer = ColorPointerAttribute::decode(src)?;
 
-        Ok(Self { xor_bpp, color_pointer })
+        Ok(Self {
+            xor_bpp,
+            color_pointer,
+        })
     }
 }
 

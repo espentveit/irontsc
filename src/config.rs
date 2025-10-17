@@ -469,7 +469,7 @@ impl Config {
             pointer_software_rendering: false,
             performance_flags: PerformanceFlags::default(),
             timezone_info: get_system_timezone_info(),
-            correlation_id: None,  // Will be auto-generated if needed
+            correlation_id: None, // Will be auto-generated if needed
         };
 
         let rdcleanpath = args
@@ -490,11 +490,13 @@ impl Config {
 }
 
 /// Get system timezone information
-/// 
+///
 /// Returns proper timezone data from the system, or a sensible default if unavailable.
 pub fn get_system_timezone_info() -> TimezoneInfo {
-    use ironrdp::pdu::rdp::client_info::{OptionalSystemTime, SystemTime, Month, DayOfWeek, DayOfWeekOccurrence};
-    
+    use ironrdp::pdu::rdp::client_info::{
+        DayOfWeek, DayOfWeekOccurrence, Month, OptionalSystemTime, SystemTime,
+    };
+
     // Try to get timezone from chrono-tz or system
     // For now, provide a sensible UTC default with proper structure
     TimezoneInfo {

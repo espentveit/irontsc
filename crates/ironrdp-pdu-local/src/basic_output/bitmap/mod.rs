@@ -7,8 +7,8 @@ use core::fmt::{self, Debug};
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 use crate::geometry::InclusiveRectangle;
@@ -100,7 +100,12 @@ impl BitmapData<'_> {
     const FIXED_PART_SIZE: usize = InclusiveRectangle::ENCODED_SIZE + 2 /* width */ + 2 /* height */ + 2 /* bpp */ + 2 /* flags */ + 2 /* len */;
 
     fn encoded_bitmap_data_length(&self) -> usize {
-        self.bitmap_data.len() + self.compressed_data_header.as_ref().map(|hdr| hdr.size()).unwrap_or(0)
+        self.bitmap_data.len()
+            + self
+                .compressed_data_header
+                .as_ref()
+                .map(|hdr| hdr.size())
+                .unwrap_or(0)
     }
 }
 
@@ -109,7 +114,8 @@ impl Encode for BitmapData<'_> {
         ensure_size!(in: dst, size: self.size());
 
         let encoded_bitmap_data_length = self.encoded_bitmap_data_length();
-        let encoded_bitmap_data_length = cast_length!("bitmap data length", encoded_bitmap_data_length)?;
+        let encoded_bitmap_data_length =
+            cast_length!("bitmap data length", encoded_bitmap_data_length)?;
 
         self.rectangle.encode(dst)?;
         dst.write_u16(self.width);
@@ -150,7 +156,8 @@ impl<'de> Decode<'de> for BitmapData<'de> {
 
         ensure_size!(in: src, size: encoded_bitmap_data_length);
 
-        let (compressed_data_header, buffer_length) = if compression_flags.contains(Compression::BITMAP_COMPRESSION)
+        let (compressed_data_header, buffer_length) = if compression_flags
+            .contains(Compression::BITMAP_COMPRESSION)
             && !compression_flags.contains(Compression::NO_BITMAP_COMPRESSION_HDR)
         {
             // Check if encoded_bitmap_data_length is at least CompressedDataHeader::ENCODED_SIZE
@@ -216,7 +223,10 @@ impl<'de> Decode<'de> for CompressedDataHeader {
 
         let size = src.read_u16();
         if size != FIRST_ROW_SIZE_VALUE {
-            return Err(invalid_field_err!("cbCompFirstRowSize", "invalid first row size"));
+            return Err(invalid_field_err!(
+                "cbCompFirstRowSize",
+                "invalid first row size"
+            ));
         }
 
         let main_body_size = src.read_u16();

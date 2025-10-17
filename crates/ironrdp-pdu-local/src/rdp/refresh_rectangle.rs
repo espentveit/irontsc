@@ -1,6 +1,6 @@
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, read_padding, write_padding, Decode, DecodeResult, Encode,
-    EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, read_padding, write_padding, Decode,
+    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 use crate::geometry::InclusiveRectangle;
@@ -45,7 +45,12 @@ impl Encode for RefreshRectanglePdu {
     }
 
     fn size(&self) -> usize {
-        Self::FIXED_PART_SIZE + self.areas_to_refresh.iter().map(|r| r.size()).sum::<usize>()
+        Self::FIXED_PART_SIZE
+            + self
+                .areas_to_refresh
+                .iter()
+                .map(|r| r.size())
+                .sum::<usize>()
         // areasToRefresh
     }
 }

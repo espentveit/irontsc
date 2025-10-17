@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, ensure_size, invalid_field_err, write_padding, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    ensure_fixed_part_size, ensure_size, invalid_field_err, write_padding, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -80,7 +80,8 @@ impl ClientCoreData {
     pub fn client_color_depth(&self) -> ClientColorDepth {
         if let Some(high_color_depth) = self.optional_data.high_color_depth {
             if let Some(early_capability_flags) = self.optional_data.early_capability_flags {
-                if early_capability_flags.contains(ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION) {
+                if early_capability_flags.contains(ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION)
+                {
                     ClientColorDepth::Bpp32
                 } else {
                     From::from(high_color_depth)
@@ -100,10 +101,21 @@ impl Encode for ClientCoreData {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: self.size());
 
+        eprintln!("🔧 ClientCoreData::encode - START");
+        eprintln!("   Total size: {} bytes", self.size());
+        eprintln!("   FIXED_PART_SIZE: {}", Self::FIXED_PART_SIZE);
+        eprintln!("   optional_data.size(): {}", self.optional_data.size());
+
         let mut client_name_dst = utils::to_utf16_bytes(self.client_name.as_ref());
         client_name_dst.resize(CLIENT_NAME_SIZE - 2, 0);
+        eprintln!("   client_name_dst length: {} bytes", client_name_dst.len());
+
         let mut ime_file_name_dst = utils::to_utf16_bytes(self.ime_file_name.as_ref());
         ime_file_name_dst.resize(IME_FILE_NAME_SIZE - 2, 0);
+        eprintln!("   ime_file_name_dst length: {} bytes", ime_file_name_dst.len());
+
+        let start_pos = dst.len();
+        eprintln!("   Buffer position at start: {}", start_pos);
 
         dst.write_u32(self.version.0);
         dst.write_u16(self.desktop_width);
@@ -114,13 +126,24 @@ impl Encode for ClientCoreData {
         dst.write_u32(self.client_build);
         dst.write_slice(client_name_dst.as_ref());
         dst.write_u16(0); // client name UTF-16 null terminator
+        eprintln!("   After client_name: written {} bytes", dst.len() - start_pos);
+
         dst.write_u32(self.keyboard_type.as_u32());
         dst.write_u32(self.keyboard_subtype);
         dst.write_u32(self.keyboard_functional_keys_count);
         dst.write_slice(ime_file_name_dst.as_ref());
-        dst.write_u16(0); // ime file name UTF-16 null terminator
+        eprintln!("   After ime_file_name buffer: written {} bytes", dst.len() - start_pos);
 
-        self.optional_data.encode(dst)
+        dst.write_u16(0); // ime file name UTF-16 null terminator
+        eprintln!("   After ime_file_name null terminator: written {} bytes (should be {})",
+                  dst.len() - start_pos, Self::FIXED_PART_SIZE);
+
+        eprintln!("   About to encode optional_data...");
+        self.optional_data.encode(dst)?;
+        eprintln!("   After optional_data: written {} bytes", dst.len() - start_pos);
+        eprintln!("🔧 ClientCoreData::encode - COMPLETE");
+
+        Ok(())
     }
 
     fn name(&self) -> &'static str {
@@ -128,7 +151,11 @@ impl Encode for ClientCoreData {
     }
 
     fn size(&self) -> usize {
-        Self::FIXED_PART_SIZE + self.optional_data.size()
+        let fixed = Self::FIXED_PART_SIZE;
+        let optional = self.optional_data.size();
+        let total = fixed + optional;
+        eprintln!("🔧 ClientCoreData::size() = {} (fixed={} + optional={})", total, fixed, optional);
+        total
     }
 }
 
@@ -146,7 +173,9 @@ impl<'de> Decode<'de> for ClientCoreData {
         let sec_access_sequence = src
             .read_u16()
             .pipe(SecureAccessSequence::from_u16)
-            .ok_or_else(|| invalid_field_err!("secAccessSequence", "invalid secure access sequence"))?;
+            .ok_or_else(|| {
+                invalid_field_err!("secAccessSequence", "invalid secure access sequence")
+            })?;
         let keyboard_layout = src.read_u32();
         let client_build = src.read_u32();
 
@@ -222,8 +251,15 @@ impl Encode for ClientCoreOptionalData {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: self.size());
 
+        let start_pos = dst.len();
+        eprintln!("   🔧 ClientCoreOptionalData::encode - START at buffer position {}", start_pos);
+        eprintln!("      Total optional size: {} bytes", self.size());
+
         if let Some(value) = self.post_beta2_color_depth {
+            eprintln!("      Writing post_beta2_color_depth: 0x{:04x} at offset {}", value.as_u16(), dst.len() - start_pos);
             dst.write_u16(value.as_u16());
+        } else {
+            eprintln!("      Skipping post_beta2_color_depth (None)");
         }
 
         if let Some(value) = self.client_product_id {
@@ -238,21 +274,30 @@ impl Encode for ClientCoreOptionalData {
 
         if let Some(value) = self.serial_number {
             if self.client_product_id.is_none() {
-                return Err(invalid_field_err!("clientProductId", "clientProductId must be present"));
+                return Err(invalid_field_err!(
+                    "clientProductId",
+                    "clientProductId must be present"
+                ));
             }
             dst.write_u32(value);
         }
 
         if let Some(value) = self.high_color_depth {
             if self.serial_number.is_none() {
-                return Err(invalid_field_err!("serialNumber", "serialNumber must be present"));
+                return Err(invalid_field_err!(
+                    "serialNumber",
+                    "serialNumber must be present"
+                ));
             }
             dst.write_u16(value.as_u16());
         }
 
         if let Some(value) = self.supported_color_depths {
             if self.high_color_depth.is_none() {
-                return Err(invalid_field_err!("highColorDepth", "highColorDepth must be present"));
+                return Err(invalid_field_err!(
+                    "highColorDepth",
+                    "highColorDepth must be present"
+                ));
             }
             dst.write_u16(value.bits());
         }
@@ -283,7 +328,10 @@ impl Encode for ClientCoreOptionalData {
 
         if let Some(value) = self.connection_type {
             if self.dig_product_id.is_none() {
-                return Err(invalid_field_err!("digProductId", "digProductId must be present"));
+                return Err(invalid_field_err!(
+                    "digProductId",
+                    "digProductId must be present"
+                ));
             }
             dst.write_u8(value.as_u8());
             write_padding!(dst, 1);
@@ -291,7 +339,10 @@ impl Encode for ClientCoreOptionalData {
 
         if let Some(value) = self.server_selected_protocol {
             if self.connection_type.is_none() {
-                return Err(invalid_field_err!("connectionType", "connectionType must be present"));
+                return Err(invalid_field_err!(
+                    "connectionType",
+                    "connectionType must be present"
+                ));
             }
             dst.write_u32(value.bits())
         }
@@ -357,48 +408,63 @@ impl Encode for ClientCoreOptionalData {
         let mut size = 0;
 
         if self.post_beta2_color_depth.is_some() {
+            eprintln!("      + post_beta2_color_depth: {}", POST_BETA_COLOR_DEPTH_SIZE);
             size += POST_BETA_COLOR_DEPTH_SIZE;
         }
         if self.client_product_id.is_some() {
+            eprintln!("      + client_product_id: {}", CLIENT_PRODUCT_ID_SIZE);
             size += CLIENT_PRODUCT_ID_SIZE;
         }
         if self.serial_number.is_some() {
+            eprintln!("      + serial_number: {}", SERIAL_NUMBER_SIZE);
             size += SERIAL_NUMBER_SIZE;
         }
         if self.high_color_depth.is_some() {
+            eprintln!("      + high_color_depth: {}", HIGH_COLOR_DEPTH_SIZE);
             size += HIGH_COLOR_DEPTH_SIZE;
         }
         if self.supported_color_depths.is_some() {
+            eprintln!("      + supported_color_depths: {}", SUPPORTED_COLOR_DEPTHS_SIZE);
             size += SUPPORTED_COLOR_DEPTHS_SIZE;
         }
         if self.early_capability_flags.is_some() {
+            eprintln!("      + early_capability_flags: {}", EARLY_CAPABILITY_FLAGS_SIZE);
             size += EARLY_CAPABILITY_FLAGS_SIZE;
         }
         if self.dig_product_id.is_some() {
+            eprintln!("      + dig_product_id: {}", DIG_PRODUCT_ID_SIZE);
             size += DIG_PRODUCT_ID_SIZE;
         }
         if self.connection_type.is_some() {
+            eprintln!("      + connection_type + padding: {}", CONNECTION_TYPE_SIZE + PADDING_SIZE);
             size += CONNECTION_TYPE_SIZE + PADDING_SIZE;
         }
         if self.server_selected_protocol.is_some() {
+            eprintln!("      + server_selected_protocol: {}", SERVER_SELECTED_PROTOCOL_SIZE);
             size += SERVER_SELECTED_PROTOCOL_SIZE;
         }
         if self.desktop_physical_width.is_some() {
+            eprintln!("      + desktop_physical_width: {}", DESKTOP_PHYSICAL_WIDTH_SIZE);
             size += DESKTOP_PHYSICAL_WIDTH_SIZE;
         }
         if self.desktop_physical_height.is_some() {
+            eprintln!("      + desktop_physical_height: {}", DESKTOP_PHYSICAL_HEIGHT_SIZE);
             size += DESKTOP_PHYSICAL_HEIGHT_SIZE;
         }
         if self.desktop_orientation.is_some() {
+            eprintln!("      + desktop_orientation: {}", DESKTOP_ORIENTATION_SIZE);
             size += DESKTOP_ORIENTATION_SIZE;
         }
         if self.desktop_scale_factor.is_some() {
+            eprintln!("      + desktop_scale_factor: {}", DESKTOP_SCALE_FACTOR_SIZE);
             size += DESKTOP_SCALE_FACTOR_SIZE;
         }
         if self.device_scale_factor.is_some() {
+            eprintln!("      + device_scale_factor: {}", DEVICE_SCALE_FACTOR_SIZE);
             size += DEVICE_SCALE_FACTOR_SIZE;
         }
 
+        eprintln!("      ClientCoreOptionalData::size() = {}", size);
         size
     }
 }
@@ -431,12 +497,19 @@ impl<'de> Decode<'de> for ClientCoreOptionalData {
 
         optional_data.supported_color_depths = Some(
             SupportedColorDepths::from_bits(try_or_return!(src.try_read_u16(), optional_data))
-                .ok_or_else(|| invalid_field_err!("supportedColorDepths", "invalid supported color depths"))?,
+                .ok_or_else(|| {
+                    invalid_field_err!("supportedColorDepths", "invalid supported color depths")
+                })?,
         );
 
         optional_data.early_capability_flags = Some(
-            ClientEarlyCapabilityFlags::from_bits(try_or_return!(src.try_read_u16(), optional_data))
-                .ok_or_else(|| invalid_field_err!("earlyCapabilityFlags", "invalid early capability flags"))?,
+            ClientEarlyCapabilityFlags::from_bits(try_or_return!(
+                src.try_read_u16(),
+                optional_data
+            ))
+            .ok_or_else(|| {
+                invalid_field_err!("earlyCapabilityFlags", "invalid early capability flags")
+            })?,
         );
 
         if src.len() < DIG_PRODUCT_ID_SIZE {
@@ -444,7 +517,11 @@ impl<'de> Decode<'de> for ClientCoreOptionalData {
         }
 
         let dig_product_id = src.read_slice(DIG_PRODUCT_ID_SIZE);
-        optional_data.dig_product_id = Some(utils::from_utf16_bytes(dig_product_id).trim_end_matches('\u{0}').into());
+        optional_data.dig_product_id = Some(
+            utils::from_utf16_bytes(dig_product_id)
+                .trim_end_matches('\u{0}')
+                .into(),
+        );
 
         optional_data.connection_type = Some(
             ConnectionType::from_u8(try_or_return!(src.try_read_u8(), optional_data))
@@ -455,15 +532,19 @@ impl<'de> Decode<'de> for ClientCoreOptionalData {
 
         optional_data.server_selected_protocol = Some(
             SecurityProtocol::from_bits(try_or_return!(src.try_read_u32(), optional_data))
-                .ok_or_else(|| invalid_field_err!("serverSelectedProtocol", "invalid security protocol"))?,
+                .ok_or_else(|| {
+                    invalid_field_err!("serverSelectedProtocol", "invalid security protocol")
+                })?,
         );
 
-        optional_data.desktop_physical_width = Some(try_or_return!(src.try_read_u32(), optional_data));
+        optional_data.desktop_physical_width =
+            Some(try_or_return!(src.try_read_u32(), optional_data));
         // physical height must be present, if the physical width is present
         optional_data.desktop_physical_height = Some(src.read_u32());
 
         optional_data.desktop_orientation = Some(try_or_return!(src.try_read_u16(), optional_data));
-        optional_data.desktop_scale_factor = Some(try_or_return!(src.try_read_u32(), optional_data));
+        optional_data.desktop_scale_factor =
+            Some(try_or_return!(src.try_read_u32(), optional_data));
         // device scale factor must be present, if the desktop scale factor is present
         optional_data.device_scale_factor = Some(src.read_u32());
 

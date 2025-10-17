@@ -28,9 +28,9 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
+use std::collections::HashMap;
 use tracing::{debug, trace, warn};
 
 /// PDU command types (MS-RDPEDYC 2.2.1)
@@ -193,7 +193,9 @@ impl Drdynvc {
 
     /// Build a CREATE_REQUEST PDU for a channel
     pub fn build_create_request(&self, channel_id: u32) -> Result<Vec<u8>> {
-        let channel = self.channels.get(&channel_id)
+        let channel = self
+            .channels
+            .get(&channel_id)
             .ok_or_else(|| anyhow!("Channel {} not found", channel_id))?;
 
         let mut buf = BytesMut::new();
@@ -211,18 +213,28 @@ impl Drdynvc {
         buf.put_slice(channel.name.as_bytes());
         buf.put_u8(0); // null terminator
 
-        trace!("Built CREATE_REQUEST for channel '{}' (ID {})", channel.name, channel_id);
+        trace!(
+            "Built CREATE_REQUEST for channel '{}' (ID {})",
+            channel.name,
+            channel_id
+        );
         Ok(buf.to_vec())
     }
 
     /// Build DATA PDU(s) to send on a channel
     /// Returns one or more PDUs (fragmented if data is large)
     pub fn build_send_data(&self, channel_id: u32, data: &[u8]) -> Result<Vec<Vec<u8>>> {
-        let channel = self.channels.get(&channel_id)
+        let channel = self
+            .channels
+            .get(&channel_id)
             .ok_or_else(|| anyhow!("Channel {} not found", channel_id))?;
 
         if channel.state != ChannelState::Running {
-            bail!("Channel {} ('{}') is not in running state", channel_id, channel.name);
+            bail!(
+                "Channel {} ('{}') is not in running state",
+                channel_id,
+                channel.name
+            );
         }
 
         let cb_chid = Self::get_var_int_size(channel_id);
@@ -265,13 +277,20 @@ impl Drdynvc {
             }
         }
 
-        trace!("Built {} PDU(s) for {} bytes on channel {}", pdus.len(), data.len(), channel_id);
+        trace!(
+            "Built {} PDU(s) for {} bytes on channel {}",
+            pdus.len(),
+            data.len(),
+            channel_id
+        );
         Ok(pdus)
     }
 
     /// Build a CLOSE_REQUEST PDU
     pub fn build_close_request(&mut self, channel_id: u32) -> Result<Vec<u8>> {
-        let channel = self.channels.get_mut(&channel_id)
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
             .ok_or_else(|| anyhow!("Channel {} not found", channel_id))?;
 
         let cb_chid = Self::get_var_int_size(channel_id);
@@ -281,7 +300,10 @@ impl Drdynvc {
         Self::write_var_int(&mut buf, channel_id, cb_chid);
 
         channel.state = ChannelState::Closed;
-        debug!("Built CLOSE_REQUEST for channel {} ('{}')", channel_id, channel.name);
+        debug!(
+            "Built CLOSE_REQUEST for channel {} ('{}')",
+            channel_id, channel.name
+        );
         Ok(buf.to_vec())
     }
 
@@ -345,16 +367,23 @@ impl Drdynvc {
 
         let status = buf.get_u32_le();
 
-        let channel = self.channels.get_mut(&channel_id)
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
             .ok_or_else(|| anyhow!("CREATE_RESPONSE for unknown channel {}", channel_id))?;
 
         if status == 0 {
             channel.state = ChannelState::Running;
-            debug!("Channel {} ('{}') opened successfully", channel_id, channel.name);
+            debug!(
+                "Channel {} ('{}') opened successfully",
+                channel_id, channel.name
+            );
         } else {
             channel.state = ChannelState::Closed;
-            warn!("Channel {} ('{}') creation failed: status=0x{:08X}",
-                  channel_id, channel.name, status);
+            warn!(
+                "Channel {} ('{}') creation failed: status=0x{:08X}",
+                channel_id, channel.name, status
+            );
         }
 
         Ok(None)
@@ -363,7 +392,9 @@ impl Drdynvc {
     fn process_data(&mut self, mut buf: &[u8], cb_chid: u8) -> Result<Option<Incoming>> {
         let channel_id = Self::read_var_int(&mut buf, cb_chid)?;
 
-        let channel = self.channels.get_mut(&channel_id)
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
             .ok_or_else(|| anyhow!("DATA for unknown channel {}", channel_id))?;
 
         if let Some(reassembly) = &mut channel.reassembly {
@@ -387,22 +418,30 @@ impl Drdynvc {
         }
     }
 
-    fn process_data_first(&mut self, mut buf: &[u8], sp: u8, cb_chid: u8) -> Result<Option<Incoming>> {
+    fn process_data_first(
+        &mut self,
+        mut buf: &[u8],
+        sp: u8,
+        cb_chid: u8,
+    ) -> Result<Option<Incoming>> {
         let channel_id = Self::read_var_int(&mut buf, cb_chid)?;
         let total_length = Self::read_var_int(&mut buf, sp)?;
 
-        let channel = self.channels.get_mut(&channel_id)
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
             .ok_or_else(|| anyhow!("DATA_FIRST for unknown channel {}", channel_id))?;
 
         let mut data = BytesMut::with_capacity(total_length as usize);
         data.put_slice(buf);
 
-        channel.reassembly = Some(ReassemblyBuffer {
-            total_length,
-            data,
-        });
+        channel.reassembly = Some(ReassemblyBuffer { total_length, data });
 
-        trace!("Started reassembly of {} bytes on channel {}", total_length, channel_id);
+        trace!(
+            "Started reassembly of {} bytes on channel {}",
+            total_length,
+            channel_id
+        );
         Ok(None)
     }
 
@@ -411,7 +450,10 @@ impl Drdynvc {
 
         if let Some(channel) = self.channels.get_mut(&channel_id) {
             channel.state = ChannelState::Closed;
-            debug!("Channel {} ('{}') closed by server", channel_id, channel.name);
+            debug!(
+                "Channel {} ('{}') closed by server",
+                channel_id, channel.name
+            );
         }
 
         Ok(None)

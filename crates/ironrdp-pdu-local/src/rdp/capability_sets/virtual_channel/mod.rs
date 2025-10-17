@@ -3,7 +3,8 @@ mod tests;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, ensure_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    ensure_fixed_part_size, ensure_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
+    WriteCursor,
 };
 
 const FLAGS_FIELD_SIZE: usize = 4;
@@ -83,7 +84,8 @@ impl<'de> Decode<'de> for VirtualChannel {
             chunk_size: None,
         };
 
-        virtual_channel_pdu.chunk_size = Some(try_or_return!(src.try_read_u32(), virtual_channel_pdu));
+        virtual_channel_pdu.chunk_size =
+            Some(try_or_return!(src.try_read_u32(), virtual_channel_pdu));
 
         Ok(virtual_channel_pdu)
     }

@@ -2,10 +2,10 @@
 //!
 //! This module bridges IronRDP's DVC system with our RDPEGFX implementation.
 
-use anyhow::{Result, Context as _};
-use ironrdp_gfx::GfxClient;
-use ironrdp_dvc::{DvcMessage, DvcProcessor};
+use anyhow::{Context as _, Result};
 use ironrdp_core::AsAny;
+use ironrdp_dvc::{DvcMessage, DvcProcessor};
+use ironrdp_gfx::GfxClient;
 use ironrdp_pdu::PduResult;
 use tracing::{debug, trace};
 
@@ -84,8 +84,10 @@ impl DvcProcessor for GfxDvcProcessor {
 
         // Get outgoing messages
         let messages = self.client.ctx.take_outgoing_messages();
-        info!("📤 Sending CAPS_ADVERTISE ({} bytes)",
-            messages.iter().map(|m| m.len()).sum::<usize>());
+        info!(
+            "📤 Sending CAPS_ADVERTISE ({} bytes)",
+            messages.iter().map(|m| m.len()).sum::<usize>()
+        );
         Ok(messages
             .into_iter()
             .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
@@ -94,30 +96,38 @@ impl DvcProcessor for GfxDvcProcessor {
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
         use tracing::info;
-        info!("📥 RDPEGFX: Received {} bytes on channel {}", payload.len(), channel_id);
+        info!(
+            "📥 RDPEGFX: Received {} bytes on channel {}",
+            payload.len(),
+            channel_id
+        );
 
         // Decompress with zGFX
-        let decompressed = zgfx::decompress(payload)
-            .map_err(|_e| {
-                info!("❌ RDPEGFX: zGFX decompression failed");
-                ironrdp_pdu::pdu_other_err!("GFX decompress failed")
-            })?;
+        let decompressed = zgfx::decompress(payload).map_err(|_e| {
+            info!("❌ RDPEGFX: zGFX decompression failed");
+            ironrdp_pdu::pdu_other_err!("GFX decompress failed")
+        })?;
 
-        info!("📦 RDPEGFX: Decompressed {} -> {} bytes", payload.len(), decompressed.len());
+        info!(
+            "📦 RDPEGFX: Decompressed {} -> {} bytes",
+            payload.len(),
+            decompressed.len()
+        );
 
         // Process PDUs
-        self.client.process_pdu_stream(&decompressed)
-            .map_err(|e| {
-                info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
-                ironrdp_pdu::pdu_other_err!("GFX PDU processing failed")
-            })?;
+        self.client.process_pdu_stream(&decompressed).map_err(|e| {
+            info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
+            ironrdp_pdu::pdu_other_err!("GFX PDU processing failed")
+        })?;
 
         // Get any outgoing messages (acknowledgements, etc.)
         let messages = self.client.ctx.take_outgoing_messages();
         if !messages.is_empty() {
-            info!("📤 RDPEGFX: Sending {} response messages ({} bytes)",
+            info!(
+                "📤 RDPEGFX: Sending {} response messages ({} bytes)",
                 messages.len(),
-                messages.iter().map(|m| m.len()).sum::<usize>());
+                messages.iter().map(|m| m.len()).sum::<usize>()
+            );
         }
         Ok(messages
             .into_iter()

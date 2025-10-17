@@ -306,7 +306,9 @@ mod tests {
 
     #[test]
     fn test_presentation_response_encode() {
-        let response = PresentationResponse { presentation_id: 42 };
+        let response = PresentationResponse {
+            presentation_id: 42,
+        };
         let encoded = response.encode();
         assert_eq!(encoded, vec![42]);
     }

@@ -98,7 +98,13 @@ impl Sequence for ConnectionFinalizationSequence {
 
                 debug!(?message, "Send");
 
-                let written = legacy::encode_share_data(self.user_channel_id, self.io_channel_id, 0, message, output)?;
+                let written = legacy::encode_share_data(
+                    self.user_channel_id,
+                    self.io_channel_id,
+                    0,
+                    message,
+                    output,
+                )?;
 
                 (
                     Written::from_size(written)?,
@@ -115,7 +121,13 @@ impl Sequence for ConnectionFinalizationSequence {
 
                 debug!(?message, "Send");
 
-                let written = legacy::encode_share_data(self.user_channel_id, self.io_channel_id, 0, message, output)?;
+                let written = legacy::encode_share_data(
+                    self.user_channel_id,
+                    self.io_channel_id,
+                    0,
+                    message,
+                    output,
+                )?;
 
                 (
                     Written::from_size(written)?,
@@ -132,9 +144,18 @@ impl Sequence for ConnectionFinalizationSequence {
 
                 debug!(?message, "Send");
 
-                let written = legacy::encode_share_data(self.user_channel_id, self.io_channel_id, 0, message, output)?;
+                let written = legacy::encode_share_data(
+                    self.user_channel_id,
+                    self.io_channel_id,
+                    0,
+                    message,
+                    output,
+                )?;
 
-                (Written::from_size(written)?, ConnectionFinalizationState::SendFontList)
+                (
+                    Written::from_size(written)?,
+                    ConnectionFinalizationState::SendFontList,
+                )
             }
 
             ConnectionFinalizationState::SendFontList => {
@@ -142,7 +163,13 @@ impl Sequence for ConnectionFinalizationSequence {
 
                 debug!(?message, "Send");
 
-                let written = legacy::encode_share_data(self.user_channel_id, self.io_channel_id, 0, message, output)?;
+                let written = legacy::encode_share_data(
+                    self.user_channel_id,
+                    self.io_channel_id,
+                    0,
+                    message,
+                    output,
+                )?;
 
                 (
                     Written::from_size(written)?,
@@ -161,56 +188,54 @@ impl Sequence for ConnectionFinalizationSequence {
                         debug!("Server Synchronize");
                         ConnectionFinalizationState::WaitForResponse
                     }
-                    ShareDataPdu::Control(control_pdu) => {
-                        match control_pdu.action {
-                            finalization_messages::ControlAction::Cooperate => {
-                                if control_pdu.grant_id == 0 && control_pdu.control_id == 0 {
-                                    debug!("Server Control (Cooperate)");
-                                } else {
-                                    warn!(
+                    ShareDataPdu::Control(control_pdu) => match control_pdu.action {
+                        finalization_messages::ControlAction::Cooperate => {
+                            if control_pdu.grant_id == 0 && control_pdu.control_id == 0 {
+                                debug!("Server Control (Cooperate)");
+                            } else {
+                                warn!(
                                         control_pdu.grant_id,
                                         control_pdu.control_id,
                                         user_channel_id = self.user_channel_id,
                                         "Server Control (Cooperate) has non-zero grant_id or control_id",
                                     );
-                                }
-                                ConnectionFinalizationState::WaitForResponse
                             }
-                            finalization_messages::ControlAction::GrantedControl => {
-                                debug!(
-                                    control_pdu.grant_id,
-                                    control_pdu.control_id,
-                                    user_channel_id = self.user_channel_id,
-                                    SERVER_CHANNEL_ID
-                                );
-
-                                if control_pdu.grant_id != self.user_channel_id {
-                                    warn!("Server Control (Granted Control) had invalid grant_id, expected {}, but got {}", self.user_channel_id, control_pdu.grant_id);
-                                }
-
-                                if control_pdu.control_id != u32::from(SERVER_CHANNEL_ID) {
-                                    warn!("Server Control (Granted Control) had invalid control_id, expected {}, but got {}", SERVER_CHANNEL_ID, control_pdu.control_id);
-                                }
-
-                                ConnectionFinalizationState::WaitForResponse
-                            }
-                            _ => return Err(general_err!("unexpected control action")),
+                            ConnectionFinalizationState::WaitForResponse
                         }
-                    }
-                    ShareDataPdu::ServerSetErrorInfo(server_error_info::ServerSetErrorInfoPdu(error_info)) => {
-                        match error_info {
-                            server_error_info::ErrorInfo::ProtocolIndependentCode(
-                                server_error_info::ProtocolIndependentCode::None,
-                            ) => ConnectionFinalizationState::WaitForResponse,
-                            _ => {
-                                return Err(reason_err!(
-                                    "ServerSetErrorInfo",
-                                    "server returned error info: {}",
-                                    error_info.description()
-                                ));
+                        finalization_messages::ControlAction::GrantedControl => {
+                            debug!(
+                                control_pdu.grant_id,
+                                control_pdu.control_id,
+                                user_channel_id = self.user_channel_id,
+                                SERVER_CHANNEL_ID
+                            );
+
+                            if control_pdu.grant_id != self.user_channel_id {
+                                warn!("Server Control (Granted Control) had invalid grant_id, expected {}, but got {}", self.user_channel_id, control_pdu.grant_id);
                             }
+
+                            if control_pdu.control_id != u32::from(SERVER_CHANNEL_ID) {
+                                warn!("Server Control (Granted Control) had invalid control_id, expected {}, but got {}", SERVER_CHANNEL_ID, control_pdu.control_id);
+                            }
+
+                            ConnectionFinalizationState::WaitForResponse
                         }
-                    }
+                        _ => return Err(general_err!("unexpected control action")),
+                    },
+                    ShareDataPdu::ServerSetErrorInfo(server_error_info::ServerSetErrorInfoPdu(
+                        error_info,
+                    )) => match error_info {
+                        server_error_info::ErrorInfo::ProtocolIndependentCode(
+                            server_error_info::ProtocolIndependentCode::None,
+                        ) => ConnectionFinalizationState::WaitForResponse,
+                        _ => {
+                            return Err(reason_err!(
+                                "ServerSetErrorInfo",
+                                "server returned error info: {}",
+                                error_info.description()
+                            ));
+                        }
+                    },
                     ShareDataPdu::FontMap(_) => {
                         // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/023f1e69-cfe8-4ee6-9ee0-7e759fb4e4ee
                         //
@@ -227,7 +252,9 @@ impl Sequence for ConnectionFinalizationSequence {
                 (Written::Nothing, next_state)
             }
 
-            ConnectionFinalizationState::Finished => return Err(general_err!("finalization already finished")),
+            ConnectionFinalizationState::Finished => {
+                return Err(general_err!("finalization already finished"))
+            }
         };
 
         self.state = next_state;

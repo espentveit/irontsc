@@ -3,8 +3,8 @@ use std::{io, str};
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, write_padding, Decode,
-    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding,
+    write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_integer::Integer as _;
 use thiserror::Error;
@@ -83,14 +83,20 @@ impl ChannelName {
 
     pub fn as_str(&self) -> Option<&str> {
         if self.inner.iter().all(u8::is_ascii) {
-            #[expect(clippy::missing_panics_doc, reason = "never panics per invariant on self.inner")]
+            #[expect(
+                clippy::missing_panics_doc,
+                reason = "never panics per invariant on self.inner"
+            )]
             let terminator_idx = self
                 .inner
                 .iter()
                 .position(|c| *c == 0)
                 .expect("null-terminated ASCII string");
 
-            #[expect(clippy::missing_panics_doc, reason = "never panics per invariant on self.inner")]
+            #[expect(
+                clippy::missing_panics_doc,
+                reason = "never panics per invariant on self.inner"
+            )]
             Some(str::from_utf8(&self.inner[..terminator_idx]).expect("ASCII characters"))
         } else {
             None

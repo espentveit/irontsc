@@ -3,8 +3,8 @@ mod tests;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, read_padding, write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    ensure_fixed_part_size, read_padding, write_padding, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 use num_traits::FromPrimitive as _;
 
@@ -94,8 +94,11 @@ impl<'de> Decode<'de> for Input {
         let keyboard_subtype = src.read_u32();
         let keyboard_function_key = src.read_u32();
 
-        let keyboard_ime_filename =
-            utils::decode_string(src.read_slice(IME_FILE_NAME_SIZE), utils::CharacterSet::Unicode, false)?;
+        let keyboard_ime_filename = utils::decode_string(
+            src.read_slice(IME_FILE_NAME_SIZE),
+            utils::CharacterSet::Unicode,
+            false,
+        )?;
 
         Ok(Input {
             input_flags,

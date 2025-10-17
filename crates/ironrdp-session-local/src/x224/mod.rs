@@ -4,9 +4,13 @@ use ironrdp_core::WriteBuf;
 use ironrdp_dvc::{DrdynvcClient, DvcProcessor, DynamicVirtualChannel};
 use ironrdp_pdu::mcs::{DisconnectProviderUltimatum, DisconnectReason, McsMessage};
 use ironrdp_pdu::rdp::headers::ShareDataPdu;
-use ironrdp_pdu::rdp::server_error_info::{ErrorInfo, ProtocolIndependentCode, ServerSetErrorInfoPdu};
+use ironrdp_pdu::rdp::server_error_info::{
+    ErrorInfo, ProtocolIndependentCode, ServerSetErrorInfoPdu,
+};
 use ironrdp_pdu::x224::X224;
-use ironrdp_svc::{client_encode_svc_messages, StaticChannelSet, SvcMessage, SvcProcessor, SvcProcessorMessages};
+use ironrdp_svc::{
+    client_encode_svc_messages, StaticChannelSet, SvcMessage, SvcProcessor, SvcProcessorMessages,
+};
 use tracing::debug;
 
 use crate::{reason_err, SessionError, SessionErrorExt as _, SessionResult};
@@ -86,7 +90,8 @@ impl Processor {
     }
 
     pub fn get_dvc<T: DvcProcessor + 'static>(&self) -> Option<&DynamicVirtualChannel> {
-        self.get_svc_processor::<DrdynvcClient>()?.get_dvc_by_type_id::<T>()
+        self.get_svc_processor::<DrdynvcClient>()?
+            .get_dvc_by_type_id::<T>()
     }
 
     pub fn get_dvc_by_channel_id(&self, channel_id: u32) -> Option<&DynamicVirtualChannel> {
@@ -98,7 +103,8 @@ impl Processor {
     /// in the returned order.
     pub fn process(&mut self, frame: &[u8]) -> SessionResult<Vec<ProcessorOutput>> {
         let data_ctx: SendDataIndicationCtx<'_> =
-            ironrdp_connector::legacy::decode_send_data_indication(frame).map_err(crate::legacy::map_error)?;
+            ironrdp_connector::legacy::decode_send_data_indication(frame)
+                .map_err(crate::legacy::map_error)?;
         let channel_id = data_ctx.channel_id;
 
         if channel_id == self.io_channel_id {
@@ -118,14 +124,21 @@ impl Processor {
             debug!("Received data on DVC channel {channel_id}, ignoring in X224 processor");
             Ok(Vec::new())
         } else {
-            Err(reason_err!("X224", "unexpected channel received: ID {channel_id}"))
+            Err(reason_err!(
+                "X224",
+                "unexpected channel received: ID {channel_id}"
+            ))
         }
     }
 
-    fn process_io_channel(&self, data_ctx: SendDataIndicationCtx<'_>) -> SessionResult<Vec<ProcessorOutput>> {
+    fn process_io_channel(
+        &self,
+        data_ctx: SendDataIndicationCtx<'_>,
+    ) -> SessionResult<Vec<ProcessorOutput>> {
         debug_assert_eq!(data_ctx.channel_id, self.io_channel_id);
 
-        let io_channel = ironrdp_connector::legacy::decode_io_channel(data_ctx).map_err(crate::legacy::map_error)?;
+        let io_channel = ironrdp_connector::legacy::decode_io_channel(data_ctx)
+            .map_err(crate::legacy::map_error)?;
 
         match io_channel {
             ironrdp_connector::legacy::IoChannelPdu::Data(ctx) => {
@@ -139,9 +152,9 @@ impl Processor {
                         debug!("Got Keyboard Indicators PDU: {data:?}");
                         Ok(Vec::new())
                     }
-                    ShareDataPdu::ServerSetErrorInfo(ServerSetErrorInfoPdu(ErrorInfo::ProtocolIndependentCode(
-                        ProtocolIndependentCode::None,
-                    ))) => {
+                    ShareDataPdu::ServerSetErrorInfo(ServerSetErrorInfoPdu(
+                        ErrorInfo::ProtocolIndependentCode(ProtocolIndependentCode::None),
+                    )) => {
                         debug!("Received None server error");
                         Ok(Vec::new())
                     }
@@ -162,10 +175,13 @@ impl Processor {
                         //
                         // [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/27915739-8f77-487e-9927-55008af7fd68
                         let ultimatum = McsMessage::DisconnectProviderUltimatum(
-                            DisconnectProviderUltimatum::from_reason(DisconnectReason::UserRequested),
+                            DisconnectProviderUltimatum::from_reason(
+                                DisconnectReason::UserRequested,
+                            ),
                         );
 
-                        let encoded_pdu = ironrdp_core::encode_vec(&X224(ultimatum)).map_err(SessionError::encode);
+                        let encoded_pdu = ironrdp_core::encode_vec(&X224(ultimatum))
+                            .map_err(SessionError::encode);
 
                         Ok(vec![
                             ProcessorOutput::ResponseFrame(encoded_pdu?),
@@ -181,17 +197,24 @@ impl Processor {
                     )),
                 }
             }
-            ironrdp_connector::legacy::IoChannelPdu::DeactivateAll(_) => Ok(vec![ProcessorOutput::DeactivateAll(
-                Box::new(self.connection_activation.reset_clone()),
-            )]),
+            ironrdp_connector::legacy::IoChannelPdu::DeactivateAll(_) => {
+                Ok(vec![ProcessorOutput::DeactivateAll(Box::new(
+                    self.connection_activation.reset_clone(),
+                ))])
+            }
         }
     }
 
     /// Send a pdu on the static global channel. Typically used to send input events
     pub fn encode_static(&self, output: &mut WriteBuf, pdu: ShareDataPdu) -> SessionResult<usize> {
-        let written =
-            ironrdp_connector::legacy::encode_share_data(self.user_channel_id, self.io_channel_id, 0, pdu, output)
-                .map_err(crate::legacy::map_error)?;
+        let written = ironrdp_connector::legacy::encode_share_data(
+            self.user_channel_id,
+            self.io_channel_id,
+            0,
+            pdu,
+            output,
+        )
+        .map_err(crate::legacy::map_error)?;
         Ok(written)
     }
 }
@@ -202,6 +225,10 @@ impl Processor {
 /// The messages returned here are ready to be sent to the server.
 ///
 /// The caller is responsible for ensuring that the `channel_id` corresponds to the correct channel.
-fn process_svc_messages(messages: Vec<SvcMessage>, channel_id: u16, initiator_id: u16) -> SessionResult<Vec<u8>> {
+fn process_svc_messages(
+    messages: Vec<SvcMessage>,
+    channel_id: u16,
+    initiator_id: u16,
+) -> SessionResult<Vec<u8>> {
     client_encode_svc_messages(messages, channel_id, initiator_id).map_err(SessionError::encode)
 }

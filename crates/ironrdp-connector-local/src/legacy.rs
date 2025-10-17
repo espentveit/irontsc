@@ -109,14 +109,23 @@ pub fn decode_share_control(ctx: SendDataIndicationCtx<'_>) -> ConnectorResult<S
     eprintln!("🔍 decode_share_control - Raw user_data:");
     eprintln!("   Length: {} bytes", ctx.user_data.len());
     if ctx.user_data.len() <= 64 {
-        let hex: String = ctx.user_data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        let hex: String = ctx
+            .user_data
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
         eprintln!("   All bytes: {}", hex);
     } else {
         let preview = &ctx.user_data[..64];
-        let hex: String = preview.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        let hex: String = preview
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
         eprintln!("   First 64 bytes: {}", hex);
     }
-    
+
     // Check if this might be an Initiate Multitransport Request (28 bytes: 4+2+2+16)
     // The server sends this during capabilities exchange if we advertised multitransport support
     if ctx.user_data.len() == 28 {
@@ -124,7 +133,7 @@ pub fn decode_share_control(ctx: SendDataIndicationCtx<'_>) -> ConnectorResult<S
         eprintln!("   This should be handled at a higher level in the state machine");
         eprintln!("   Falling through to ShareControlHeader decode (will fail)...");
     }
-    
+
     let user_msg = ctx.decode_user_data::<rdp::headers::ShareControlHeader>()?;
 
     Ok(ShareControlCtx {

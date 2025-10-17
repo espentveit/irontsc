@@ -2,16 +2,21 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-use ironrdp_core::{cast_length, impl_as_any, invalid_field_err, Decode as _, DecodeResult, ReadCursor};
+use ironrdp_core::{
+    cast_length, impl_as_any, invalid_field_err, Decode as _, DecodeResult, ReadCursor,
+};
 use ironrdp_pdu::{self as pdu, decode_err, encode_err, pdu_other_err};
-use ironrdp_svc::{ChannelFlags, CompressionCondition, SvcMessage, SvcProcessor, SvcServerProcessor};
+use ironrdp_svc::{
+    ChannelFlags, CompressionCondition, SvcMessage, SvcProcessor, SvcServerProcessor,
+};
 use pdu::gcc::ChannelName;
 use pdu::PduResult;
 use slab::Slab;
 use tracing::debug;
 
 use crate::pdu::{
-    CapabilitiesRequestPdu, CapsVersion, CreateRequestPdu, CreationStatus, DrdynvcClientPdu, DrdynvcServerPdu,
+    CapabilitiesRequestPdu, CapsVersion, CreateRequestPdu, CreationStatus, DrdynvcClientPdu,
+    DrdynvcServerPdu,
 };
 use crate::{encode_dvc_messages, CompleteData, DvcProcessor};
 
@@ -58,7 +63,13 @@ impl fmt::Debug for DrdynvcServer {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{}:{} ({:?})", id, channel.processor.channel_name(), channel.state)?;
+            write!(
+                f,
+                "{}:{} ({:?})",
+                id,
+                channel.processor.channel_name(),
+                channel.state
+            )?;
         }
 
         write!(f, "])")
@@ -150,11 +161,16 @@ impl SvcProcessor for DrdynvcServer {
                 }
                 c.state = ChannelState::Opened;
                 let msg = c.processor.start(create_resp.channel_id)?;
-                resp.extend(encode_dvc_messages(id, msg, ChannelFlags::SHOW_PROTOCOL).map_err(|e| encode_err!(e))?);
+                resp.extend(
+                    encode_dvc_messages(id, msg, ChannelFlags::SHOW_PROTOCOL)
+                        .map_err(|e| encode_err!(e))?,
+                );
             }
             DrdynvcClientPdu::Close(close_resp) => {
                 debug!("Got DVC Close Response PDU: {close_resp:?}");
-                let c = self.channel_by_id(close_resp.channel_id).map_err(|e| decode_err!(e))?;
+                let c = self
+                    .channel_by_id(close_resp.channel_id)
+                    .map_err(|e| decode_err!(e))?;
                 if c.state != ChannelState::Opened {
                     return Err(pdu_other_err!("invalid channel state"));
                 }
@@ -167,7 +183,11 @@ impl SvcProcessor for DrdynvcServer {
                     debug!(?channel_id, ?c.state, "Invalid channel state");
                     return Err(pdu_other_err!("invalid channel state"));
                 }
-                if let Some(complete) = c.complete_data.process_data(data).map_err(|e| decode_err!(e))? {
+                if let Some(complete) = c
+                    .complete_data
+                    .process_data(data)
+                    .map_err(|e| decode_err!(e))?
+                {
                     let msg = c.processor.process(channel_id, &complete)?;
                     resp.extend(
                         encode_dvc_messages(channel_id, msg, ChannelFlags::SHOW_PROTOCOL)

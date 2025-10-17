@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ironrdp_core::{decode, encode_vec, Encode, WriteBuf};
-use ironrdp_pdu::x224::X224;
+use ironrdp_pdu::x224::{X224, X224Data};
 use ironrdp_pdu::{gcc, mcs, nego, rdp, PduHint};
 use ironrdp_svc::{StaticChannelSet, StaticVirtualChannel, SvcClientProcessor};
 use tracing::{debug, error, info, warn};
@@ -13,8 +13,8 @@ use crate::channel_connection::{ChannelConnectionSequence, ChannelConnectionStat
 use crate::connection_activation::{ConnectionActivationSequence, ConnectionActivationState};
 use crate::license_exchange::{LicenseExchangeSequence, NoopLicenseCache};
 use crate::{
-    encode_x224_packet, general_err, reason_err, Config, ConnectorError, ConnectorErrorExt as _, ConnectorErrorKind,
-    ConnectorResult, DesktopSize, NegotiationFailure, Sequence, State, Written,
+    encode_x224_packet, general_err, reason_err, Config, ConnectorError, ConnectorErrorExt as _,
+    ConnectorErrorKind, ConnectorResult, DesktopSize, NegotiationFailure, Sequence, State, Written,
 };
 
 #[derive(Debug)]
@@ -101,10 +101,12 @@ impl State for ClientConnectorState {
             Self::LicensingExchange { .. } => "LicensingExchange",
             Self::MultitransportBootstrapping { .. } => "MultitransportBootstrapping",
             Self::CapabilitiesExchange {
-                connection_activation, ..
+                connection_activation,
+                ..
             } => connection_activation.state().name(),
             Self::ConnectionFinalization {
-                connection_activation, ..
+                connection_activation,
+                ..
             } => connection_activation.state().name(),
             Self::Connected { .. } => "Connected",
         }
@@ -176,7 +178,10 @@ impl ClientConnector {
     }
 
     pub fn should_perform_security_upgrade(&self) -> bool {
-        matches!(self.state, ClientConnectorState::EnhancedSecurityUpgrade { .. })
+        matches!(
+            self.state,
+            ClientConnectorState::EnhancedSecurityUpgrade { .. }
+        )
     }
 
     /// # Panics
@@ -184,7 +189,8 @@ impl ClientConnector {
     /// Panics if state is not [ClientConnectorState::EnhancedSecurityUpgrade].
     pub fn mark_security_upgrade_as_done(&mut self) {
         assert!(self.should_perform_security_upgrade());
-        self.step(&[], &mut WriteBuf::new()).expect("transition to next state");
+        self.step(&[], &mut WriteBuf::new())
+            .expect("transition to next state");
         debug_assert!(!self.should_perform_security_upgrade());
     }
 
@@ -197,7 +203,9 @@ impl ClientConnector {
     /// Panics if state is not [ClientConnectorState::Credssp].
     pub fn mark_credssp_as_done(&mut self) {
         assert!(self.should_perform_credssp());
-        let res = self.step(&[], &mut WriteBuf::new()).expect("transition to next state");
+        let res = self
+            .step(&[], &mut WriteBuf::new())
+            .expect("transition to next state");
         debug_assert!(!self.should_perform_credssp());
         assert_eq!(res, Written::Nothing);
     }
@@ -208,21 +216,31 @@ impl Sequence for ClientConnector {
         match &self.state {
             ClientConnectorState::Consumed => None,
             ClientConnectorState::ConnectionInitiationSendRequest => None,
-            ClientConnectorState::ConnectionInitiationWaitConfirm { .. } => Some(&ironrdp_pdu::X224_HINT),
+            ClientConnectorState::ConnectionInitiationWaitConfirm { .. } => {
+                Some(&ironrdp_pdu::X224_HINT)
+            }
             ClientConnectorState::EnhancedSecurityUpgrade { .. } => None,
             ClientConnectorState::Credssp { .. } => None,
             ClientConnectorState::BasicSettingsExchangeSendInitial { .. } => None,
-            ClientConnectorState::BasicSettingsExchangeWaitResponse { .. } => Some(&ironrdp_pdu::X224_HINT),
-            ClientConnectorState::ChannelConnection { channel_connection, .. } => channel_connection.next_pdu_hint(),
+            ClientConnectorState::BasicSettingsExchangeWaitResponse { .. } => {
+                Some(&ironrdp_pdu::X224_HINT)
+            }
+            ClientConnectorState::ChannelConnection {
+                channel_connection, ..
+            } => channel_connection.next_pdu_hint(),
             ClientConnectorState::SecureSettingsExchange { .. } => None,
             ClientConnectorState::ConnectTimeAutoDetection { .. } => None,
-            ClientConnectorState::LicensingExchange { license_exchange, .. } => license_exchange.next_pdu_hint(),
+            ClientConnectorState::LicensingExchange {
+                license_exchange, ..
+            } => license_exchange.next_pdu_hint(),
             ClientConnectorState::MultitransportBootstrapping { .. } => None,
             ClientConnectorState::CapabilitiesExchange {
-                connection_activation, ..
+                connection_activation,
+                ..
             } => connection_activation.next_pdu_hint(),
             ClientConnectorState::ConnectionFinalization {
-                connection_activation, ..
+                connection_activation,
+                ..
             } => connection_activation.next_pdu_hint(),
             ClientConnectorState::Connected { .. } => None,
         }
@@ -236,7 +254,9 @@ impl Sequence for ClientConnector {
         let (written, next_state) = match mem::take(&mut self.state) {
             // Invalid state
             ClientConnectorState::Consumed => {
-                return Err(general_err!("connector sequence state is consumed (this is a bug)",))
+                return Err(general_err!(
+                    "connector sequence state is consumed (this is a bug)",
+                ))
             }
 
             //== Connection Initiation ==//
@@ -248,6 +268,8 @@ impl Sequence for ClientConnector {
 
                 if self.config.enable_tls {
                     security_protocol.insert(nego::SecurityProtocol::SSL);
+                    // Always request HYBRID for UDP support when TLS is enabled
+                    security_protocol.insert(nego::SecurityProtocol::HYBRID);
                 }
 
                 if self.config.enable_credssp {
@@ -260,20 +282,25 @@ impl Sequence for ClientConnector {
                     // However, crucially, it’s not strictly required (not "MUST").
                     // In fact, we purposefully choose to not set `PROTOCOL_SSL` unless `enable_winlogon` is `true`.
                     // This tells the server that we are not going to accept downgrading NLA to TLS security.
-                    security_protocol.insert(nego::SecurityProtocol::HYBRID | nego::SecurityProtocol::HYBRID_EX);
+                    security_protocol.insert(nego::SecurityProtocol::HYBRID_EX);
                 }
 
                 if security_protocol.is_standard_rdp_security() {
-                    return Err(reason_err!("Initiation", "standard RDP security is not supported",));
+                    return Err(reason_err!(
+                        "Initiation",
+                        "standard RDP security is not supported",
+                    ));
                 }
 
                 // Generate or use provided correlation ID for multitransport
-                let correlation_info = self.config.correlation_id.map(|id| {
-                    nego::CorrelationInfo::from_id(id)
-                }).or_else(|| {
-                    // Auto-generate correlation ID if not provided
-                    Some(nego::CorrelationInfo::new_random())
-                });
+                let correlation_info = self
+                    .config
+                    .correlation_id
+                    .map(|id| nego::CorrelationInfo::from_id(id))
+                    .or_else(|| {
+                        // Auto-generate correlation ID if not provided
+                        Some(nego::CorrelationInfo::new_random())
+                    });
 
                 // Store the correlation ID for later use (UDP)
                 if let Some(ref corr_info) = correlation_info {
@@ -299,8 +326,8 @@ impl Sequence for ClientConnector {
 
                 debug!(message = ?connection_request, "Send");
 
-                let written =
-                    ironrdp_core::encode_buf(&X224(connection_request), output).map_err(ConnectorError::encode)?;
+                let written = ironrdp_core::encode_buf(&X224(connection_request), output)
+                    .map_err(ConnectorError::encode)?;
 
                 (
                     Written::from_size(written)?,
@@ -368,17 +395,25 @@ impl Sequence for ClientConnector {
                 )
             }
 
-
             //== Basic Settings Exchange ==//
             // Exchange basic settings including Core Data, Security Data and Network Data.
             ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol } => {
                 info!("📋 Basic Settings Exchange - Creating GCC blocks (ClientData)");
 
-                let client_gcc_blocks =
-                    create_gcc_blocks(&self.config, selected_protocol, self.static_channels.values())?;
+                let static_channel_defs = self
+                    .static_channels
+                    .values()
+                    .map(ironrdp_svc::make_channel_definition)
+                    .collect();
+
+                let client_gcc_blocks = crate::create_client_data(
+                    &self.config,
+                    selected_protocol.bits(),
+                    static_channel_defs,
+                );
 
                 info!(
-                    "GCC blocks created: core={:?}, security={:?}, network={:?}, cluster={:?}, message_channel={:?}, multi_transport={:?}",
+                    "GCC blocks created: core version={:?}, security={}, network={}, cluster={}, message_channel={}, multi_transport={:?}",
                     client_gcc_blocks.core.version,
                     !client_gcc_blocks.security.encryption_methods.is_empty(),
                     client_gcc_blocks.network.is_some(),
@@ -387,15 +422,15 @@ impl Sequence for ClientConnector {
                     client_gcc_blocks.multi_transport_channel.as_ref().map(|mt| mt.flags.bits())
                 );
 
-                let connect_initial =
-                    mcs::ConnectInitial::with_gcc_blocks(client_gcc_blocks).map_err(ConnectorError::decode)?;
+                let connect_initial = mcs::ConnectInitial::with_gcc_blocks(client_gcc_blocks)
+                    .map_err(ConnectorError::decode)?;
 
                 info!("📤 Encoding MCS Connect Initial...");
-                
+
                 let written = encode_x224_packet(&connect_initial, output)?;
 
                 info!("✅ MCS Connect Initial encoded: {} bytes", written);
-                
+
                 // Log detailed hex dump for comparison with reference
                 let hex_preview: String = output[..written]
                     .iter()
@@ -418,17 +453,19 @@ impl Sequence for ClientConnector {
                 )
             }
             ClientConnectorState::BasicSettingsExchangeWaitResponse { connect_initial } => {
-                let x224_payload = decode::<X224<crate::x224::X224Data<'_>>>(input)
+                                let x224_payload = decode::<X224<X224Data<'_>>>(input)
                     .map_err(ConnectorError::decode)
                     .map(|p| p.0)?;
-                let connect_response =
-                    decode::<mcs::ConnectResponse>(x224_payload.data.as_ref()).map_err(ConnectorError::decode)?;
+                let connect_response = decode::<mcs::ConnectResponse>(x224_payload.data.as_ref())
+                    .map_err(ConnectorError::decode)?;
 
                 debug!(message = ?connect_response, "Received");
 
                 let client_gcc_blocks = connect_initial.conference_create_request.gcc_blocks();
 
-                let server_gcc_blocks = connect_response.conference_create_response.into_gcc_blocks();
+                let server_gcc_blocks = connect_response
+                    .conference_create_response
+                    .into_gcc_blocks();
 
                 if client_gcc_blocks.security == gcc::ClientSecurityData::no_security()
                     && server_gcc_blocks.security != gcc::ServerSecurityData::no_security()
@@ -463,7 +500,9 @@ impl Sequence for ClientConnector {
                     .core
                     .optional_data
                     .early_capability_flags
-                    .is_some_and(|c| c.contains(gcc::ServerEarlyCapabilityFlags::SKIP_CHANNELJOIN_SUPPORTED));
+                    .is_some_and(|c| {
+                        c.contains(gcc::ServerEarlyCapabilityFlags::SKIP_CHANNELJOIN_SUPPORTED)
+                    });
 
                 (
                     Written::Nothing,
@@ -487,7 +526,8 @@ impl Sequence for ClientConnector {
                 debug!("Channel Connection");
                 let written = channel_connection.step(input, output)?;
 
-                let next_state = if let ChannelConnectionState::AllJoined { user_channel_id } = channel_connection.state
+                let next_state = if let ChannelConnectionState::AllJoined { user_channel_id } =
+                    channel_connection.state
                 {
                     debug_assert!(channel_connection.state.is_terminal());
 
@@ -523,7 +563,8 @@ impl Sequence for ClientConnector {
 
                 debug!(message = ?client_info, "Send");
 
-                let written = encode_send_data_request(user_channel_id, io_channel_id, &client_info, output)?;
+                let written =
+                    encode_send_data_request(user_channel_id, io_channel_id, &client_info, output)?;
 
                 (
                     Written::from_size(written)?,
@@ -610,14 +651,18 @@ impl Sequence for ClientConnector {
                 match connection_activation.state {
                     ConnectionActivationState::ConnectionFinalization { .. } => (
                         written,
-                        ClientConnectorState::ConnectionFinalization { connection_activation },
+                        ClientConnectorState::ConnectionFinalization {
+                            connection_activation,
+                        },
                     ),
                     ConnectionActivationState::CapabilitiesExchange { .. } => {
                         // Still in capabilities exchange (e.g., after handling Initiate Multitransport Request)
                         // Stay in this state to receive the next PDU (DemandActivePdu)
                         (
                             written,
-                            ClientConnectorState::CapabilitiesExchange { connection_activation },
+                            ClientConnectorState::CapabilitiesExchange {
+                                connection_activation,
+                            },
                         )
                     }
                     _ => return Err(general_err!("invalid state (this is a bug)")),
@@ -633,7 +678,9 @@ impl Sequence for ClientConnector {
                 let written = connection_activation.step(input, output)?;
 
                 let next_state = if !connection_activation.state.is_terminal() {
-                    ClientConnectorState::ConnectionFinalization { connection_activation }
+                    ClientConnectorState::ConnectionFinalization {
+                        connection_activation,
+                    }
                 } else {
                     match connection_activation.state {
                         ConnectionActivationState::Finalized {
@@ -663,7 +710,9 @@ impl Sequence for ClientConnector {
 
             //== Connected ==//
             // The client connector job is done.
-            ClientConnectorState::Connected { .. } => return Err(general_err!("already connected")),
+            ClientConnectorState::Connected { .. } => {
+                return Err(general_err!("already connected"))
+            }
         };
 
         self.state = next_state;
@@ -698,17 +747,21 @@ fn create_gcc_blocks<'a>(
     static_channels: impl Iterator<Item = &'a StaticVirtualChannel>,
 ) -> ConnectorResult<gcc::ClientGccBlocks> {
     use ironrdp_pdu::gcc::{
-        ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags, ClientGccBlocks, ClientNetworkData,
-        ClientSecurityData, ColorDepth, ConnectionType, EncryptionMethod, HighColorDepth, MonitorOrientation,
-        RdpVersion, SecureAccessSequence, SupportedColorDepths,
+        ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags, ClientGccBlocks,
+        ClientNetworkData, ClientSecurityData, ColorDepth, ConnectionType, EncryptionMethod,
+        HighColorDepth, MonitorOrientation, RdpVersion, SecureAccessSequence, SupportedColorDepths,
     };
 
-    let max_color_depth = config.bitmap.as_ref().map(|bitmap| bitmap.color_depth).unwrap_or(32);
+    let max_color_depth = config
+        .bitmap
+        .as_ref()
+        .map(|bitmap| bitmap.color_depth)
+        .unwrap_or(32);
 
     // Match Windows client: advertise all color depths (0x000f)
-    let supported_color_depths = SupportedColorDepths::BPP24 
-        | SupportedColorDepths::BPP16 
-        | SupportedColorDepths::BPP15 
+    let supported_color_depths = SupportedColorDepths::BPP24
+        | SupportedColorDepths::BPP16
+        | SupportedColorDepths::BPP15
         | SupportedColorDepths::BPP32;
 
     let channels = static_channels
@@ -719,7 +772,7 @@ fn create_gcc_blocks<'a>(
         core: ClientCoreData {
             // Use Windows 11 24H2 version (17.8) to match modern RDP clients
             // This corresponds to build 26100 and provides best compatibility
-            version: RdpVersion::V11_24H2,  // Version 17.8 (0x00110008)
+            version: RdpVersion::V11_24H2, // Version 17.8 (0x00110008)
             desktop_width: config.desktop_size.width,
             desktop_height: config.desktop_size.height,
             color_depth: ColorDepth::Bpp8, // ignored because we use the optional core data below
@@ -739,7 +792,8 @@ fn create_gcc_blocks<'a>(
                 supported_color_depths: Some(supported_color_depths),
                 early_capability_flags: {
                     // Match Windows client flags (0x0faf) exactly for maximum compatibility
-                    let mut early_capability_flags = ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
+                    let mut early_capability_flags =
+                        ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
                         | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU
                         | ClientEarlyCapabilityFlags::STRONG_ASYMMETRIC_KEYS
                         | ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
@@ -756,7 +810,7 @@ fn create_gcc_blocks<'a>(
                     Some(early_capability_flags)
                 },
                 dig_product_id: Some(config.dig_product_id.clone()),
-                connection_type: Some(ConnectionType::Autodetect),  // Match working client (Auto Detect)
+                connection_type: Some(ConnectionType::Autodetect), // Match working client (Auto Detect)
                 server_selected_protocol: Some(selected_protocol),
                 desktop_physical_width: Some(0),  // 0 per FreeRDP
                 desktop_physical_height: Some(0), // 0 per FreeRDP
@@ -766,7 +820,9 @@ fn create_gcc_blocks<'a>(
                     Some(MonitorOrientation::Portrait as u16)
                 },
                 desktop_scale_factor: Some(config.desktop_scale_factor),
-                device_scale_factor: if config.desktop_scale_factor >= 100 && config.desktop_scale_factor <= 500 {
+                device_scale_factor: if config.desktop_scale_factor >= 100
+                    && config.desktop_scale_factor <= 500
+                {
                     Some(100)
                 } else {
                     Some(0)
@@ -785,8 +841,8 @@ fn create_gcc_blocks<'a>(
         // Enable cluster/redirection support (required for multitransport on some servers)
         // Match Windows 11 client exactly: Version 6, REDIRECTION_SUPPORTED only (not SMARTCARD)
         cluster: Some(gcc::ClientClusterData {
-            flags: gcc::RedirectionFlags::REDIRECTION_SUPPORTED,  // Only 0x01, no smartcard
-            redirection_version: gcc::RedirectionVersion::V6,  // Match working client
+            flags: gcc::RedirectionFlags::REDIRECTION_SUPPORTED, // Only 0x01, no smartcard
+            redirection_version: gcc::RedirectionVersion::V6,    // Match working client
             redirected_session_id: 0,
         }),
         monitor: None,
@@ -797,7 +853,7 @@ fn create_gcc_blocks<'a>(
         // Advertise support for both Reliable (FECR) and Lossy (FECL) UDP transport
         // Flags value 0x305 matches real Windows RDP client:
         //   0x01 (FECR): Reliable UDP support
-        //   0x04 (FECL): Lossy UDP support  
+        //   0x04 (FECL): Lossy UDP support
         //   0x100 (REQUEST): Client is requesting multitransport
         //   0x200 (SOFT_SYNC): Client supports soft-syncing TCP to UDP
         multi_transport_channel: Some(ironrdp_pdu::gcc::MultiTransportChannelData {
@@ -812,8 +868,8 @@ fn create_gcc_blocks<'a>(
 
 fn create_client_info_pdu(config: &Config, client_addr: &SocketAddr) -> rdp::ClientInfoPdu {
     use ironrdp_pdu::rdp::client_info::{
-        AddressFamily, ClientInfo, ClientInfoFlags, CompressionType, Credentials, ExtendedClientInfo,
-        ExtendedClientOptionalInfo,
+        AddressFamily, ClientInfo, ClientInfoFlags, CompressionType, Credentials,
+        ExtendedClientInfo, ExtendedClientOptionalInfo,
     };
     use ironrdp_pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
     use ironrdp_pdu::rdp::ClientInfoPdu;

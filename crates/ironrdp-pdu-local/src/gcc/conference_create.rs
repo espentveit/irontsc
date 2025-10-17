@@ -1,6 +1,6 @@
 use ironrdp_core::{
-    cast_length, ensure_size, invalid_field_err, other_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    cast_length, ensure_size, invalid_field_err, other_err, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 
 use super::{ClientGccBlocks, ServerGccBlocks};
@@ -35,14 +35,15 @@ impl ConferenceCreateRequest {
 
     pub fn new(gcc_blocks: ClientGccBlocks) -> DecodeResult<Self> {
         // Ensure the invariant on gcc_blocks.size() is respected.
-        check_invariant(gcc_blocks.size() <= usize::from(u16::MAX) - CONFERENCE_REQUEST_CONNECT_PDU_SIZE).ok_or_else(
-            || {
-                invalid_field_err!(
-                    "gcc_blocks",
-                    "gcc_blocks.size() + CONFERENCE_REQUEST_CONNECT_PDU_SIZE > u16::MAX"
-                )
-            },
-        )?;
+        check_invariant(
+            gcc_blocks.size() <= usize::from(u16::MAX) - CONFERENCE_REQUEST_CONNECT_PDU_SIZE,
+        )
+        .ok_or_else(|| {
+            invalid_field_err!(
+                "gcc_blocks",
+                "gcc_blocks.size() + CONFERENCE_REQUEST_CONNECT_PDU_SIZE > u16::MAX"
+            )
+        })?;
 
         Ok(Self { gcc_blocks })
     }
@@ -80,7 +81,8 @@ impl Encode for ConferenceCreateRequest {
         // ConferenceCreateRequest::Selection: select optional userData from ConferenceCreateRequest
         per::write_selection(dst, CONFERENCE_REQUEST_USER_DATA_SELECTION);
         // ConferenceCreateRequest::ConferenceName
-        per::write_numeric_string(dst, CONFERENCE_NAME, 1).map_err(|e| other_err!("confName", source: e))?;
+        per::write_numeric_string(dst, CONFERENCE_NAME, 1)
+            .map_err(|e| other_err!("confName", source: e))?;
         per::write_padding(dst, 1);
         // UserData (SET OF SEQUENCE)
         // one set of UserData
@@ -107,8 +109,9 @@ impl Encode for ConferenceCreateRequest {
 
     fn size(&self) -> usize {
         let gcc_blocks_buffer_length = self.gcc_blocks.size();
-        let req_length = u16::try_from(CONFERENCE_REQUEST_CONNECT_PDU_SIZE + gcc_blocks_buffer_length)
-            .expect("per the invariant on self.gcc_blocks, this cast is infallible");
+        let req_length =
+            u16::try_from(CONFERENCE_REQUEST_CONNECT_PDU_SIZE + gcc_blocks_buffer_length)
+                .expect("per the invariant on self.gcc_blocks, this cast is infallible");
         let length = u16::try_from(gcc_blocks_buffer_length)
             .expect("per the invariant on self.gcc_blocks, this cast is infallible");
 
@@ -128,10 +131,15 @@ impl<'de> Decode<'de> for ConferenceCreateRequest {
         // ConnectData::Key: select object (0) of type OBJECT_IDENTIFIER
         ensure_size!(in: src, size: per::CHOICE_SIZE);
         if per::read_choice(src) != OBJECT_IDENTIFIER_KEY {
-            return Err(invalid_field_err!("ConnectData::Key", "Got unexpected ConnectData key"));
+            return Err(invalid_field_err!(
+                "ConnectData::Key",
+                "Got unexpected ConnectData key"
+            ));
         }
         // ConnectData::Key: value (OBJECT_IDENTIFIER)
-        if per::read_object_id(src).map_err(|e| other_err!("value", source: e))? != CONFERENCE_REQUEST_OBJECT_ID {
+        if per::read_object_id(src).map_err(|e| other_err!("value", source: e))?
+            != CONFERENCE_REQUEST_OBJECT_ID
+        {
             return Err(invalid_field_err!(
                 "ConnectData::Key",
                 "Got unexpected ConnectData key value"
@@ -189,7 +197,8 @@ impl<'de> Decode<'de> for ConferenceCreateRequest {
             ));
         }
         // H221NonStandardIdentifier (octet string)
-        let (_gcc_blocks_buffer_length, _) = per::read_length(src).map_err(|e| other_err!("len", source: e))?;
+        let (_gcc_blocks_buffer_length, _) =
+            per::read_length(src).map_err(|e| other_err!("len", source: e))?;
         let gcc_blocks = ClientGccBlocks::decode(src)?;
 
         Self::new(gcc_blocks)
@@ -208,16 +217,20 @@ impl ConferenceCreateResponse {
 
     pub fn new(user_id: u16, gcc_blocks: ServerGccBlocks) -> DecodeResult<Self> {
         // Ensure the invariant on gcc_blocks.size() is respected.
-        check_invariant(gcc_blocks.size() <= usize::from(u16::MAX) - CONFERENCE_RESPONSE_CONNECT_PDU_SIZE).ok_or_else(
-            || {
-                invalid_field_err!(
-                    "gcc_blocks",
-                    "gcc_blocks.size() + CONFERENCE_REQUEST_CONNECT_PDU_SIZE > u16::MAX"
-                )
-            },
-        )?;
+        check_invariant(
+            gcc_blocks.size() <= usize::from(u16::MAX) - CONFERENCE_RESPONSE_CONNECT_PDU_SIZE,
+        )
+        .ok_or_else(|| {
+            invalid_field_err!(
+                "gcc_blocks",
+                "gcc_blocks.size() + CONFERENCE_REQUEST_CONNECT_PDU_SIZE > u16::MAX"
+            )
+        })?;
 
-        Ok(Self { user_id, gcc_blocks })
+        Ok(Self {
+            user_id,
+            gcc_blocks,
+        })
     }
 
     pub fn gcc_blocks(&self) -> &ServerGccBlocks {
@@ -251,7 +264,8 @@ impl Encode for ConferenceCreateResponse {
         // ConnectGCCPDU (CHOICE): Select conferenceCreateResponse (1) of type ConferenceCreateResponse
         per::write_choice(dst, CONNECT_GCC_PDU_CONFERENCE_RESPONSE_CHOICE);
         // ConferenceCreateResponse::nodeID (UserID)
-        per::write_u16(dst, self.user_id, CONFERENCE_REQUEST_U16_MIN).map_err(|e| other_err!("userId", source: e))?;
+        per::write_u16(dst, self.user_id, CONFERENCE_REQUEST_U16_MIN)
+            .map_err(|e| other_err!("userId", source: e))?;
         // ConferenceCreateResponse::tag (INTEGER)
         per::write_u32(dst, CONFERENCE_RESPONSE_TAG);
         // ConferenceCreateResponse::result (ENUMERATED)
@@ -279,8 +293,9 @@ impl Encode for ConferenceCreateResponse {
 
     fn size(&self) -> usize {
         let gcc_blocks_buffer_length = self.gcc_blocks.size();
-        let req_length = u16::try_from(CONFERENCE_RESPONSE_CONNECT_PDU_SIZE + gcc_blocks_buffer_length)
-            .expect("per the invariant on self.gcc_blocks, this cast is infallible");
+        let req_length =
+            u16::try_from(CONFERENCE_RESPONSE_CONNECT_PDU_SIZE + gcc_blocks_buffer_length)
+                .expect("per the invariant on self.gcc_blocks, this cast is infallible");
         let length = u16::try_from(gcc_blocks_buffer_length)
             .expect("per the invariant on self.gcc_blocks, this cast is infallible");
 
@@ -298,10 +313,15 @@ impl<'de> Decode<'de> for ConferenceCreateResponse {
         // ConnectData::Key: select type OBJECT_IDENTIFIER
         ensure_size!(in: src, size: per::CHOICE_SIZE);
         if per::read_choice(src) != OBJECT_IDENTIFIER_KEY {
-            return Err(invalid_field_err!("ConnectData::Key", "Got unexpected ConnectData key"));
+            return Err(invalid_field_err!(
+                "ConnectData::Key",
+                "Got unexpected ConnectData key"
+            ));
         }
         // ConnectData::Key: value
-        if per::read_object_id(src).map_err(|e| other_err!("value", source: e))? != CONFERENCE_REQUEST_OBJECT_ID {
+        if per::read_object_id(src).map_err(|e| other_err!("value", source: e))?
+            != CONFERENCE_REQUEST_OBJECT_ID
+        {
             return Err(invalid_field_err!(
                 "ConnectData::Key",
                 "Got unexpected ConnectData key value"
@@ -318,16 +338,19 @@ impl<'de> Decode<'de> for ConferenceCreateResponse {
             ));
         }
         // ConferenceCreateResponse::nodeID (UserID)
-        let user_id = per::read_u16(src, CONFERENCE_REQUEST_U16_MIN).map_err(|e| other_err!("userId", source: e))?;
+        let user_id = per::read_u16(src, CONFERENCE_REQUEST_U16_MIN)
+            .map_err(|e| other_err!("userId", source: e))?;
         // ConferenceCreateResponse::tag (INTEGER)
-        if per::read_u32(src).map_err(|e| other_err!("tag", source: e))? != CONFERENCE_RESPONSE_TAG {
+        if per::read_u32(src).map_err(|e| other_err!("tag", source: e))? != CONFERENCE_RESPONSE_TAG
+        {
             return Err(invalid_field_err!(
                 "ConferenceCreateResponse::tag",
                 "Got unexpected ConferenceCreateResponse tag",
             ));
         }
         // ConferenceCreateResponse::result (ENUMERATED)
-        if per::read_enum(src, mcs::RESULT_ENUM_LENGTH).map_err(|e| other_err!("result", source: e))?
+        if per::read_enum(src, mcs::RESULT_ENUM_LENGTH)
+            .map_err(|e| other_err!("result", source: e))?
             != CONFERENCE_RESPONSE_RESULT
         {
             return Err(invalid_field_err!(
@@ -360,7 +383,8 @@ impl<'de> Decode<'de> for ConferenceCreateResponse {
                 "Got invalid H221NonStandard server-to-client key",
             ));
         }
-        let (_gcc_blocks_buffer_length, _) = per::read_length(src).map_err(|e| other_err!("len", source: e))?;
+        let (_gcc_blocks_buffer_length, _) =
+            per::read_length(src).map_err(|e| other_err!("len", source: e))?;
         let gcc_blocks = ServerGccBlocks::decode(src)?;
 
         Self::new(user_id, gcc_blocks)

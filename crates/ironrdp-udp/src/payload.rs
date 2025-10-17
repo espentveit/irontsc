@@ -3,7 +3,7 @@ use ironrdp_core::ReadCursor;
 use crate::error::{UdpError, UdpErrorExt as _, UdpResult};
 
 /// RDPUDP_PAYLOAD_PREFIX Structure (section 2.2.2.3)
-/// 
+///
 /// This structure is present in all coded packets (source and FEC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PayloadPrefix {
@@ -33,7 +33,7 @@ impl PayloadPrefix {
 }
 
 /// RDPUDP_SOURCE_PAYLOAD_HEADER Structure (section 2.2.2.4)
-/// 
+///
 /// This header is present in source packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourcePayloadHeader {
@@ -63,7 +63,7 @@ impl SourcePayloadHeader {
 }
 
 /// RDPUDP_FEC_PAYLOAD_HEADER Structure (section 2.2.2.2)
-/// 
+///
 /// This header is present in FEC packets and contains information about
 /// the source packets that were used to generate the FEC packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,12 +84,7 @@ impl FecPayloadHeader {
     pub const NAME: &'static str = "RDPUDP_FEC_PAYLOAD_HEADER";
     pub const SIZE: usize = 8;
 
-    pub fn new(
-        sn_coded: u32,
-        sn_source_start: u8,
-        urange: u8,
-        fec_index: u8,
-    ) -> Self {
+    pub fn new(sn_coded: u32, sn_source_start: u8, urange: u8, fec_index: u8) -> Self {
         Self {
             sn_coded,
             sn_source_start,
@@ -161,7 +156,7 @@ mod tests {
     #[test]
     fn test_payload_prefix() {
         let prefix = PayloadPrefix::new(1234);
-        
+
         let mut encoded = Vec::new();
         prefix.encode_into(&mut encoded);
 
@@ -174,7 +169,7 @@ mod tests {
     #[test]
     fn test_source_payload_header() {
         let header = SourcePayloadHeader::new(0x12345678);
-        
+
         let mut encoded = Vec::new();
         header.encode_into(&mut encoded);
 
@@ -187,7 +182,7 @@ mod tests {
     #[test]
     fn test_fec_payload_header() {
         let header = FecPayloadHeader::new(100, 5, 10, 2);
-        
+
         let mut encoded = Vec::new();
         header.encode_into(&mut encoded);
 
@@ -198,21 +193,21 @@ mod tests {
         assert_eq!(decoded.sn_source_start, 5);
         assert_eq!(decoded.urange, 10);
         assert_eq!(decoded.fec_index, 2);
-        
+
         // Test source range
         let range = decoded.source_range();
         assert_eq!(range.start, 105); // 100 + 5
-        assert_eq!(range.end, 115);   // 105 + 10
+        assert_eq!(range.end, 115); // 105 + 10
     }
 
     #[test]
     fn test_fec_payload_header_rejects_invalid_padding() {
         let mut data = vec![0u8; 8];
         data[0..4].copy_from_slice(&100u32.to_be_bytes());
-        data[4] = 5;  // sn_source_start
+        data[4] = 5; // sn_source_start
         data[5] = 10; // urange
-        data[6] = 2;  // fec_index
-        data[7] = 1;  // invalid padding (should be 0)
+        data[6] = 2; // fec_index
+        data[7] = 1; // invalid padding (should be 0)
 
         let mut cursor = ReadCursor::new(&data);
         let result = FecPayloadHeader::decode(&mut cursor);

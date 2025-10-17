@@ -2,8 +2,8 @@
 mod tests;
 
 use ironrdp_core::{
-    ensure_fixed_part_size, invalid_field_err, write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    ensure_fixed_part_size, invalid_field_err, write_padding, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -70,7 +70,10 @@ impl<'de> Decode<'de> for CacheDefinition {
         let entries = src.read_u16();
         let max_cell_size = src.read_u16();
 
-        Ok(CacheDefinition { entries, max_cell_size })
+        Ok(CacheDefinition {
+            entries,
+            max_cell_size,
+        })
     }
 }
 

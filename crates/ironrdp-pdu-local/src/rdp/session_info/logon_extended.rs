@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, Decode, DecodeResult, Encode,
-    EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, Decode,
+    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -112,8 +112,14 @@ impl Encode for ServerAutoReconnect {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_fixed_part_size!(in: dst);
 
-        dst.write_u32(u32::try_from(AUTO_RECONNECT_PACKET_SIZE).expect("AUTO_RECONNECT_PACKET_SIZE fits into u32"));
-        dst.write_u32(u32::try_from(AUTO_RECONNECT_PACKET_SIZE).expect("AUTO_RECONNECT_PACKET_SIZE fits into u32"));
+        dst.write_u32(
+            u32::try_from(AUTO_RECONNECT_PACKET_SIZE)
+                .expect("AUTO_RECONNECT_PACKET_SIZE fits into u32"),
+        );
+        dst.write_u32(
+            u32::try_from(AUTO_RECONNECT_PACKET_SIZE)
+                .expect("AUTO_RECONNECT_PACKET_SIZE fits into u32"),
+        );
         dst.write_u32(AUTO_RECONNECT_VERSION_1);
         dst.write_u32(self.logon_id);
         dst.write_slice(self.random_bits.as_ref());
@@ -136,20 +142,31 @@ impl<'de> Decode<'de> for ServerAutoReconnect {
 
         let _data_length = src.read_u32();
         let packet_length = src.read_u32();
-        if packet_length != u32::try_from(AUTO_RECONNECT_PACKET_SIZE).expect("AUTO_RECONNECT_PACKET_SIZE fits into u32")
+        if packet_length
+            != u32::try_from(AUTO_RECONNECT_PACKET_SIZE)
+                .expect("AUTO_RECONNECT_PACKET_SIZE fits into u32")
         {
-            return Err(invalid_field_err!("packetLen", "invalid auto-reconnect packet size"));
+            return Err(invalid_field_err!(
+                "packetLen",
+                "invalid auto-reconnect packet size"
+            ));
         }
 
         let version = src.read_u32();
         if version != AUTO_RECONNECT_VERSION_1 {
-            return Err(invalid_field_err!("version", "invalid auto-reconnect version"));
+            return Err(invalid_field_err!(
+                "version",
+                "invalid auto-reconnect version"
+            ));
         }
 
         let logon_id = src.read_u32();
         let random_bits = src.read_array();
 
-        Ok(Self { logon_id, random_bits })
+        Ok(Self {
+            logon_id,
+            random_bits,
+        })
     }
 }
 
@@ -172,7 +189,9 @@ impl Encode for LogonErrorsInfo {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_fixed_part_size!(in: dst);
 
-        dst.write_u32(u32::try_from(LOGON_ERRORS_INFO_SIZE).expect("LOGON_ERRORS_INFO_SIZE fits into u32"));
+        dst.write_u32(
+            u32::try_from(LOGON_ERRORS_INFO_SIZE).expect("LOGON_ERRORS_INFO_SIZE fits into u32"),
+        );
         dst.write_u32(self.error_type.as_u32());
         dst.write_u32(self.error_data.to_u32());
 
@@ -199,9 +218,14 @@ impl<'de> Decode<'de> for LogonErrorsInfo {
         let error_notification_data = src.read_u32();
         let error_data = LogonErrorNotificationDataErrorCode::from_u32(error_notification_data)
             .map(LogonErrorNotificationData::ErrorCode)
-            .unwrap_or(LogonErrorNotificationData::SessionId(error_notification_data));
+            .unwrap_or(LogonErrorNotificationData::SessionId(
+                error_notification_data,
+            ));
 
-        Ok(Self { error_type, error_data })
+        Ok(Self {
+            error_type,
+            error_data,
+        })
     }
 }
 

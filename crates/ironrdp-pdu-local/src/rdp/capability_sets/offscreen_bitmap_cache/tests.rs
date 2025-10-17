@@ -36,5 +36,8 @@ fn to_buffer_correctly_serializes_offscreen_bitmap_cache_capset() {
 
 #[test]
 fn buffer_length_is_correct_for_offscreen_bitmap_cache_capset() {
-    assert_eq!(OFFSCREEN_BITMAP_CACHE_BUFFER.len(), OFFSCREEN_BITMAP_CACHE.size());
+    assert_eq!(
+        OFFSCREEN_BITMAP_CACHE_BUFFER.len(),
+        OFFSCREEN_BITMAP_CACHE.size()
+    );
 }

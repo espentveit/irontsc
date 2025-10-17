@@ -2,13 +2,14 @@
 mod tests;
 
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 use super::{
-    BlobHeader, BlobType, LicenseEncryptionData, LicenseHeader, PreambleType, ServerLicenseError, BLOB_LENGTH_SIZE,
-    BLOB_TYPE_SIZE, MAC_SIZE, UTF16_NULL_TERMINATOR_SIZE, UTF8_NULL_TERMINATOR_SIZE,
+    BlobHeader, BlobType, LicenseEncryptionData, LicenseHeader, PreambleType, ServerLicenseError,
+    BLOB_LENGTH_SIZE, BLOB_TYPE_SIZE, MAC_SIZE, UTF16_NULL_TERMINATOR_SIZE,
+    UTF8_NULL_TERMINATOR_SIZE,
 };
 use crate::crypto::rc4::Rc4;
 use crate::utils;
@@ -66,10 +67,15 @@ impl ServerUpgradeLicense {
         })
     }
 
-    pub fn verify_server_license(&self, encryption_data: &LicenseEncryptionData) -> Result<(), ServerLicenseError> {
+    pub fn verify_server_license(
+        &self,
+        encryption_data: &LicenseEncryptionData,
+    ) -> Result<(), ServerLicenseError> {
         let decrypted_license_info = self.decrypted_license_info(encryption_data);
-        let mac_data =
-            super::compute_mac_data(encryption_data.mac_salt_key.as_slice(), decrypted_license_info.as_ref())?;
+        let mac_data = super::compute_mac_data(
+            encryption_data.mac_salt_key.as_slice(),
+            decrypted_license_info.as_ref(),
+        )?;
 
         if mac_data != self.mac_data {
             return Err(ServerLicenseError::InvalidMacData);
@@ -78,7 +84,10 @@ impl ServerUpgradeLicense {
         Ok(())
     }
 
-    pub fn new_license_info(&self, encryption_data: &LicenseEncryptionData) -> DecodeResult<LicenseInformation> {
+    pub fn new_license_info(
+        &self,
+        encryption_data: &LicenseEncryptionData,
+    ) -> DecodeResult<LicenseInformation> {
         let data = self.decrypted_license_info(encryption_data);
         LicenseInformation::decode(&mut ReadCursor::new(&data))
     }
@@ -93,7 +102,11 @@ impl ServerUpgradeLicense {
     }
 
     pub fn size(&self) -> usize {
-        self.license_header.size() + BLOB_LENGTH_SIZE + BLOB_TYPE_SIZE + self.encrypted_license_info.len() + MAC_SIZE
+        self.license_header.size()
+            + BLOB_LENGTH_SIZE
+            + BLOB_TYPE_SIZE
+            + self.encrypted_license_info.len()
+            + MAC_SIZE
     }
 }
 
@@ -118,7 +131,10 @@ impl Encode for LicenseInformation {
 
         dst.write_u32(self.version);
 
-        dst.write_u32(cast_length!("scopeLen", self.scope.len() + UTF8_NULL_TERMINATOR_SIZE)?);
+        dst.write_u32(cast_length!(
+            "scopeLen",
+            self.scope.len() + UTF8_NULL_TERMINATOR_SIZE
+        )?);
         utils::write_string_to_cursor(dst, &self.scope, CharacterSet::Ansi, true)?;
 
         dst.write_u32(cast_length!(
@@ -166,11 +182,16 @@ impl<'de> Decode<'de> for LicenseInformation {
 
         let company_name_len: usize = cast_length!("companyLen", src.read_u32())?;
         ensure_size!(in: src, size: company_name_len);
-        let company_name = utils::decode_string(src.read_slice(company_name_len), CharacterSet::Unicode, true)?;
+        let company_name = utils::decode_string(
+            src.read_slice(company_name_len),
+            CharacterSet::Unicode,
+            true,
+        )?;
 
         let product_id_len: usize = cast_length!("productIdLen", src.read_u32())?;
         ensure_size!(in: src, size: product_id_len);
-        let product_id = utils::decode_string(src.read_slice(product_id_len), CharacterSet::Unicode, true)?;
+        let product_id =
+            utils::decode_string(src.read_slice(product_id_len), CharacterSet::Unicode, true)?;
 
         let license_info_len = cast_length!("licenseInfoLen", src.read_u32())?;
         ensure_size!(in: src, size: license_info_len);

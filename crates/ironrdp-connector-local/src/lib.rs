@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 
 mod macros;
 
@@ -21,13 +23,21 @@ use ironrdp_core::{encode_buf, encode_vec, Encode, WriteBuf};
 use ironrdp_pdu::nego::NegoRequestData;
 use ironrdp_pdu::rdp::capability_sets::{self, BitmapCodecs};
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use ironrdp_pdu::x224::X224;
-use ironrdp_pdu::{gcc, x224, PduHint};
+use ironrdp_pdu::x224::{X224, X224Data};
+use ironrdp_pdu::PduHint;
+use ironrdp_pdu::gcc::{
+    self, ClientClusterData, ClientMessageChannelData, MultiTransportChannelData,
+    MultiTransportFlags, RedirectionFlags, RedirectionVersion,
+};
 pub use sspi;
 
 pub use self::channel_connection::{ChannelConnectionSequence, ChannelConnectionState};
-pub use self::connection::{encode_send_data_request, ClientConnector, ClientConnectorState, ConnectionResult};
-pub use self::connection_finalization::{ConnectionFinalizationSequence, ConnectionFinalizationState};
+pub use self::connection::{
+    encode_send_data_request, ClientConnector, ClientConnectorState, ConnectionResult,
+};
+pub use self::connection_finalization::{
+    ConnectionFinalizationSequence, ConnectionFinalizationState,
+};
 pub use self::license_exchange::{LicenseExchangeSequence, LicenseExchangeState};
 pub use self::server_name::ServerName;
 pub use crate::license_exchange::LicenseCache;
@@ -56,7 +66,10 @@ impl fmt::Display for NegotiationFailure {
 
         match self.0 {
             FailureCode::SSL_REQUIRED_BY_SERVER => {
-                write!(f, "server requires Enhanced RDP Security with TLS or CredSSP")
+                write!(
+                    f,
+                    "server requires Enhanced RDP Security with TLS or CredSSP"
+                )
             }
             FailureCode::SSL_NOT_ALLOWED_BY_SERVER => {
                 write!(f, "server only supports Standard RDP Security")
@@ -76,7 +89,11 @@ impl fmt::Display for NegotiationFailure {
                     "server requires Enhanced RDP Security with TLS and client certificate"
                 )
             }
-            _ => write!(f, "unknown negotiation failure (code: 0x{:08x})", u32::from(self.0)),
+            _ => write!(
+                f,
+                "unknown negotiation failure (code: 0x{:08x})",
+                u32::from(self.0)
+            ),
         }
     }
 }
@@ -234,7 +251,7 @@ pub struct Config {
 
     // For multitransport (UDP) support - correlation ID must match between TCP and UDP
     pub correlation_id: Option<[u8; 16]>,
-    
+
     // FIXME(@CBenoit): these are client-only options, not part of the connector.
     pub enable_server_pointer: bool,
     pub pointer_software_rendering: bool,
@@ -428,11 +445,85 @@ where
 {
     let x224_msg_buf = encode_vec(x224_msg).map_err(ConnectorError::encode)?;
 
-    let pdu = x224::X224Data {
+    let pdu = X224Data {
         data: std::borrow::Cow::Owned(x224_msg_buf),
     };
 
     let written = encode_buf(&X224(pdu), buf).map_err(ConnectorError::encode)?;
 
     Ok(written)
+}
+
+pub fn create_client_data(
+    config: &Config,
+    _encryption_methods: u32,
+    static_channels: Vec<gcc::ChannelDef>,
+) -> gcc::ClientGccBlocks {
+    use ironrdp_pdu::gcc::{
+        ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags, ClientGccBlocks,
+        ClientNetworkData, ClientSecurityData, ColorDepth, ConnectionType, EncryptionMethod,
+        HighColorDepth, RdpVersion, SecureAccessSequence, SupportedColorDepths,
+    };
+
+    let client_core_data = ClientCoreData {
+        version: RdpVersion::V11_24H2,
+        desktop_width: config.desktop_size.width,
+        desktop_height: config.desktop_size.height,
+        color_depth: ColorDepth::Bpp8,
+        sec_access_sequence: SecureAccessSequence::Del,
+        keyboard_layout: config.keyboard_layout,
+        client_build: config.client_build,
+        client_name: config.client_name.clone(),
+        keyboard_type: config.keyboard_type,
+        keyboard_subtype: config.keyboard_subtype,
+        keyboard_functional_keys_count: config.keyboard_functional_keys_count,
+        ime_file_name: config.ime_file_name.clone(),
+        optional_data: ClientCoreOptionalData {
+            post_beta2_color_depth: Some(ColorDepth::Bpp8),
+            client_product_id: Some(1),
+            serial_number: Some(0),
+            high_color_depth: Some(HighColorDepth::Bpp24),
+            supported_color_depths: Some(
+                SupportedColorDepths::BPP24 | SupportedColorDepths::BPP32,
+            ),
+            early_capability_flags: Some(
+                ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
+                    | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU,
+            ),
+            connection_type: Some(ConnectionType::Autodetect),
+            server_selected_protocol: None,
+            desktop_scale_factor: Some(config.desktop_scale_factor),
+            device_scale_factor: None,
+            dig_product_id: Some(config.dig_product_id.clone()),
+            desktop_physical_width: None,
+            desktop_physical_height: None,
+            desktop_orientation: None,
+        },
+    };
+
+    let client_data = ClientGccBlocks {
+        core: client_core_data,
+        security: ClientSecurityData {
+            encryption_methods: EncryptionMethod::empty(),
+            ext_encryption_methods: 0,
+        },
+        network: Some(ClientNetworkData {
+            channels: static_channels,
+        }),
+        cluster: Some(ClientClusterData {
+            flags: RedirectionFlags::REDIRECTION_SUPPORTED,
+            redirection_version: RedirectionVersion::V6,
+            redirected_session_id: 0,
+        }),
+        monitor: None,
+        message_channel: Some(ClientMessageChannelData),
+        multi_transport_channel: Some(MultiTransportChannelData {
+            flags: MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
+                | MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
+                | MultiTransportFlags::MULTITRANSPORT_TYPE_FLAGS_REQUEST,
+        }),
+        monitor_extended: None,
+    };
+
+    client_data
 }

@@ -104,14 +104,23 @@ pub(crate) fn read_sequence_tag(stream: &mut ReadCursor<'_>) -> DecodeResult<u16
     ensure_size!(in: stream, size: 1);
     let identifier = stream.read_u8();
 
-    if identifier != Class::Universal.as_u8() | Pc::Construct.as_u8() | (TAG_MASK & Tag::Sequence.as_u8()) {
-        Err(invalid_field_err!("identifier", "invalid sequence tag identifier"))
+    if identifier
+        != Class::Universal.as_u8() | Pc::Construct.as_u8() | (TAG_MASK & Tag::Sequence.as_u8())
+    {
+        Err(invalid_field_err!(
+            "identifier",
+            "invalid sequence tag identifier"
+        ))
     } else {
         read_length(stream)
     }
 }
 
-pub(crate) fn write_application_tag(stream: &mut WriteCursor<'_>, tagnum: u8, length: u16) -> EncodeResult<usize> {
+pub(crate) fn write_application_tag(
+    stream: &mut WriteCursor<'_>,
+    tagnum: u8,
+    length: u16,
+) -> EncodeResult<usize> {
     ensure_size!(in: stream, size: sizeof_application_tag(tagnum, length));
 
     let taglen = if tagnum > 0x1E {
@@ -132,20 +141,33 @@ pub(crate) fn read_application_tag(stream: &mut ReadCursor<'_>, tagnum: u8) -> D
 
     if tagnum > 0x1E {
         if identifier != Class::Application.as_u8() | Pc::Construct.as_u8() | TAG_MASK {
-            return Err(invalid_field_err!("identifier", "invalid application tag identifier"));
+            return Err(invalid_field_err!(
+                "identifier",
+                "invalid application tag identifier"
+            ));
         }
         ensure_size!(in: stream, size: 1);
         if stream.read_u8() != tagnum {
-            return Err(invalid_field_err!("tagnum", "invalid application tag identifier"));
+            return Err(invalid_field_err!(
+                "tagnum",
+                "invalid application tag identifier"
+            ));
         }
-    } else if identifier != Class::Application.as_u8() | Pc::Construct.as_u8() | (TAG_MASK & tagnum) {
-        return Err(invalid_field_err!("identifier", "invalid application tag identifier"));
+    } else if identifier != Class::Application.as_u8() | Pc::Construct.as_u8() | (TAG_MASK & tagnum)
+    {
+        return Err(invalid_field_err!(
+            "identifier",
+            "invalid application tag identifier"
+        ));
     }
 
     read_length(stream)
 }
 
-pub(crate) fn write_enumerated(stream: &mut WriteCursor<'_>, enumerated: u8) -> EncodeResult<usize> {
+pub(crate) fn write_enumerated(
+    stream: &mut WriteCursor<'_>,
+    enumerated: u8,
+) -> EncodeResult<usize> {
     let mut size = 0;
     size += write_universal_tag(stream, Tag::Enumerated, Pc::Primitive)?;
     size += write_length(stream, 1)?;
@@ -179,21 +201,30 @@ pub(crate) fn write_integer(stream: &mut WriteCursor<'_>, value: u32) -> EncodeR
     if value < 0x0000_0080 {
         write_length(stream, 1)?;
         ensure_size!(in: stream, size: 1);
-        stream.write_u8(u8::try_from(value).expect("value is guaranteed to fit into u8 due to the prior check"));
+        stream.write_u8(
+            u8::try_from(value).expect("value is guaranteed to fit into u8 due to the prior check"),
+        );
 
         Ok(3)
     } else if value < 0x0000_8000 {
         write_length(stream, 2)?;
         ensure_size!(in: stream, size: 2);
-        stream.write_u16_be(u16::try_from(value).expect("value is guaranteed to fit into u16 due to the prior check"));
+        stream.write_u16_be(
+            u16::try_from(value)
+                .expect("value is guaranteed to fit into u16 due to the prior check"),
+        );
 
         Ok(4)
     } else if value < 0x0080_0000 {
         write_length(stream, 3)?;
         ensure_size!(in: stream, size: 3);
-        stream.write_u8(u8::try_from(value >> 16).expect("value is guaranteed to fit into u8 due to the prior check"));
+        stream.write_u8(
+            u8::try_from(value >> 16)
+                .expect("value is guaranteed to fit into u8 due to the prior check"),
+        );
         stream.write_u16_be(
-            u16::try_from(value & 0xFFFF).expect("masking with 0xFFFF ensures that the value fits into u16"),
+            u16::try_from(value & 0xFFFF)
+                .expect("masking with 0xFFFF ensures that the value fits into u16"),
         );
 
         Ok(5)
@@ -257,14 +288,20 @@ pub(crate) fn read_bool(stream: &mut ReadCursor<'_>) -> DecodeResult<bool> {
     Ok(stream.read_u8() != 0)
 }
 
-pub(crate) fn write_octet_string(stream: &mut WriteCursor<'_>, value: &[u8]) -> EncodeResult<usize> {
+pub(crate) fn write_octet_string(
+    stream: &mut WriteCursor<'_>,
+    value: &[u8],
+) -> EncodeResult<usize> {
     let tag_size = write_octet_string_tag(stream, cast_length!("len", value.len())?)?;
     ensure_size!(in: stream, size: value.len());
     stream.write_slice(value);
     Ok(tag_size + value.len())
 }
 
-pub(crate) fn write_octet_string_tag(stream: &mut WriteCursor<'_>, length: u16) -> EncodeResult<usize> {
+pub(crate) fn write_octet_string_tag(
+    stream: &mut WriteCursor<'_>,
+    length: u16,
+) -> EncodeResult<usize> {
     write_universal_tag(stream, Tag::OctetString, Pc::Primitive)?;
     write_length(stream, length).map(|length| length + 1)
 }
@@ -298,7 +335,10 @@ fn read_universal_tag(stream: &mut ReadCursor<'_>, tag: Tag, pc: Pc) -> DecodeRe
     let identifier = stream.read_u8();
 
     if identifier != Class::Universal.as_u8() | pc.as_u8() | (TAG_MASK & tag.as_u8()) {
-        Err(invalid_field_err!("identifier", "invalid universal tag identifier"))
+        Err(invalid_field_err!(
+            "identifier",
+            "invalid universal tag identifier"
+        ))
     } else {
         Ok(())
     }
@@ -314,11 +354,17 @@ fn write_length(stream: &mut WriteCursor<'_>, length: u16) -> EncodeResult<usize
         Ok(3)
     } else if length > 0x7F {
         stream.write_u8(0x80 ^ 0x1);
-        stream.write_u8(u8::try_from(length).expect("length is guaranteed to fit into u8 due to the prior check"));
+        stream.write_u8(
+            u8::try_from(length)
+                .expect("length is guaranteed to fit into u8 due to the prior check"),
+        );
 
         Ok(2)
     } else {
-        stream.write_u8(u8::try_from(length).expect("length is guaranteed to fit into u8 due to the prior check"));
+        stream.write_u8(
+            u8::try_from(length)
+                .expect("length is guaranteed to fit into u8 due to the prior check"),
+        );
 
         Ok(1)
     }
@@ -719,7 +765,10 @@ mod tests {
     fn write_universal_tag_primitive_integer_is_correct() {
         let mut buf = [0x0];
         let mut cur = WriteCursor::new(&mut buf);
-        assert_eq!(write_universal_tag(&mut cur, Tag::Integer, Pc::Primitive).unwrap(), 1);
+        assert_eq!(
+            write_universal_tag(&mut cur, Tag::Integer, Pc::Primitive).unwrap(),
+            1
+        );
         assert_eq!(buf, [0x02]);
     }
 

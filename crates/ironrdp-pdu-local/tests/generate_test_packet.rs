@@ -1,9 +1,9 @@
+use ironrdp_core::encode_vec;
 /// This test generates a binary packet file that can be analyzed with Wireshark/tshark
 /// to verify the ClientInfo PDU is correctly formed according to the RDP specification.
 ///
 /// Run with: cargo test --test generate_test_packet -- --nocapture
 /// Then analyze with: tshark -r /tmp/clientinfo_test.bin -V
-
 use ironrdp_pdu::rdp::client_info::{
     AddressFamily, ClientInfo, ClientInfoFlags, CompressionType, Credentials, ExtendedClientInfo,
     ExtendedClientOptionalInfo, PerformanceFlags, TimezoneInfo,
@@ -11,7 +11,6 @@ use ironrdp_pdu::rdp::client_info::{
 use ironrdp_pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
 use ironrdp_pdu::rdp::ClientInfoPdu;
 use ironrdp_pdu::{mcs, x224::X224};
-use ironrdp_core::encode_vec;
 use std::fs::File;
 use std::io::Write;
 
@@ -79,8 +78,13 @@ fn generate_clientinfo_packet_for_wireshark() {
     // Write to file
     let output_path = "/tmp/clientinfo_raw.bin";
     let mut file = File::create(output_path).expect("Failed to create file");
-    file.write_all(&client_info_bytes).expect("Failed to write file");
-    println!("\n✅ Wrote {} bytes to {}", client_info_bytes.len(), output_path);
+    file.write_all(&client_info_bytes)
+        .expect("Failed to write file");
+    println!(
+        "\n✅ Wrote {} bytes to {}",
+        client_info_bytes.len(),
+        output_path
+    );
 
     // Now wrap it in MCS Send Data Request
     let user_data = client_info_bytes;
@@ -106,7 +110,7 @@ fn generate_clientinfo_packet_for_wireshark() {
     println!("\nTo compare hex dumps:");
     println!("  hexdump -C {}", output_path);
     println!("  hexdump -C {}", mcs_output_path);
-    
+
     println!("\n=== VERIFICATION ===");
     println!("Expected length field values:");
     println!("  cbDomain:        0x0000 (0 bytes)");
@@ -119,7 +123,7 @@ fn generate_clientinfo_packet_for_wireshark() {
 #[test]
 fn compare_with_malformed_packet() {
     println!("\n=== ORIGINAL MALFORMED PACKET (from hex dump) ===");
-    
+
     // The malformed packet from your trace (just the ClientInfo portion)
     let malformed_hex = "
 40 00 00 00 00 00 00 00 00 00 00 7b 01 4b 00 00 00 0a 00 0e 00
@@ -134,16 +138,25 @@ fn compare_with_malformed_packet() {
         .collect();
 
     println!("Malformed packet size: {} bytes", malformed_bytes.len());
-    
+
     // Parse the bad length fields
     let bad_cb_domain = u16::from_le_bytes([malformed_bytes[12], malformed_bytes[13]]);
     let bad_cb_username = u16::from_le_bytes([malformed_bytes[14], malformed_bytes[15]]);
     let bad_cb_password = u16::from_le_bytes([malformed_bytes[16], malformed_bytes[17]]);
 
     println!("\nMALFORMED packet length fields:");
-    println!("  cbDomain:     0x{:04x} ({} bytes) ❌ WRONG! Should be 0", bad_cb_domain, bad_cb_domain);
-    println!("  cbUserName:   0x{:04x} ({} bytes) ❌ WRONG! Should be 10", bad_cb_username, bad_cb_username);
-    println!("  cbPassword:   0x{:04x} ({} bytes) ❌ WRONG! Should be 14", bad_cb_password, bad_cb_password);
+    println!(
+        "  cbDomain:     0x{:04x} ({} bytes) ❌ WRONG! Should be 0",
+        bad_cb_domain, bad_cb_domain
+    );
+    println!(
+        "  cbUserName:   0x{:04x} ({} bytes) ❌ WRONG! Should be 10",
+        bad_cb_username, bad_cb_username
+    );
+    println!(
+        "  cbPassword:   0x{:04x} ({} bytes) ❌ WRONG! Should be 14",
+        bad_cb_password, bad_cb_password
+    );
 
     // Now generate the correct packet
     let correct_pdu = ClientInfoPdu {
@@ -179,7 +192,7 @@ fn compare_with_malformed_packet() {
     // ClientInfoPdu structure:
     // 0-3: Security header
     // 4-7: codePage (4 bytes)
-    // 8-11: flags (4 bytes)  
+    // 8-11: flags (4 bytes)
     // 12-13: cbDomain
     // 14-15: cbUserName
     // 16-17: cbPassword
@@ -188,9 +201,18 @@ fn compare_with_malformed_packet() {
     let correct_cb_password = u16::from_le_bytes([correct_bytes[16], correct_bytes[17]]);
 
     println!("\nCORRECTED packet length fields:");
-    println!("  cbDomain:     0x{:04x} ({} bytes) ✅ CORRECT!", correct_cb_domain, correct_cb_domain);
-    println!("  cbUserName:   0x{:04x} ({} bytes) ✅ CORRECT!", correct_cb_username, correct_cb_username);
-    println!("  cbPassword:   0x{:04x} ({} bytes) ✅ CORRECT!", correct_cb_password, correct_cb_password);
+    println!(
+        "  cbDomain:     0x{:04x} ({} bytes) ✅ CORRECT!",
+        correct_cb_domain, correct_cb_domain
+    );
+    println!(
+        "  cbUserName:   0x{:04x} ({} bytes) ✅ CORRECT!",
+        correct_cb_username, correct_cb_username
+    );
+    println!(
+        "  cbPassword:   0x{:04x} ({} bytes) ✅ CORRECT!",
+        correct_cb_password, correct_cb_password
+    );
 
     assert_eq!(correct_cb_domain, 0, "Domain length should be 0");
     assert_eq!(correct_cb_username, 10, "Username length should be 10");

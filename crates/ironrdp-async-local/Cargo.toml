@@ -12,7 +12,7 @@ test = false
 
 [dependencies]
 ironrdp-connector = { path = "../ironrdp-connector-local", version = "0.7" } # public
-ironrdp-core = "0.1" # public
+ironrdp-core = { path = "../ironrdp-core-local", version = "0.1.5" } # public
 ironrdp-pdu = { path = "../ironrdp-pdu-local", version = "0.6" } # public
 tracing = { version = "0.1", features = ["log"] }
 bytes = "1" # public

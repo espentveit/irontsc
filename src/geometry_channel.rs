@@ -5,7 +5,7 @@
 
 use ironrdp_core::AsAny;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
-use ironrdp_geometry::{MappedGeometry, GEOMETRY_CHANNEL_NAME};
+use ironrdp_geometry::{GEOMETRY_CHANNEL_NAME, MappedGeometry};
 use ironrdp_pdu::PduResult;
 use tracing::{info, warn};
 

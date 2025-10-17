@@ -1,14 +1,17 @@
 use std::io;
 
 use ironrdp_core::{
-    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 use thiserror::Error;
 
 use crate::input::InputEventError;
 use crate::rdp::capability_sets::CapabilitySetsError;
 use crate::rdp::client_info::{ClientInfo, ClientInfoError};
-use crate::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags, ShareControlPduType, ShareDataPduType};
+use crate::rdp::headers::{
+    BasicSecurityHeader, BasicSecurityHeaderFlags, ShareControlPduType, ShareDataPduType,
+};
 use crate::rdp::server_license::ServerLicenseError;
 use crate::PduError;
 
@@ -33,7 +36,8 @@ pub struct ClientInfoPdu {
 impl ClientInfoPdu {
     const NAME: &'static str = "ClientInfoPDU";
 
-    const FIXED_PART_SIZE: usize = BasicSecurityHeader::FIXED_PART_SIZE + ClientInfo::FIXED_PART_SIZE;
+    const FIXED_PART_SIZE: usize =
+        BasicSecurityHeader::FIXED_PART_SIZE + ClientInfo::FIXED_PART_SIZE;
 }
 
 impl Encode for ClientInfoPdu {
@@ -60,8 +64,14 @@ impl<'de> Decode<'de> for ClientInfoPdu {
         ensure_fixed_part_size!(in: src);
 
         let security_header = BasicSecurityHeader::decode(src)?;
-        if !security_header.flags.contains(BasicSecurityHeaderFlags::INFO_PKT) {
-            return Err(invalid_field_err!("securityHeader", "got invalid security header"));
+        if !security_header
+            .flags
+            .contains(BasicSecurityHeaderFlags::INFO_PKT)
+        {
+            return Err(invalid_field_err!(
+                "securityHeader",
+                "got invalid security header"
+            ));
         }
 
         let client_info = ClientInfo::decode(src)?;

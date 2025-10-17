@@ -2,19 +2,22 @@ use std::io;
 
 use byteorder::{LittleEndian, WriteBytesExt as _};
 use ironrdp_core::{
-    ensure_size, invalid_field_err, Decode as _, DecodeResult, Encode as _, EncodeResult, ReadCursor, WriteCursor,
+    ensure_size, invalid_field_err, Decode as _, DecodeResult, Encode as _, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 use md5::Digest as _;
 
 use crate::crypto::rc4::Rc4;
 use crate::crypto::rsa::encrypt_with_public_key;
 use crate::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
-use crate::rdp::server_license::client_new_license_request::{compute_master_secret, compute_session_key_blob};
+use crate::rdp::server_license::client_new_license_request::{
+    compute_master_secret, compute_session_key_blob,
+};
 use crate::rdp::server_license::client_platform_challenge_response::CLIENT_HARDWARE_IDENTIFICATION_SIZE;
 use crate::rdp::server_license::{
-    compute_mac_data, BlobHeader, BlobType, LicenseEncryptionData, LicenseHeader, PreambleFlags, PreambleType,
-    PreambleVersion, ServerLicenseError, ServerLicenseRequest, KEY_EXCHANGE_ALGORITHM_RSA, MAC_SIZE, PLATFORM_ID,
-    PREAMBLE_SIZE, RANDOM_NUMBER_SIZE,
+    compute_mac_data, BlobHeader, BlobType, LicenseEncryptionData, LicenseHeader, PreambleFlags,
+    PreambleType, PreambleVersion, ServerLicenseError, ServerLicenseRequest,
+    KEY_EXCHANGE_ALGORITHM_RSA, MAC_SIZE, PLATFORM_ID, PREAMBLE_SIZE, RANDOM_NUMBER_SIZE,
 };
 
 const LICENSE_INFO_STATIC_FIELDS_SIZE: usize = 20;
@@ -143,12 +146,18 @@ impl ClientLicenseInfo {
 
     pub fn decode(license_header: LicenseHeader, src: &mut ReadCursor<'_>) -> DecodeResult<Self> {
         if license_header.preamble_message_type != PreambleType::LicenseInfo {
-            return Err(invalid_field_err!("preambleMessageType", "unexpected preamble type"));
+            return Err(invalid_field_err!(
+                "preambleMessageType",
+                "unexpected preamble type"
+            ));
         }
 
         let key_exchange_algorithm = src.read_u32();
         if key_exchange_algorithm != KEY_EXCHANGE_ALGORITHM_RSA {
-            return Err(invalid_field_err!("keyExchangeAlgo", "invalid key exchange algorithm"));
+            return Err(invalid_field_err!(
+                "keyExchangeAlgo",
+                "invalid key exchange algorithm"
+            ));
         }
 
         // We can ignore platform ID

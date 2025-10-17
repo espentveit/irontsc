@@ -1,8 +1,8 @@
 use std::io;
 
 use ironrdp_core::{
-    cast_length, decode, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeErrorKind, DecodeResult,
-    Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, decode, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode,
+    DecodeErrorKind, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
@@ -21,19 +21,26 @@ mod multi_transport_channel_data;
 mod network_data;
 mod security_data;
 
-pub use self::cluster_data::{ClientClusterData, ClusterDataError, RedirectionFlags, RedirectionVersion};
+pub use self::cluster_data::{
+    ClientClusterData, ClusterDataError, RedirectionFlags, RedirectionVersion,
+};
 pub use self::conference_create::{ConferenceCreateRequest, ConferenceCreateResponse};
 pub use self::core_data::client::{
-    ClientColorDepth, ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags, ColorDepth, ConnectionType,
-    HighColorDepth, KeyboardType, SecureAccessSequence, SupportedColorDepths, IME_FILE_NAME_SIZE,
+    ClientColorDepth, ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags,
+    ColorDepth, ConnectionType, HighColorDepth, KeyboardType, SecureAccessSequence,
+    SupportedColorDepths, IME_FILE_NAME_SIZE,
 };
-pub use self::core_data::server::{ServerCoreData, ServerCoreOptionalData, ServerEarlyCapabilityFlags};
+pub use self::core_data::server::{
+    ServerCoreData, ServerCoreOptionalData, ServerEarlyCapabilityFlags,
+};
 pub use self::core_data::{CoreDataError, RdpVersion};
 pub use self::message_channel_data::{ClientMessageChannelData, ServerMessageChannelData};
 pub use self::monitor_data::{
     ClientMonitorData, Monitor, MonitorFlags, MONITOR_COUNT_SIZE, MONITOR_FLAGS_SIZE, MONITOR_SIZE,
 };
-pub use self::monitor_extended_data::{ClientMonitorExtendedData, ExtendedMonitorInfo, MonitorOrientation};
+pub use self::monitor_extended_data::{
+    ClientMonitorExtendedData, ExtendedMonitorInfo, MonitorOrientation,
+};
 pub use self::multi_transport_channel_data::{MultiTransportChannelData, MultiTransportFlags};
 pub use self::network_data::{
     ChannelDef, ChannelName, ChannelOptions, ClientNetworkData, NetworkDataError, ServerNetworkData,
@@ -78,7 +85,9 @@ impl ClientGccBlocks {
     const NAME: &'static str = "ClientGccBlocks";
 
     pub fn channel_names(&self) -> Option<Vec<ChannelDef>> {
-        self.network.as_ref().map(|network| network.channels.clone())
+        self.network
+            .as_ref()
+            .map(|network| network.channels.clone())
     }
 }
 
@@ -87,7 +96,12 @@ impl Encode for ClientGccBlocks {
         ensure_size!(in: dst, size: self.size());
 
         eprintln!("🔧 ClientGccBlocks::encode - START");
-        eprintln!("   multi_transport_channel: {:?}", self.multi_transport_channel.as_ref().map(|mt| mt.flags.bits()));
+        eprintln!(
+            "   multi_transport_channel: {:?}",
+            self.multi_transport_channel
+                .as_ref()
+                .map(|mt| mt.flags.bits())
+        );
 
         UserDataHeader::encode(dst, ClientGccType::CoreData.as_u16(), &self.core)?;
         UserDataHeader::encode(dst, ClientGccType::SecurityData.as_u16(), &self.security)?;
@@ -102,12 +116,22 @@ impl Encode for ClientGccBlocks {
             UserDataHeader::encode(dst, ClientGccType::MonitorData.as_u16(), monitor)?;
         }
         if let Some(ref message_channel) = self.message_channel {
-            UserDataHeader::encode(dst, ClientGccType::MessageChannelData.as_u16(), message_channel)?;
+            UserDataHeader::encode(
+                dst,
+                ClientGccType::MessageChannelData.as_u16(),
+                message_channel,
+            )?;
         }
         if let Some(ref multi_transport_channel) = self.multi_transport_channel {
             eprintln!("   ✅ ENCODING MultiTransportChannelData");
-            eprintln!("      Header Type: 0x{:04X}", ClientGccType::MultiTransportChannelData.as_u16());
-            eprintln!("      Flags: 0x{:08X}", multi_transport_channel.flags.bits());
+            eprintln!(
+                "      Header Type: 0x{:04X}",
+                ClientGccType::MultiTransportChannelData.as_u16()
+            );
+            eprintln!(
+                "      Flags: 0x{:08X}",
+                multi_transport_channel.flags.bits()
+            );
             eprintln!("      Size: {} bytes", multi_transport_channel.size());
             UserDataHeader::encode(
                 dst,
@@ -119,10 +143,17 @@ impl Encode for ClientGccBlocks {
             eprintln!("   ❌ MultiTransportChannelData is NONE!");
         }
         if let Some(ref monitor_extended) = self.monitor_extended {
-            UserDataHeader::encode(dst, ClientGccType::MonitorExtendedData.as_u16(), monitor_extended)?;
+            UserDataHeader::encode(
+                dst,
+                ClientGccType::MonitorExtendedData.as_u16(),
+                monitor_extended,
+            )?;
         }
 
-        eprintln!("🔧 ClientGccBlocks::encode - COMPLETE (total size: {})", self.size());
+        eprintln!(
+            "🔧 ClientGccBlocks::encode - COMPLETE (total size: {})",
+            self.size()
+        );
         Ok(())
     }
 
@@ -178,13 +209,16 @@ impl<'de> Decode<'de> for ClientGccBlocks {
                 ClientGccType::MonitorData => monitor = Some(decode(cur)?),
                 ClientGccType::MessageChannelData => message_channel = Some(decode(cur)?),
                 ClientGccType::MonitorExtendedData => monitor_extended = Some(decode(cur)?),
-                ClientGccType::MultiTransportChannelData => multi_transport_channel = Some(decode(cur)?),
+                ClientGccType::MultiTransportChannelData => {
+                    multi_transport_channel = Some(decode(cur)?)
+                }
             };
         }
 
         Ok(Self {
             core: core.ok_or_else(|| invalid_field_err!("core", "required GCC core is absent"))?,
-            security: security.ok_or_else(|| invalid_field_err!("security", "required GCC security is absent"))?,
+            security: security
+                .ok_or_else(|| invalid_field_err!("security", "required GCC security is absent"))?,
             network,
             cluster,
             monitor,
@@ -222,7 +256,11 @@ impl Encode for ServerGccBlocks {
         UserDataHeader::encode(dst, ServerGccType::SecurityData.as_u16(), &self.security)?;
 
         if let Some(ref message_channel) = self.message_channel {
-            UserDataHeader::encode(dst, ServerGccType::MessageChannelData.as_u16(), message_channel)?;
+            UserDataHeader::encode(
+                dst,
+                ServerGccType::MessageChannelData.as_u16(),
+                message_channel,
+            )?;
         }
         if let Some(ref multi_transport_channel) = self.multi_transport_channel {
             UserDataHeader::encode(
@@ -240,7 +278,10 @@ impl Encode for ServerGccBlocks {
     }
 
     fn size(&self) -> usize {
-        let mut size = self.core.size() + self.network.size() + self.security.size() + USER_DATA_HEADER_SIZE * 3;
+        let mut size = self.core.size()
+            + self.network.size()
+            + self.security.size()
+            + USER_DATA_HEADER_SIZE * 3;
 
         if let Some(ref message_channel) = self.message_channel {
             size += message_channel.size() + USER_DATA_HEADER_SIZE;
@@ -269,14 +310,18 @@ impl<'de> Decode<'de> for ServerGccBlocks {
                 ServerGccType::NetworkData => network = Some(decode(cur)?),
                 ServerGccType::SecurityData => security = Some(decode(cur)?),
                 ServerGccType::MessageChannelData => message_channel = Some(decode(cur)?),
-                ServerGccType::MultiTransportChannelData => multi_transport_channel = Some(decode(cur)?),
+                ServerGccType::MultiTransportChannelData => {
+                    multi_transport_channel = Some(decode(cur)?)
+                }
             };
         }
 
         Ok(Self {
             core: core.ok_or_else(|| invalid_field_err!("core", "required GCC core is absent"))?,
-            network: network.ok_or_else(|| invalid_field_err!("network", "required GCC network is absent"))?,
-            security: security.ok_or_else(|| invalid_field_err!("security", "required GCC security is absent"))?,
+            network: network
+                .ok_or_else(|| invalid_field_err!("network", "required GCC network is absent"))?,
+            security: security
+                .ok_or_else(|| invalid_field_err!("security", "required GCC security is absent"))?,
             message_channel,
             multi_transport_channel,
         })
@@ -340,7 +385,10 @@ impl UserDataHeader {
         ensure_fixed_part_size!(in: dst);
 
         dst.write_u16(block_type.into());
-        dst.write_u16(cast_length!("blockLen", block.size() + USER_DATA_HEADER_SIZE)?);
+        dst.write_u16(cast_length!(
+            "blockLen",
+            block.size() + USER_DATA_HEADER_SIZE
+        )?);
         block.encode(dst)?;
 
         Ok(())
@@ -352,12 +400,15 @@ impl UserDataHeader {
     {
         ensure_fixed_part_size!(in: src);
 
-        let block_type =
-            T::from_u16(src.read_u16()).ok_or_else(|| invalid_field_err!("blockType", "invalid GCC type"))?;
+        let block_type = T::from_u16(src.read_u16())
+            .ok_or_else(|| invalid_field_err!("blockType", "invalid GCC type"))?;
         let block_length: usize = cast_length!("blockLen", src.read_u16())?;
 
         if block_length <= USER_DATA_HEADER_SIZE {
-            return Err(invalid_field_err!("blockLen", "invalid UserDataHeader length"));
+            return Err(invalid_field_err!(
+                "blockLen",
+                "invalid UserDataHeader length"
+            ));
         }
 
         let len = block_length - USER_DATA_HEADER_SIZE;

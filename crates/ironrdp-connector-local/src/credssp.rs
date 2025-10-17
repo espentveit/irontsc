@@ -9,7 +9,8 @@ use sspi::Username;
 use tracing::debug;
 
 use crate::{
-    custom_err, general_err, ConnectorError, ConnectorErrorKind, ConnectorResult, Credentials, ServerName, Written,
+    custom_err, general_err, ConnectorError, ConnectorErrorKind, ConnectorResult, Credentials,
+    ServerName, Written,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -58,7 +59,8 @@ impl PduHint for CredsspTsRequestHint {
 #[derive(Clone, Copy, Debug)]
 struct CredsspEarlyUserAuthResultHint;
 
-const CREDSSP_EARLY_USER_AUTH_RESULT_HINT: CredsspEarlyUserAuthResultHint = CredsspEarlyUserAuthResultHint;
+const CREDSSP_EARLY_USER_AUTH_RESULT_HINT: CredsspEarlyUserAuthResultHint =
+    CredsspEarlyUserAuthResultHint;
 
 impl PduHint for CredsspEarlyUserAuthResultHint {
     fn find_size(&self, _: &[u8]) -> ironrdp_core::DecodeResult<Option<(bool, usize)>> {
@@ -66,7 +68,8 @@ impl PduHint for CredsspEarlyUserAuthResultHint {
     }
 }
 
-pub type CredsspProcessGenerator<'a> = Generator<'a, NetworkRequest, sspi::Result<Vec<u8>>, sspi::Result<ClientState>>;
+pub type CredsspProcessGenerator<'a> =
+    Generator<'a, NetworkRequest, sspi::Result<Vec<u8>>, sspi::Result<ClientState>>;
 
 #[derive(Debug)]
 pub struct CredsspSequence {
@@ -102,7 +105,8 @@ impl CredsspSequence {
     ) -> ConnectorResult<(Self, credssp::TsRequest)> {
         let credentials: sspi::Credentials = match &credentials {
             Credentials::UsernamePassword { username, password } => {
-                let username = Username::new(username, domain).map_err(|e| custom_err!("invalid username", e))?;
+                let username = Username::new(username, domain)
+                    .map_err(|e| custom_err!("invalid username", e))?;
 
                 sspi::AuthIdentity {
                     username,
@@ -175,10 +179,14 @@ impl CredsspSequence {
 
     /// Returns Some(ts_request) when a TS request is received from server,
     /// and None when an early user auth result PDU is received instead.
-    pub fn decode_server_message(&mut self, input: &[u8]) -> ConnectorResult<Option<credssp::TsRequest>> {
+    pub fn decode_server_message(
+        &mut self,
+        input: &[u8],
+    ) -> ConnectorResult<Option<credssp::TsRequest>> {
         match self.state {
             CredsspState::Ongoing => {
-                let message = credssp::TsRequest::from_buffer(input).map_err(|e| custom_err!("TsRequest", e))?;
+                let message = credssp::TsRequest::from_buffer(input)
+                    .map_err(|e| custom_err!("TsRequest", e))?;
                 debug!(?message, "Received");
                 Ok(Some(message))
             }
@@ -193,9 +201,10 @@ impl CredsspSequence {
                         self.state = CredsspState::Finished;
                         Ok(None)
                     }
-                    credssp::EarlyUserAuthResult::AccessDenied => {
-                        Err(ConnectorError::new("CredSSP", ConnectorErrorKind::AccessDenied))
-                    }
+                    credssp::EarlyUserAuthResult::AccessDenied => Err(ConnectorError::new(
+                        "CredSSP",
+                        ConnectorErrorKind::AccessDenied,
+                    )),
                 }
             }
             _ => Err(general_err!(
@@ -204,18 +213,28 @@ impl CredsspSequence {
         }
     }
 
-    pub fn process_ts_request(&mut self, request: credssp::TsRequest) -> CredsspProcessGenerator<'_> {
+    pub fn process_ts_request(
+        &mut self,
+        request: credssp::TsRequest,
+    ) -> CredsspProcessGenerator<'_> {
         self.client.process(request)
     }
 
-    pub fn handle_process_result(&mut self, result: ClientState, output: &mut WriteBuf) -> ConnectorResult<Written> {
+    pub fn handle_process_result(
+        &mut self,
+        result: ClientState,
+        output: &mut WriteBuf,
+    ) -> ConnectorResult<Written> {
         let (size, next_state) = match self.state {
             CredsspState::Ongoing => {
                 let (ts_request_from_client, next_state) = match result {
                     ClientState::ReplyNeeded(ts_request) => (ts_request, CredsspState::Ongoing),
                     ClientState::FinalMessage(ts_request) => (
                         ts_request,
-                        if self.selected_protocol.contains(nego::SecurityProtocol::HYBRID_EX) {
+                        if self
+                            .selected_protocol
+                            .contains(nego::SecurityProtocol::HYBRID_EX)
+                        {
                             CredsspState::EarlyUserAuthResult
                         } else {
                             CredsspState::Finished
@@ -240,7 +259,10 @@ impl CredsspSequence {
 }
 
 fn extract_user_name(cert: &Certificate) -> Option<String> {
-    cert.tbs_certificate.subject.find_common_name().map(ToString::to_string)
+    cert.tbs_certificate
+        .subject
+        .find_common_name()
+        .map(ToString::to_string)
 }
 
 fn extract_user_principal_name(cert: &Certificate) -> Option<String> {
@@ -253,13 +275,18 @@ fn extract_user_principal_name(cert: &Certificate) -> Option<String> {
             _ => vec![],
         })
         .find_map(|name| match name {
-            GeneralName::OtherName(name) if name.type_id.0 == oids::user_principal_name() => Some(name.value),
+            GeneralName::OtherName(name) if name.type_id.0 == oids::user_principal_name() => {
+                Some(name.value)
+            }
             _ => None,
         })
         .and_then(|asn1| picky_asn1_der::from_bytes(&asn1.0 .0).ok())
 }
 
-fn write_credssp_request(ts_request: credssp::TsRequest, output: &mut WriteBuf) -> ConnectorResult<usize> {
+fn write_credssp_request(
+    ts_request: credssp::TsRequest,
+    output: &mut WriteBuf,
+) -> ConnectorResult<usize> {
     let length = usize::from(ts_request.buffer_len());
 
     let unfilled_buffer = output.unfilled_to(length);

@@ -1,6 +1,6 @@
 //! FFmpeg-based H.264 decoder
 
-use crate::{AvcKind, DecodedFrame, H264Decoder, PixelFormat, parse_gfx_avc_stream};
+use crate::{parse_gfx_avc_stream, AvcKind, DecodedFrame, H264Decoder, PixelFormat};
 use anyhow::{bail, Context, Result};
 use ffmpeg_next as ffmpeg;
 use std::sync::Once;
@@ -13,11 +13,9 @@ fn init_ffmpeg() -> Result<()> {
     static mut INIT_SUCCESS: bool = false;
     static mut INIT_ERROR: Option<String> = None;
 
-    FFMPEG_INIT.call_once(|| {
-        match ffmpeg::init() {
-            Ok(()) => unsafe { INIT_SUCCESS = true },
-            Err(e) => unsafe { INIT_ERROR = Some(format!("Failed to initialize FFmpeg: {:?}", e)) },
-        }
+    FFMPEG_INIT.call_once(|| match ffmpeg::init() {
+        Ok(()) => unsafe { INIT_SUCCESS = true },
+        Err(e) => unsafe { INIT_ERROR = Some(format!("Failed to initialize FFmpeg: {:?}", e)) },
     });
 
     unsafe {
@@ -195,6 +193,10 @@ mod tests {
     #[test]
     fn test_decoder_creation() {
         let result = FfmpegDecoder::new();
-        assert!(result.is_ok(), "Failed to create decoder: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to create decoder: {:?}",
+            result.err()
+        );
     }
 }

@@ -108,7 +108,9 @@ impl ActiveStage {
         let (mut stage_outputs, processor_updates) = match action {
             Action::FastPath => {
                 let mut output = WriteBuf::new();
-                let processor_updates = self.fast_path_processor.process(image, frame, &mut output)?;
+                let processor_updates =
+                    self.fast_path_processor
+                        .process(image, frame, &mut output)?;
                 (
                     vec![ActiveStageOutput::ResponseFrame(output.into_inner())],
                     processor_updates,
@@ -225,7 +227,8 @@ impl ActiveStage {
     ) -> Option<SessionResult<Vec<u8>>> {
         if let Some(dvc) = self.get_dvc::<DisplayControlClient>() {
             if let Some(channel_id) = dvc.channel_id() {
-                let display_control = dvc.channel_processor_downcast_ref::<DisplayControlClient>()?;
+                let display_control =
+                    dvc.channel_processor_downcast_ref::<DisplayControlClient>()?;
                 let svc_messages = match display_control.encode_single_primary_monitor(
                     channel_id,
                     width,
@@ -237,9 +240,11 @@ impl ActiveStage {
                     Err(e) => return Some(Err(SessionError::encode(e))),
                 };
 
-                return Some(
-                    self.process_svc_processor_messages(SvcProcessorMessages::<DrdynvcClient>::new(svc_messages)),
-                );
+                return Some(self.process_svc_processor_messages(SvcProcessorMessages::<
+                    DrdynvcClient,
+                >::new(
+                    svc_messages
+                )));
             } else {
                 debug!("Could not encode a resize: Display Control Virtual Channel is not yet connected");
             }
@@ -276,11 +281,17 @@ impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
             x224::ProcessorOutput::Disconnect(desc) => {
                 let desc = match desc {
                     x224::DisconnectDescription::McsDisconnect(reason) => match reason {
-                        mcs::DisconnectReason::ProviderInitiated => GracefulDisconnectReason::ServerInitiated,
-                        mcs::DisconnectReason::UserRequested => GracefulDisconnectReason::UserInitiated,
+                        mcs::DisconnectReason::ProviderInitiated => {
+                            GracefulDisconnectReason::ServerInitiated
+                        }
+                        mcs::DisconnectReason::UserRequested => {
+                            GracefulDisconnectReason::UserInitiated
+                        }
                         other => GracefulDisconnectReason::Other(other.description().to_owned()),
                     },
-                    x224::DisconnectDescription::ErrorInfo(info) => GracefulDisconnectReason::Other(info.description()),
+                    x224::DisconnectDescription::ErrorInfo(info) => {
+                        GracefulDisconnectReason::Other(info.description())
+                    }
                 };
 
                 Ok(Self::Terminate(desc))

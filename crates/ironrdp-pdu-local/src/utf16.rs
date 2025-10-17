@@ -1,6 +1,9 @@
 use std::string::FromUtf16Error;
 
-pub fn read_utf16_string(utf16_payload: &[u8], utf16_size_hint: Option<usize>) -> Result<String, FromUtf16Error> {
+pub fn read_utf16_string(
+    utf16_payload: &[u8],
+    utf16_size_hint: Option<usize>,
+) -> Result<String, FromUtf16Error> {
     let mut trimmed_utf16: Vec<u16> = if let Some(size_hint) = utf16_size_hint {
         Vec::with_capacity(size_hint)
     } else {

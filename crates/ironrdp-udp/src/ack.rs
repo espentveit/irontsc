@@ -37,7 +37,7 @@ impl VectorElementState {
 }
 
 /// ACK Vector Element (section 2.2.2.7.1)
-/// 
+///
 /// Uses run-length encoding to represent a sequence of datagram states.
 /// Each element contains:
 /// - state: 2 bits (VectorElementState)
@@ -53,7 +53,7 @@ impl AckVectorElement {
     pub const NAME: &'static str = "ACK_VECTOR_ELEMENT";
 
     /// Create a new ACK vector element.
-    /// 
+    ///
     /// # Arguments
     /// * `state` - The state of the datagrams
     /// * `count` - The number of consecutive datagrams with this state (1-64)
@@ -135,7 +135,7 @@ impl AckVectorHeader {
         let base_sequence_number = cursor
             .try_read_u32_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
-        
+
         let ack_timestamp = cursor
             .try_read_u32_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
@@ -170,7 +170,7 @@ impl AckVectorHeader {
         output.extend_from_slice(&self.ack_timestamp.to_be_bytes());
         output.extend_from_slice(&(self.ack_vectors.len() as u16).to_be_bytes());
         output.extend_from_slice(&[0u8, 0u8]); // padding
-        
+
         for element in &self.ack_vectors {
             output.push(element.to_byte());
         }
@@ -200,7 +200,7 @@ impl AckOfAckVectorHeader {
         let sequence_number = cursor
             .try_read_u32_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
-        
+
         Ok(Self { sequence_number })
     }
 
@@ -251,7 +251,7 @@ mod tests {
         ];
 
         let header = AckVectorHeader::new(42, 1000, vectors.clone()).unwrap();
-        
+
         let mut encoded = Vec::new();
         header.encode_into(&mut encoded);
 
@@ -261,16 +261,22 @@ mod tests {
         assert_eq!(decoded.base_sequence_number, 42);
         assert_eq!(decoded.ack_timestamp, 1000);
         assert_eq!(decoded.ack_vectors.len(), 3);
-        assert_eq!(decoded.ack_vectors[0].state, VectorElementState::DatagramReceived);
+        assert_eq!(
+            decoded.ack_vectors[0].state,
+            VectorElementState::DatagramReceived
+        );
         assert_eq!(decoded.ack_vectors[0].count(), 5);
-        assert_eq!(decoded.ack_vectors[1].state, VectorElementState::DatagramNotYetReceived);
+        assert_eq!(
+            decoded.ack_vectors[1].state,
+            VectorElementState::DatagramNotYetReceived
+        );
         assert_eq!(decoded.ack_vectors[1].count(), 2);
     }
 
     #[test]
     fn test_ack_of_ack_vector() {
         let header = AckOfAckVectorHeader::new(12345);
-        
+
         let mut encoded = Vec::new();
         header.encode_into(&mut encoded);
 

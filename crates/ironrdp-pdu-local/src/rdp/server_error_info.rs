@@ -1,5 +1,6 @@
 use ironrdp_core::{
-    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
@@ -36,8 +37,8 @@ impl<'de> Decode<'de> for ServerSetErrorInfoPdu {
         ensure_fixed_part_size!(in: src);
 
         let error_info = src.read_u32();
-        let error_info =
-            ErrorInfo::from_u32(error_info).ok_or_else(|| invalid_field_err!("errorInfo", "unexpected info code"))?;
+        let error_info = ErrorInfo::from_u32(error_info)
+            .ok_or_else(|| invalid_field_err!("errorInfo", "unexpected info code"))?;
 
         Ok(Self(error_info))
     }
@@ -61,7 +62,10 @@ impl ErrorInfo {
                 format!("[Protocol independent licensing error] {}", c.description())
             }
             Self::ProtocolIndependentConnectionBrokerCode(c) => {
-                format!("[Protocol independent connection broker error] {}", c.description())
+                format!(
+                    "[Protocol independent connection broker error] {}",
+                    c.description()
+                )
             }
             Self::RdpSpecificCode(c) => format!("[RDP specific code]: {}", c.description()),
         }
@@ -178,19 +182,35 @@ pub enum ProtocolIndependentLicensingCode {
 impl ProtocolIndependentLicensingCode {
     pub fn description(&self) -> &str {
         match self {
-            Self::Internal => "An internal error has occurred in the Terminal Services licensing component",
-            Self::NoLicenseServer => "A Remote Desktop License Server could not be found to provide a license",
-            Self::NoLicense => "There are no Client Access Licenses available for the target remote computer",
-            Self::BadClientMsg => "The remote computer received an invalid licensing message from the client",
-            Self::HwidDoesntMatchLicense => "The Client Access License stored by the client has been modified",
-            Self::BadClientLicense => "The Client Access License stored by the client is in an invalid format",
-            Self::CantFinishProtocol => "Network problems have caused the licensing protocol to be terminated",
+            Self::Internal => {
+                "An internal error has occurred in the Terminal Services licensing component"
+            }
+            Self::NoLicenseServer => {
+                "A Remote Desktop License Server could not be found to provide a license"
+            }
+            Self::NoLicense => {
+                "There are no Client Access Licenses available for the target remote computer"
+            }
+            Self::BadClientMsg => {
+                "The remote computer received an invalid licensing message from the client"
+            }
+            Self::HwidDoesntMatchLicense => {
+                "The Client Access License stored by the client has been modified"
+            }
+            Self::BadClientLicense => {
+                "The Client Access License stored by the client is in an invalid format"
+            }
+            Self::CantFinishProtocol => {
+                "Network problems have caused the licensing protocol to be terminated"
+            }
             Self::ClientEndedProtocol => "The client prematurely ended the licensing protocol",
             Self::BadClientEncryption => "A licensing message was incorrectly encrypted",
             Self::CantUpgradeLicense => {
                 "The Client Access License stored by the client could not be upgraded or renewed"
             }
-            Self::NoRemoteConnections => "The remote computer is not licensed to accept remote connections",
+            Self::NoRemoteConnections => {
+                "The remote computer is not licensed to accept remote connections"
+            }
         }
     }
 
@@ -447,6 +467,9 @@ mod tests {
 
     #[test]
     fn buffer_length_is_correct_for_server_set_error_info() {
-        assert_eq!(SERVER_SET_ERROR_INFO_BUFFER.len(), SERVER_SET_ERROR_INFO.size());
+        assert_eq!(
+            SERVER_SET_ERROR_INFO_BUFFER.len(),
+            SERVER_SET_ERROR_INFO.size()
+        );
     }
 }

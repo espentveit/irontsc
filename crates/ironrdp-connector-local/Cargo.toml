@@ -17,9 +17,9 @@ qoi = ["ironrdp-pdu/qoi"]
 qoiz = ["ironrdp-pdu/qoiz"]
 
 [dependencies]
-ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", version = "0.5" }
-ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
-ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
+ironrdp-svc = { path = "../ironrdp-svc-local", version = "0.5" }
+ironrdp-core = { path = "../ironrdp-core-local", version = "0.1" }
+ironrdp-error = { path = "../ironrdp-error-local", version = "0.1" }
 ironrdp-pdu = { path = "../ironrdp-pdu-local", version = "0.6" }
 arbitrary = { version = "1", features = ["derive"], optional = true }
 sspi = "0.16"

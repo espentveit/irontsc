@@ -2,7 +2,8 @@ use std::io;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -56,8 +57,9 @@ impl<'de> Decode<'de> for ClientClusterData {
 
         let flags = RedirectionFlags::from_bits(flags_with_version & !REDIRECTION_VERSION_MASK)
             .ok_or_else(|| invalid_field_err!("flags", "invalid redirection flags"))?;
-        let redirection_version = RedirectionVersion::from_u32((flags_with_version & REDIRECTION_VERSION_MASK) >> 2)
-            .ok_or_else(|| invalid_field_err!("redirVersion", "invalid redirection version"))?;
+        let redirection_version =
+            RedirectionVersion::from_u32((flags_with_version & REDIRECTION_VERSION_MASK) >> 2)
+                .ok_or_else(|| invalid_field_err!("redirVersion", "invalid redirection version"))?;
 
         Ok(Self {
             flags,

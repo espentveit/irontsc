@@ -2,7 +2,7 @@ use std::io;
 
 use bytes::{Bytes, BytesMut};
 use ironrdp_connector::{ConnectorResult, Sequence, Written};
-use ironrdp_core::WriteBuf;
+use ironrdp_pdu::WriteBuf;
 use ironrdp_pdu::PduHint;
 use tracing::{debug, trace};
 
@@ -115,16 +115,25 @@ where
             if self.buf.len() >= length {
                 return Ok(self.buf.split_to(length));
             } else {
-                #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer underflow)")]
-                self.buf
-                    .reserve(length.checked_sub(self.buf.len()).expect("length > self.buf.len()"));
+                #[expect(
+                    clippy::missing_panics_doc,
+                    reason = "unreachable panic (checked integer underflow)"
+                )]
+                self.buf.reserve(
+                    length
+                        .checked_sub(self.buf.len())
+                        .expect("length > self.buf.len()"),
+                );
             }
 
             let len = self.read().await?;
 
             // Handle EOF
             if len == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "not enough bytes"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "not enough bytes",
+                ));
             }
         }
     }
@@ -151,7 +160,10 @@ where
 
                     // Handle EOF
                     if len == 0 {
-                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "not enough bytes"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "not enough bytes",
+                        ));
                     }
                 }
                 Err(e) => return Err(io::Error::other(e)),
@@ -183,7 +195,10 @@ where
 
                     // Handle EOF
                     if len == 0 {
-                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "not enough bytes"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "not enough bytes",
+                        ));
                     }
                 }
             };
@@ -250,9 +265,13 @@ where
 
     if let Some(next_pdu_hint) = sequence.next_pdu_hint() {
         use tracing::info;
-        
-        info!("📥 Waiting for server response (hint: {:?}, state: {})", next_pdu_hint, sequence.state().name());
-        
+
+        info!(
+            "📥 Waiting for server response (hint: {:?}, state: {})",
+            next_pdu_hint,
+            sequence.state().name()
+        );
+
         debug!(
             connector.state = sequence.state().name(),
             hint = ?next_pdu_hint,
@@ -281,7 +300,7 @@ where
     S: FramedWrite,
 {
     use tracing::info;
-    
+
     if let Some(response_len) = written.size() {
         info!("📤 About to write {} bytes to connection", response_len);
         debug_assert_eq!(buf.filled_len(), response_len);

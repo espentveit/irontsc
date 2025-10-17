@@ -2,8 +2,8 @@ mod data_messages;
 mod header_messages;
 
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -138,13 +138,21 @@ impl<'de> Decode<'de> for Block<'de> {
             BlockType::Sync => Ok(Self::Sync(SyncPdu::decode(src)?)),
             BlockType::Channels => Ok(Self::Channels(ChannelsPdu::decode(src)?)),
             BlockType::CodecVersions => Ok(Self::CodecVersions(CodecVersionsPdu::decode(src)?)),
-            BlockType::Context => Ok(Self::CodecChannel(CodecChannel::Context(ContextPdu::decode(src)?))),
-            BlockType::FrameBegin => Ok(Self::CodecChannel(CodecChannel::FrameBegin(FrameBeginPdu::decode(
+            BlockType::Context => Ok(Self::CodecChannel(CodecChannel::Context(
+                ContextPdu::decode(src)?,
+            ))),
+            BlockType::FrameBegin => Ok(Self::CodecChannel(CodecChannel::FrameBegin(
+                FrameBeginPdu::decode(src)?,
+            ))),
+            BlockType::FrameEnd => Ok(Self::CodecChannel(CodecChannel::FrameEnd(
+                FrameEndPdu::decode(src)?,
+            ))),
+            BlockType::Region => Ok(Self::CodecChannel(CodecChannel::Region(RegionPdu::decode(
                 src,
             )?))),
-            BlockType::FrameEnd => Ok(Self::CodecChannel(CodecChannel::FrameEnd(FrameEndPdu::decode(src)?))),
-            BlockType::Region => Ok(Self::CodecChannel(CodecChannel::Region(RegionPdu::decode(src)?))),
-            BlockType::Extension => Ok(Self::CodecChannel(CodecChannel::TileSet(TileSetPdu::decode(src)?))),
+            BlockType::Extension => Ok(Self::CodecChannel(CodecChannel::TileSet(
+                TileSetPdu::decode(src)?,
+            ))),
         }
     }
 }
@@ -207,7 +215,8 @@ impl<'de> Decode<'de> for BlockHeader {
         ensure_fixed_part_size!(in: src);
 
         let ty = src.read_u16();
-        let ty = BlockType::from_u16(ty).ok_or_else(|| invalid_field_err!("blockType", "Invalid block type"))?;
+        let ty = BlockType::from_u16(ty)
+            .ok_or_else(|| invalid_field_err!("blockType", "Invalid block type"))?;
         let data_length: usize = cast_length!("block length", src.read_u32())?;
         data_length
             .checked_sub(Self::FIXED_PART_SIZE)
@@ -327,7 +336,11 @@ impl BlockType {
     fn is_channel(&self) -> bool {
         matches!(
             self,
-            BlockType::Context | BlockType::FrameBegin | BlockType::FrameEnd | BlockType::Region | BlockType::Extension
+            BlockType::Context
+                | BlockType::FrameBegin
+                | BlockType::FrameEnd
+                | BlockType::Region
+                | BlockType::Extension
         )
     }
 

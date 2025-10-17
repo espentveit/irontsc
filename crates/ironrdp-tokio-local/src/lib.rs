@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 
 #[rustfmt::skip] // do not re-order this pub use
 pub use ironrdp_async::*;
@@ -15,7 +17,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
 pub type TokioFramed<S> = Framed<TokioStream<S>>;
 
-pub fn split_tokio_framed<S>(framed: TokioFramed<S>) -> (TokioFramed<ReadHalf<S>>, TokioFramed<WriteHalf<S>>)
+pub fn split_tokio_framed<S>(
+    framed: TokioFramed<S>,
+) -> (TokioFramed<ReadHalf<S>>, TokioFramed<WriteHalf<S>>)
 where
     S: Sync + Unpin + AsyncRead + AsyncWrite,
 {
@@ -26,7 +30,10 @@ where
     (framed_read, framed_write)
 }
 
-pub fn unsplit_tokio_framed<S>(reader: TokioFramed<ReadHalf<S>>, writer: TokioFramed<WriteHalf<S>>) -> TokioFramed<S>
+pub fn unsplit_tokio_framed<S>(
+    reader: TokioFramed<ReadHalf<S>>,
+    writer: TokioFramed<WriteHalf<S>>,
+) -> TokioFramed<S>
 where
     S: Sync + Unpin + AsyncRead + AsyncWrite,
 {

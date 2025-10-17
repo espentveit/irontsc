@@ -78,11 +78,11 @@ impl AckPacket {
     pub fn encode(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.header.encode_into(&mut buffer);
-        
+
         if let Some(ref ack_vector) = self.ack_vector {
             ack_vector.encode_into(&mut buffer);
         }
-        
+
         if let Some(ref ack_of_ack) = self.ack_of_ack {
             ack_of_ack.encode_into(&mut buffer);
         }
@@ -173,10 +173,8 @@ impl SourcePacket {
         let data_length = payload_prefix
             .payload_length
             .saturating_sub(SourcePayloadHeader::SIZE as u16) as usize;
-        
-        let data = cursor
-            .read_slice(data_length)
-            .to_vec();
+
+        let data = cursor.read_slice(data_length).to_vec();
 
         Ok(Self {
             header,
@@ -191,11 +189,11 @@ impl SourcePacket {
     pub fn encode(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.header.encode_into(&mut buffer);
-        
+
         if let Some(ref ack_vector) = self.ack_vector {
             ack_vector.encode_into(&mut buffer);
         }
-        
+
         if let Some(ref ack_of_ack) = self.ack_of_ack {
             ack_of_ack.encode_into(&mut buffer);
         }
@@ -301,10 +299,8 @@ impl FecPacket {
         let fec_length = payload_prefix
             .payload_length
             .saturating_sub(FecPayloadHeader::SIZE as u16) as usize;
-        
-        let fec_data = cursor
-            .read_slice(fec_length)
-            .to_vec();
+
+        let fec_data = cursor.read_slice(fec_length).to_vec();
 
         Ok(Self {
             header,
@@ -319,11 +315,11 @@ impl FecPacket {
     pub fn encode(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.header.encode_into(&mut buffer);
-        
+
         if let Some(ref ack_vector) = self.ack_vector {
             ack_vector.encode_into(&mut buffer);
         }
-        
+
         if let Some(ref ack_of_ack) = self.ack_of_ack {
             ack_of_ack.encode_into(&mut buffer);
         }
@@ -377,7 +373,7 @@ mod tests {
     fn test_fec_packet_encoding_decoding() {
         let fec_header = FecPayloadHeader::new(100, 5, 10, 2);
         let fec_data = vec![0xAA; 128];
-        
+
         let packet = FecPacket::new(200, 256, fec_header, fec_data.clone(), None, None).unwrap();
         let encoded = packet.encode();
         let decoded = FecPacket::decode(&encoded).unwrap();

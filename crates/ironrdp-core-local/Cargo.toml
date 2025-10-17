@@ -1,0 +1,19 @@
+[package]
+name = "ironrdp-core"
+version = "0.1.5"
+readme = "README.md"
+description = "IronRDP common traits and types"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = []
+std = ["alloc", "ironrdp-error/std"]
+alloc = ["ironrdp-error/alloc"]
+
+[dependencies]
+ironrdp-error = { path = "../ironrdp-error-local", version = "0.1" } # public

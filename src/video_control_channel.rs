@@ -6,7 +6,9 @@
 use ironrdp_core::AsAny;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
 use ironrdp_pdu::PduResult;
-use ironrdp_video::{PresentationRequest, PresentationResponse, PacketType, VIDEO_CONTROL_CHANNEL_NAME};
+use ironrdp_video::{
+    PacketType, PresentationRequest, PresentationResponse, VIDEO_CONTROL_CHANNEL_NAME,
+};
 use tracing::{info, warn};
 
 use crate::video_redirect::SharedVideoRedirectionManager;
@@ -95,7 +97,10 @@ impl DvcProcessor for VideoControlProcessor {
                 let request = match PresentationRequest::parse(&payload[1..]) {
                     Ok(r) => r,
                     Err(e) => {
-                        warn!("❌ Video Control: Failed to parse presentation request: {}", e);
+                        warn!(
+                            "❌ Video Control: Failed to parse presentation request: {}",
+                            e
+                        );
                         return Ok(Vec::new());
                     }
                 };
@@ -105,7 +110,10 @@ impl DvcProcessor for VideoControlProcessor {
                 // Handle in manager
                 if let Ok(mut manager) = self.manager.lock() {
                     if let Err(e) = manager.handle_presentation_request(request) {
-                        warn!("❌ Video Control: Failed to handle presentation request: {}", e);
+                        warn!(
+                            "❌ Video Control: Failed to handle presentation request: {}",
+                            e
+                        );
                     }
                 } else {
                     warn!("❌ Video Control: Failed to lock manager");
@@ -121,12 +129,15 @@ impl DvcProcessor for VideoControlProcessor {
                     presentation_id
                 );
 
-                Ok(vec![
-                    Box::new(VideoControlMessage { data: response_data }) as DvcMessage
-                ])
+                Ok(vec![Box::new(VideoControlMessage {
+                    data: response_data,
+                }) as DvcMessage])
             }
             _ => {
-                warn!("⚠️ Video Control: Unexpected packet type: {:?}", packet_type);
+                warn!(
+                    "⚠️ Video Control: Unexpected packet type: {:?}",
+                    packet_type
+                );
                 Ok(Vec::new())
             }
         }

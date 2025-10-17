@@ -1,8 +1,8 @@
 use core::iter;
 
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, Decode, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 
 use super::CapabilitySet;
@@ -142,7 +142,9 @@ impl<'a> Decode<'a> for CacheImportReplyPdu {
 
         let entries_count = usize::from(src.read_u16());
 
-        let cache_slots = iter::repeat_with(|| src.read_u16()).take(entries_count).collect();
+        let cache_slots = iter::repeat_with(|| src.read_u16())
+            .take(entries_count)
+            .collect();
 
         Ok(Self { cache_slots })
     }

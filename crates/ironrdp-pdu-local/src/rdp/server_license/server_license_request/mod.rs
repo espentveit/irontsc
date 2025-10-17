@@ -5,13 +5,14 @@ mod tests;
 
 use cert::{CertificateType, ProprietaryCertificate, X509CertificateChain};
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 use super::{
-    BlobHeader, BlobType, LicenseHeader, PreambleType, ServerLicenseError, BLOB_LENGTH_SIZE, BLOB_TYPE_SIZE,
-    KEY_EXCHANGE_ALGORITHM_RSA, RANDOM_NUMBER_SIZE, UTF16_NULL_TERMINATOR_SIZE, UTF8_NULL_TERMINATOR_SIZE,
+    BlobHeader, BlobType, LicenseHeader, PreambleType, ServerLicenseError, BLOB_LENGTH_SIZE,
+    BLOB_TYPE_SIZE, KEY_EXCHANGE_ALGORITHM_RSA, RANDOM_NUMBER_SIZE, UTF16_NULL_TERMINATOR_SIZE,
+    UTF8_NULL_TERMINATOR_SIZE,
 };
 use crate::utils;
 
@@ -53,7 +54,11 @@ impl ServerLicenseRequest {
         BlobHeader::new(BlobType::KEY_EXCHANGE_ALGORITHM, KEY_EXCHANGE_FIELD_SIZE).encode(dst)?;
         dst.write_u32(KEY_EXCHANGE_ALGORITHM_RSA);
 
-        let cert_size = self.server_certificate.as_ref().map(|v| v.size()).unwrap_or(0);
+        let cert_size = self
+            .server_certificate
+            .as_ref()
+            .map(|v| v.size())
+            .unwrap_or(0);
         BlobHeader::new(BlobType::CERTIFICATE, cert_size).encode(dst)?;
 
         if let Some(cert) = &self.server_certificate {
@@ -71,7 +76,10 @@ impl ServerLicenseRequest {
 
     pub fn decode(license_header: LicenseHeader, src: &mut ReadCursor<'_>) -> DecodeResult<Self> {
         if license_header.preamble_message_type != PreambleType::LicenseRequest {
-            return Err(invalid_field_err!("preambleMessageType", "unexpected preamble type"));
+            return Err(invalid_field_err!(
+                "preambleMessageType",
+                "unexpected preamble type"
+            ));
         }
 
         ensure_size!(in: src, size: RANDOM_NUMBER_SIZE);
@@ -87,7 +95,10 @@ impl ServerLicenseRequest {
         ensure_size!(in: src, size: 4);
         let key_exchange_algorithm = src.read_u32();
         if key_exchange_algorithm != RSA_EXCHANGE_ALGORITHM {
-            return Err(invalid_field_err!("keyAlgo", "invalid key exchange algorithm"));
+            return Err(invalid_field_err!(
+                "keyAlgo",
+                "invalid key exchange algorithm"
+            ));
         }
 
         let cert_blob = BlobHeader::decode(src)?;
@@ -109,8 +120,12 @@ impl ServerLicenseRequest {
         }
 
         let mut scope_list = Vec::with_capacity(
-            #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer underflow)")]
-            usize::try_from(scope_count).expect("scope_count is guaranteed to fit into usize due to the prior check"),
+            #[expect(
+                clippy::missing_panics_doc,
+                reason = "unreachable panic (checked integer underflow)"
+            )]
+            usize::try_from(scope_count)
+                .expect("scope_count is guaranteed to fit into usize due to the prior check"),
         );
 
         for _ in 0..scope_count {
@@ -127,7 +142,10 @@ impl ServerLicenseRequest {
     }
 
     pub fn get_public_key(&self) -> Result<Option<Vec<u8>>, ServerLicenseError> {
-        self.server_certificate.as_ref().map(|c| c.get_public_key()).transpose()
+        self.server_certificate
+            .as_ref()
+            .map(|c| c.get_public_key())
+            .transpose()
     }
 
     pub fn name(&self) -> &'static str {
@@ -303,7 +321,12 @@ impl<'de> Decode<'de> for ServerCertificate {
         let certificate = match cert_version & CERT_CHAIN_VERSION_MASK {
             1 => CertificateType::Proprietary(ProprietaryCertificate::decode(src)?),
             2 => CertificateType::X509(X509CertificateChain::decode(src)?),
-            _ => return Err(invalid_field_err!("certVersion", "invalid certificate version")),
+            _ => {
+                return Err(invalid_field_err!(
+                    "certVersion",
+                    "invalid certificate version"
+                ))
+            }
         };
 
         Ok(Self {
@@ -371,7 +394,10 @@ impl<'de> Decode<'de> for ProductInfo {
 
         let company_name_len = cast_length!("companyLen", src.read_u32())?;
         if !(2..=MAX_COMPANY_NAME_LEN).contains(&company_name_len) {
-            return Err(invalid_field_err!("companyLen", "invalid company name length"));
+            return Err(invalid_field_err!(
+                "companyLen",
+                "invalid company name length"
+            ));
         }
 
         ensure_size!(in: src, size: company_name_len);
@@ -382,7 +408,10 @@ impl<'de> Decode<'de> for ProductInfo {
         ensure_size!(in: src, size: 4);
         let product_id_len = cast_length!("productIdLen", src.read_u32())?;
         if !(2..=MAX_PRODUCT_ID_LEN).contains(&product_id_len) {
-            return Err(invalid_field_err!("productIdLen", "invalid produce ID length"));
+            return Err(invalid_field_err!(
+                "productIdLen",
+                "invalid produce ID length"
+            ));
         }
 
         ensure_size!(in: src, size: product_id_len);

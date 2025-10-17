@@ -1,4 +1,6 @@
-use ironrdp_core::{ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor};
+use ironrdp_core::{
+    ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+};
 
 const CLIENT_FLAGS_SIZE: usize = 4;
 const SERVER_MCS_MESSAGE_CHANNEL_ID_SIZE: usize = 2;
@@ -75,6 +77,8 @@ impl<'de> Decode<'de> for ServerMessageChannelData {
 
         let mcs_message_channel_id = src.read_u16();
 
-        Ok(Self { mcs_message_channel_id })
+        Ok(Self {
+            mcs_message_channel_id,
+        })
     }
 }

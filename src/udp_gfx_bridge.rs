@@ -17,9 +17,7 @@ pub struct UdpVideoFrame {
 }
 
 /// Creates a UDP-to-GFX bridge that receives UDP packets and extracts video frames
-pub fn create_udp_gfx_bridge(
-    socket: Arc<UdpSocket>,
-) -> mpsc::UnboundedReceiver<UdpVideoFrame> {
+pub fn create_udp_gfx_bridge(socket: Arc<UdpSocket>) -> mpsc::UnboundedReceiver<UdpVideoFrame> {
     let (tx, rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
@@ -64,9 +62,7 @@ async fn udp_video_receiver_task(
 
                 trace!(
                     "UDP packet - type: 0x{:02X}, flags: 0x{:X}, size: {}",
-                    packet_type,
-                    flags,
-                    n
+                    packet_type, flags, n
                 );
 
                 // Check if this is a SOURCE packet (0x40) containing data

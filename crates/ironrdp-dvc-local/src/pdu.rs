@@ -2,11 +2,12 @@ use alloc::format;
 use core::fmt;
 
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, unsupported_value_err, Decode, DecodeError,
-    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, unsupported_value_err,
+    Decode, DecodeError, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use ironrdp_pdu::utils::{
-    checked_sum, encoded_str_len, read_string_from_cursor, strict_sum, write_string_to_cursor, CharacterSet,
+    checked_sum, encoded_str_len, read_string_from_cursor, strict_sum, write_string_to_cursor,
+    CharacterSet,
 };
 use ironrdp_svc::SvcEncode;
 
@@ -100,9 +101,13 @@ impl Decode<'_> for DrdynvcClientPdu {
             Cmd::DataFirst => Ok(Self::Data(DrdynvcDataPdu::DataFirst(DataFirstPdu::decode(
                 header, src,
             )?))),
-            Cmd::Data => Ok(Self::Data(DrdynvcDataPdu::Data(DataPdu::decode(header, src)?))),
+            Cmd::Data => Ok(Self::Data(DrdynvcDataPdu::Data(DataPdu::decode(
+                header, src,
+            )?))),
             Cmd::Close => Ok(Self::Close(ClosePdu::decode(header, src)?)),
-            Cmd::Capability => Ok(Self::Capabilities(CapabilitiesResponsePdu::decode(header, src)?)),
+            Cmd::Capability => Ok(Self::Capabilities(CapabilitiesResponsePdu::decode(
+                header, src,
+            )?)),
             _ => Err(unsupported_value_err!("Cmd", header.cmd.into())),
         }
     }
@@ -154,9 +159,13 @@ impl Decode<'_> for DrdynvcServerPdu {
             Cmd::DataFirst => Ok(Self::Data(DrdynvcDataPdu::DataFirst(DataFirstPdu::decode(
                 header, src,
             )?))),
-            Cmd::Data => Ok(Self::Data(DrdynvcDataPdu::Data(DataPdu::decode(header, src)?))),
+            Cmd::Data => Ok(Self::Data(DrdynvcDataPdu::Data(DataPdu::decode(
+                header, src,
+            )?))),
             Cmd::Close => Ok(Self::Close(ClosePdu::decode(header, src)?)),
-            Cmd::Capability => Ok(Self::Capabilities(CapabilitiesRequestPdu::decode(header, src)?)),
+            Cmd::Capability => Ok(Self::Capabilities(CapabilitiesRequestPdu::decode(
+                header, src,
+            )?)),
             _ => Err(unsupported_value_err!("Cmd", header.cmd.into())),
         }
     }
@@ -200,7 +209,11 @@ impl Header {
 
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_fixed_part_size!(in: dst);
-        dst.write_u8(((self.cmd as u8) << 4) | (Into::<u8>::into(self.sp) << 2) | Into::<u8>::into(self.cb_id));
+        dst.write_u8(
+            ((self.cmd as u8) << 4)
+                | (Into::<u8>::into(self.sp) << 2)
+                | Into::<u8>::into(self.cb_id),
+        );
         Ok(())
     }
 
@@ -767,7 +780,8 @@ impl CapabilitiesRequestPdu {
         }
         match self {
             CapabilitiesRequestPdu::V1 { .. } => {}
-            CapabilitiesRequestPdu::V2 { charges, .. } | CapabilitiesRequestPdu::V3 { charges, .. } => {
+            CapabilitiesRequestPdu::V2 { charges, .. }
+            | CapabilitiesRequestPdu::V3 { charges, .. } => {
                 for charge in charges.iter() {
                     dst.write_u16(*charge);
                 }

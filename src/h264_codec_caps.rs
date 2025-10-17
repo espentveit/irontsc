@@ -13,14 +13,13 @@ use tracing::info;
 /// {3F8B4284-64AD-4F55-88FB-18D2E8C2A528}
 const GUID_H264: [u8; 16] = [
     0x84, 0x42, 0x8B, 0x3F, // Data1: 3F8B4284
-    0xAD, 0x64,             // Data2: 64AD
-    0x55, 0x4F,             // Data3: 4F55
+    0xAD, 0x64, // Data2: 64AD
+    0x55, 0x4F, // Data3: 4F55
     0x88, 0xFB, 0x18, 0xD2, 0xE8, 0xC2, 0xA5, 0x28, // Data4
 ];
 
 /// H.264 Codec ID (we'll use 4, following RemoteFX which uses 3)
 const CODEC_ID_H264: u8 = 4;
-
 
 /// Manually construct H.264 codec capability bytes
 ///
@@ -62,7 +61,7 @@ pub fn create_bitmap_config_with_h264(
     lossy_compression: bool,
     color_depth: u32,
 ) -> anyhow::Result<ironrdp::connector::BitmapConfig> {
-    use ironrdp_pdu::rdp::capability_sets::{client_codecs_capabilities, Codec, CodecProperty};
+    use ironrdp_pdu::rdp::capability_sets::{Codec, CodecProperty, client_codecs_capabilities};
 
     // Create the default BitmapCodecs (RemoteFX)
     let mut codecs = client_codecs_capabilities(&[])
@@ -76,7 +75,10 @@ pub fn create_bitmap_config_with_h264(
         property: CodecProperty::H264(AVC444_SUPPORT),
     });
 
-    info!("✅ Created BitmapConfig with {} codecs (including H.264/AVC444)", codecs.0.len());
+    info!(
+        "✅ Created BitmapConfig with {} codecs (including H.264/AVC444)",
+        codecs.0.len()
+    );
     info!("📋 H.264 GUID: {:02X?}", GUID_H264);
     info!("📋 H.264 Codec ID: {}", CODEC_ID_H264);
     info!("📋 H.264 Flags: 0x{:02X} (AVC444_SUPPORT)", AVC444_SUPPORT);
@@ -111,5 +113,4 @@ mod tests {
         // Check AVC444 flag
         assert_eq!(bytes[19], 0x02);
     }
-
 }

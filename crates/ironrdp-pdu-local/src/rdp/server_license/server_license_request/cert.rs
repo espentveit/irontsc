@@ -1,6 +1,6 @@
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, write_padding, Decode,
-    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding,
+    write_padding, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 use super::{BlobHeader, BlobType, KEY_EXCHANGE_ALGORITHM_RSA};
@@ -73,14 +73,20 @@ impl<'de> Decode<'de> for X509CertificateChain {
         ensure_size!(in: src, size: 4);
         let certificate_count = cast_length!("certArrayLen", src.read_u32())?;
         if !(MIN_CERTIFICATE_AMOUNT..MAX_CERTIFICATE_AMOUNT).contains(&certificate_count) {
-            return Err(invalid_field_err!("certArrayLen", "invalid x509 certificate amount"));
+            return Err(invalid_field_err!(
+                "certArrayLen",
+                "invalid x509 certificate amount"
+            ));
         }
 
         let certificate_array: Vec<_> = core::iter::repeat_with(|| {
             ensure_size!(in: src, size: 4);
             let certificate_len = cast_length!("certLen", src.read_u32())?;
             if certificate_len > MAX_CERTIFICATE_LEN {
-                return Err(invalid_field_err!("certLen", "invalid x509 certificate length"));
+                return Err(invalid_field_err!(
+                    "certLen",
+                    "invalid x509 certificate length"
+                ));
             }
 
             ensure_size!(in: src, size: certificate_len);
@@ -145,7 +151,10 @@ impl<'de> Decode<'de> for ProprietaryCertificate {
 
         let signature_algorithm_id = src.read_u32();
         if signature_algorithm_id != SIGNATURE_ALGORITHM_RSA {
-            return Err(invalid_field_err!("sigAlgId", "invalid signature algorithm ID"));
+            return Err(invalid_field_err!(
+                "sigAlgId",
+                "invalid signature algorithm ID"
+            ));
         }
 
         let key_algorithm_id = src.read_u32();
@@ -166,7 +175,10 @@ impl<'de> Decode<'de> for ProprietaryCertificate {
         ensure_size!(in: src, size: sig_blob_header.length);
         let signature = src.read_slice(sig_blob_header.length).into();
 
-        Ok(Self { public_key, signature })
+        Ok(Self {
+            public_key,
+            signature,
+        })
     }
 }
 
@@ -222,16 +234,25 @@ impl<'de> Decode<'de> for RsaPublicKey {
 
         let bitlen: usize = cast_length!("bitlen", src.read_u32())?;
         if keylen != (bitlen / 8) + 8 {
-            return Err(invalid_field_err!("bitlen", "invalid RSA public key length"));
+            return Err(invalid_field_err!(
+                "bitlen",
+                "invalid RSA public key length"
+            ));
         }
 
         if bitlen < 8 {
-            return Err(invalid_field_err!("bitlen", "invalid RSA public key length"));
+            return Err(invalid_field_err!(
+                "bitlen",
+                "invalid RSA public key length"
+            ));
         }
 
         let datalen: usize = cast_length!("dataLen", src.read_u32())?;
         if datalen != (bitlen / 8) - 1 {
-            return Err(invalid_field_err!("dataLen", "invalid RSA public key data length"));
+            return Err(invalid_field_err!(
+                "dataLen",
+                "invalid RSA public key data length"
+            ));
         }
 
         let public_exponent = src.read_u32();

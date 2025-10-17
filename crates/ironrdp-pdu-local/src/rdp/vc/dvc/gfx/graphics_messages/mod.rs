@@ -10,14 +10,15 @@ use num_traits::FromPrimitive as _;
 pub use avc_messages::{Avc420BitmapStream, Avc444BitmapStream, Encoding, QuantQuality};
 pub use client::{CacheImportReplyPdu, CapabilitiesAdvertisePdu, FrameAcknowledgePdu, QueueDepth};
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 pub use server::{
-    CacheToSurfacePdu, CapabilitiesConfirmPdu, Codec1Type, Codec2Type, CreateSurfacePdu, DeleteEncodingContextPdu,
-    DeleteSurfacePdu, EndFramePdu, EvictCacheEntryPdu, MapSurfaceToOutputPdu, MapSurfaceToScaledOutputPdu,
-    MapSurfaceToScaledWindowPdu, PixelFormat, ResetGraphicsPdu, SolidFillPdu, StartFramePdu, SurfaceToCachePdu,
-    SurfaceToSurfacePdu, Timestamp, WireToSurface1Pdu, WireToSurface2Pdu,
+    CacheToSurfacePdu, CapabilitiesConfirmPdu, Codec1Type, Codec2Type, CreateSurfacePdu,
+    DeleteEncodingContextPdu, DeleteSurfacePdu, EndFramePdu, EvictCacheEntryPdu,
+    MapSurfaceToOutputPdu, MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu, PixelFormat,
+    ResetGraphicsPdu, SolidFillPdu, StartFramePdu, SurfaceToCachePdu, SurfaceToSurfacePdu,
+    Timestamp, WireToSurface1Pdu, WireToSurface2Pdu,
 };
 
 use super::RDP_GFX_HEADER_SIZE;
@@ -70,7 +71,10 @@ impl Encode for CapabilitySet {
         ensure_size!(in: dst, size: self.size());
 
         dst.write_u32(self.version().as_u32());
-        dst.write_u32(cast_length!("dataLength", self.size() - CAPABILITY_SET_HEADER_SIZE)?);
+        dst.write_u32(cast_length!(
+            "dataLength",
+            self.size() - CAPABILITY_SET_HEADER_SIZE
+        )?);
 
         match self {
             CapabilitySet::V8 { flags } => dst.write_u32(flags.bits()),

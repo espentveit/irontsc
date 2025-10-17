@@ -24,8 +24,8 @@ qoiz = ["qoi"]
 
 [dependencies]
 bitflags = "2.9"
-ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", version = "0.1", features = ["std"] }
-ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", version = "0.1" }
+ironrdp-core = { path = "../ironrdp-core-local", version = "0.1", features = ["std"] }
+ironrdp-error = { path = "../ironrdp-error-local", version = "0.1" }
 tap = "1"
 rand = { version = "0.8", features = ["std"] }
 

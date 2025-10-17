@@ -6,7 +6,7 @@
 use ironrdp_core::AsAny;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
 use ironrdp_pdu::PduResult;
-use ironrdp_video::{PacketType, VideoData, VIDEO_DATA_CHANNEL_NAME};
+use ironrdp_video::{PacketType, VIDEO_DATA_CHANNEL_NAME, VideoData};
 use tracing::{info, warn};
 
 use crate::video_redirect::SharedVideoRedirectionManager;

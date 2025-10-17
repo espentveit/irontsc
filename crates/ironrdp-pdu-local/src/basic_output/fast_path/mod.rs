@@ -4,8 +4,8 @@ mod tests;
 use bit_field::BitField as _;
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, decode_cursor, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeError,
-    DecodeResult, Encode, EncodeResult, InvalidFieldErr as _, ReadCursor, WriteCursor,
+    cast_length, decode_cursor, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode,
+    DecodeError, DecodeResult, Encode, EncodeResult, InvalidFieldErr as _, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -89,7 +89,8 @@ impl<'de> Decode<'de> for FastPathHeader {
         let flags = EncryptionFlags::from_bits_truncate(header.get_bits(6..8));
 
         let (length, sizeof_length) = per::read_length(src).map_err(|e| {
-            DecodeError::invalid_field("", "length", "Invalid encoded fast path PDU length").with_source(e)
+            DecodeError::invalid_field("", "length", "Invalid encoded fast path PDU length")
+                .with_source(e)
         })?;
         let length = usize::from(length);
         if length < sizeof_length + Self::FIXED_PART_SIZE {
@@ -140,8 +141,8 @@ impl Encode for FastPathUpdatePdu<'_> {
 
         if self.compression_flags.is_some() {
             header.set_bits(6..8, Compression::COMPRESSION_USED.bits());
-            let compression_flags_with_type =
-                self.compression_flags.map(|f| f.bits()).unwrap_or(0) | self.compression_type.map_or(0, |f| f.as_u8());
+            let compression_flags_with_type = self.compression_flags.map(|f| f.bits()).unwrap_or(0)
+                | self.compression_type.map_or(0, |f| f.as_u8());
             dst.write_u8(compression_flags_with_type);
         }
 
@@ -156,7 +157,11 @@ impl Encode for FastPathUpdatePdu<'_> {
     }
 
     fn size(&self) -> usize {
-        let compression_flags_size = if self.compression_flags.is_some() { 1 } else { 0 };
+        let compression_flags_size = if self.compression_flags.is_some() {
+            1
+        } else {
+            0
+        };
 
         Self::FIXED_PART_SIZE + compression_flags_size + 2 /* len */ + self.data.len()
     }
@@ -178,16 +183,20 @@ impl<'de> Decode<'de> for FastPathUpdatePdu<'de> {
 
         let compression = Compression::from_bits_truncate(header.get_bits(6..8));
 
-        let (compression_flags, compression_type) = if compression.contains(Compression::COMPRESSION_USED) {
+        let (compression_flags, compression_type) = if compression
+            .contains(Compression::COMPRESSION_USED)
+        {
             let expected_size = 1 /* flags_with_type */ + 2 /* len */;
             ensure_size!(in: src, size: expected_size);
 
             let compression_flags_with_type = src.read_u8();
-            let compression_flags =
-                CompressionFlags::from_bits_truncate(compression_flags_with_type & !SHARE_DATA_HEADER_COMPRESSION_MASK);
-            let compression_type =
-                CompressionType::from_u8(compression_flags_with_type & SHARE_DATA_HEADER_COMPRESSION_MASK)
-                    .ok_or_else(|| invalid_field_err!("compressionFlags", "invalid compression type"))?;
+            let compression_flags = CompressionFlags::from_bits_truncate(
+                compression_flags_with_type & !SHARE_DATA_HEADER_COMPRESSION_MASK,
+            );
+            let compression_type = CompressionType::from_u8(
+                compression_flags_with_type & SHARE_DATA_HEADER_COMPRESSION_MASK,
+            )
+            .ok_or_else(|| invalid_field_err!("compressionFlags", "invalid compression type"))?;
 
             (Some(compression_flags), Some(compression_type))
         } else {
@@ -227,7 +236,10 @@ impl<'a> FastPathUpdate<'a> {
         Self::decode_cursor_with_code(&mut cursor, code)
     }
 
-    pub fn decode_cursor_with_code(src: &mut ReadCursor<'a>, code: UpdateCode) -> DecodeResult<Self> {
+    pub fn decode_cursor_with_code(
+        src: &mut ReadCursor<'a>,
+        code: UpdateCode,
+    ) -> DecodeResult<Self> {
         match code {
             UpdateCode::SurfaceCommands => {
                 let mut commands = Vec::with_capacity(1);
@@ -240,15 +252,26 @@ impl<'a> FastPathUpdate<'a> {
             UpdateCode::Bitmap => Ok(Self::Bitmap(decode_cursor(src)?)),
             UpdateCode::HiddenPointer => Ok(Self::Pointer(PointerUpdateData::SetHidden)),
             UpdateCode::DefaultPointer => Ok(Self::Pointer(PointerUpdateData::SetDefault)),
-            UpdateCode::PositionPointer => Ok(Self::Pointer(PointerUpdateData::SetPosition(decode_cursor(src)?))),
+            UpdateCode::PositionPointer => Ok(Self::Pointer(PointerUpdateData::SetPosition(
+                decode_cursor(src)?,
+            ))),
             UpdateCode::ColorPointer => {
                 let color = decode_cursor(src)?;
                 Ok(Self::Pointer(PointerUpdateData::Color(color)))
             }
-            UpdateCode::CachedPointer => Ok(Self::Pointer(PointerUpdateData::Cached(decode_cursor(src)?))),
-            UpdateCode::NewPointer => Ok(Self::Pointer(PointerUpdateData::New(decode_cursor(src)?))),
-            UpdateCode::LargePointer => Ok(Self::Pointer(PointerUpdateData::Large(decode_cursor(src)?))),
-            _ => Err(invalid_field_err!("updateCode", "unsupported fast-path update code")),
+            UpdateCode::CachedPointer => Ok(Self::Pointer(PointerUpdateData::Cached(
+                decode_cursor(src)?,
+            ))),
+            UpdateCode::NewPointer => {
+                Ok(Self::Pointer(PointerUpdateData::New(decode_cursor(src)?)))
+            }
+            UpdateCode::LargePointer => {
+                Ok(Self::Pointer(PointerUpdateData::Large(decode_cursor(src)?)))
+            }
+            _ => Err(invalid_field_err!(
+                "updateCode",
+                "unsupported fast-path update code"
+            )),
         }
     }
 

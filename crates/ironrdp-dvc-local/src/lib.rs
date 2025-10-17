@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -16,7 +18,9 @@ use crate::alloc::borrow::ToOwned as _;
 // Re-export ironrdp_pdu crate for convenience
 #[rustfmt::skip] // do not re-order this pub use
 pub use ironrdp_pdu;
-use ironrdp_core::{assert_obj_safe, cast_length, encode_vec, other_err, AsAny, Encode, EncodeResult};
+use ironrdp_core::{
+    assert_obj_safe, cast_length, encode_vec, other_err, AsAny, Encode, EncodeResult,
+};
 use ironrdp_pdu::{decode_err, pdu_other_err, PduResult};
 use ironrdp_svc::SvcMessage;
 
@@ -74,7 +78,10 @@ pub fn encode_dvc_messages(
         while off < total_length {
             let first = off == 0;
 
-            #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked underflow)")]
+            #[expect(
+                clippy::missing_panics_doc,
+                reason = "unreachable panic (checked underflow)"
+            )]
             let remaining_length = total_length.checked_sub(off).expect("never overflow");
             let size = core::cmp::min(remaining_length, DrdynvcDataPdu::MAX_DATA_SIZE);
             let end = off
@@ -135,13 +142,19 @@ impl DynamicVirtualChannel {
         if let Some(channel_id) = self.channel_id {
             self.channel_processor.start(channel_id)
         } else {
-            Err(pdu_other_err!("DynamicVirtualChannel::start", "channel ID not set"))
+            Err(pdu_other_err!(
+                "DynamicVirtualChannel::start",
+                "channel ID not set"
+            ))
         }
     }
 
     fn process(&mut self, pdu: DrdynvcDataPdu) -> PduResult<Vec<DvcMessage>> {
         let channel_id = pdu.channel_id();
-        let complete_data = self.complete_data.process_data(pdu).map_err(|e| decode_err!(e))?;
+        let complete_data = self
+            .complete_data
+            .process_data(pdu)
+            .map_err(|e| decode_err!(e))?;
         if let Some(complete_data) = complete_data {
             self.channel_processor.process(channel_id, &complete_data)
         } else {
@@ -175,10 +188,15 @@ impl DynamicChannelSet {
     fn insert<T: DvcProcessor + 'static>(&mut self, channel: T) -> Option<DynamicVirtualChannel> {
         let name = channel.channel_name().to_owned();
         self.type_id_to_name.insert(TypeId::of::<T>(), name.clone());
-        self.channels.insert(name, DynamicVirtualChannel::new(channel))
+        self.channels
+            .insert(name, DynamicVirtualChannel::new(channel))
     }
 
-    fn attach_channel_id(&mut self, name: DynamicChannelName, id: DynamicChannelId) -> Option<DynamicChannelId> {
+    fn attach_channel_id(
+        &mut self,
+        name: DynamicChannelName,
+        id: DynamicChannelId,
+    ) -> Option<DynamicChannelId> {
         self.channel_id_to_name.insert(id, name.clone());
         self.name_to_channel_id.insert(name.clone(), id);
         let dvc = self.get_by_channel_name_mut(&name)?;
@@ -197,7 +215,10 @@ impl DynamicChannelSet {
         self.channels.get(name)
     }
 
-    fn get_by_channel_name_mut(&mut self, name: &DynamicChannelName) -> Option<&mut DynamicVirtualChannel> {
+    fn get_by_channel_name_mut(
+        &mut self,
+        name: &DynamicChannelName,
+    ) -> Option<&mut DynamicVirtualChannel> {
         self.channels.get_mut(name)
     }
 
@@ -207,7 +228,10 @@ impl DynamicChannelSet {
             .and_then(|name| self.channels.get(name))
     }
 
-    fn get_by_channel_id_mut(&mut self, id: DynamicChannelId) -> Option<&mut DynamicVirtualChannel> {
+    fn get_by_channel_id_mut(
+        &mut self,
+        id: DynamicChannelId,
+    ) -> Option<&mut DynamicVirtualChannel> {
         self.channel_id_to_name
             .get(&id)
             .and_then(|name| self.channels.get_mut(name))

@@ -53,7 +53,8 @@ lazy_static! {
         ],
     };
     pub static ref BITMAP_CACHE_REV2: BitmapCacheRev2 = BitmapCacheRev2 {
-        cache_flags: CacheFlags::PERSISTENT_KEYS_EXPECTED_FLAG | CacheFlags::ALLOW_CACHE_WAITING_LIST_FLAG,
+        cache_flags: CacheFlags::PERSISTENT_KEYS_EXPECTED_FLAG
+            | CacheFlags::ALLOW_CACHE_WAITING_LIST_FLAG,
         num_cell_caches: 3,
         cache_cell_info: [
             CellInfo {

@@ -40,25 +40,127 @@ struct Token {
 /// Format: {prefix_len, prefix_code, value_bits, token_type, value_base}
 const TOKEN_TABLE: &[Token] = &[
     // Literals with value bits
-    Token { prefix_len: 1, prefix_code: 0, value_bits: 8, token_type: 0, value_base: 0 },
+    Token {
+        prefix_len: 1,
+        prefix_code: 0,
+        value_bits: 8,
+        token_type: 0,
+        value_base: 0,
+    },
     // Special literals
-    Token { prefix_len: 5, prefix_code: 0b11000, value_bits: 0, token_type: 0, value_base: 0x00 },
-    Token { prefix_len: 5, prefix_code: 0b11001, value_bits: 0, token_type: 0, value_base: 0x01 },
-    Token { prefix_len: 6, prefix_code: 0b110100, value_bits: 0, token_type: 0, value_base: 0x02 },
-    Token { prefix_len: 6, prefix_code: 0b110101, value_bits: 0, token_type: 0, value_base: 0x03 },
-    Token { prefix_len: 6, prefix_code: 0b110110, value_bits: 0, token_type: 0, value_base: 0xFF },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b11000,
+        value_bits: 0,
+        token_type: 0,
+        value_base: 0x00,
+    },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b11001,
+        value_bits: 0,
+        token_type: 0,
+        value_base: 0x01,
+    },
+    Token {
+        prefix_len: 6,
+        prefix_code: 0b110100,
+        value_bits: 0,
+        token_type: 0,
+        value_base: 0x02,
+    },
+    Token {
+        prefix_len: 6,
+        prefix_code: 0b110101,
+        value_bits: 0,
+        token_type: 0,
+        value_base: 0x03,
+    },
+    Token {
+        prefix_len: 6,
+        prefix_code: 0b110110,
+        value_bits: 0,
+        token_type: 0,
+        value_base: 0xFF,
+    },
     // Match/Distance tokens
-    Token { prefix_len: 5, prefix_code: 0b10001, value_bits: 5, token_type: 1, value_base: 0 },
-    Token { prefix_len: 5, prefix_code: 0b10010, value_bits: 7, token_type: 1, value_base: 32 },
-    Token { prefix_len: 5, prefix_code: 0b10011, value_bits: 9, token_type: 1, value_base: 160 },
-    Token { prefix_len: 5, prefix_code: 0b10100, value_bits: 10, token_type: 1, value_base: 672 },
-    Token { prefix_len: 5, prefix_code: 0b10101, value_bits: 12, token_type: 1, value_base: 1696 },
-    Token { prefix_len: 5, prefix_code: 0b10110, value_bits: 14, token_type: 1, value_base: 5792 },
-    Token { prefix_len: 5, prefix_code: 0b10111, value_bits: 15, token_type: 1, value_base: 22176 },
-    Token { prefix_len: 6, prefix_code: 0b110111, value_bits: 18, token_type: 1, value_base: 54944 },
-    Token { prefix_len: 6, prefix_code: 0b111000, value_bits: 20, token_type: 1, value_base: 317088 },
-    Token { prefix_len: 6, prefix_code: 0b111001, value_bits: 20, token_type: 1, value_base: 1365664 },
-    Token { prefix_len: 6, prefix_code: 0b111010, value_bits: 20, token_type: 1, value_base: 2414240 },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b10001,
+        value_bits: 5,
+        token_type: 1,
+        value_base: 0,
+    },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b10010,
+        value_bits: 7,
+        token_type: 1,
+        value_base: 32,
+    },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b10011,
+        value_bits: 9,
+        token_type: 1,
+        value_base: 160,
+    },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b10100,
+        value_bits: 10,
+        token_type: 1,
+        value_base: 672,
+    },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b10101,
+        value_bits: 12,
+        token_type: 1,
+        value_base: 1696,
+    },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b10110,
+        value_bits: 14,
+        token_type: 1,
+        value_base: 5792,
+    },
+    Token {
+        prefix_len: 5,
+        prefix_code: 0b10111,
+        value_bits: 15,
+        token_type: 1,
+        value_base: 22176,
+    },
+    Token {
+        prefix_len: 6,
+        prefix_code: 0b110111,
+        value_bits: 18,
+        token_type: 1,
+        value_base: 54944,
+    },
+    Token {
+        prefix_len: 6,
+        prefix_code: 0b111000,
+        value_bits: 20,
+        token_type: 1,
+        value_base: 317088,
+    },
+    Token {
+        prefix_len: 6,
+        prefix_code: 0b111001,
+        value_bits: 20,
+        token_type: 1,
+        value_base: 1365664,
+    },
+    Token {
+        prefix_len: 6,
+        prefix_code: 0b111010,
+        value_bits: 20,
+        token_type: 1,
+        value_base: 2414240,
+    },
 ];
 
 /// zGFX decompressor state
@@ -263,7 +365,8 @@ impl Decompressor {
                             let count = self.get_bits(15)? as usize;
 
                             // Flush bit buffer and copy raw bytes
-                            self.bits_remaining = self.bits_remaining.saturating_sub(self.bits_in_current);
+                            self.bits_remaining =
+                                self.bits_remaining.saturating_sub(self.bits_in_current);
                             self.bits_in_current = 0;
                             self.bit_current = 0;
 
@@ -272,11 +375,13 @@ impl Decompressor {
                             }
 
                             // Copy raw data (need to clone to avoid borrow issues)
-                            let raw_data = self.input[self.input_pos..self.input_pos + count].to_vec();
+                            let raw_data =
+                                self.input[self.input_pos..self.input_pos + count].to_vec();
                             self.output.extend_from_slice(&raw_data);
                             self.history_write(&raw_data);
                             self.input_pos += count;
-                            self.bits_remaining = self.bits_remaining.saturating_sub((8 * count) as u32);
+                            self.bits_remaining =
+                                self.bits_remaining.saturating_sub((8 * count) as u32);
                         } else {
                             // Regular match: decode length
                             let count = self.decode_match_length()?;
@@ -385,12 +490,8 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
             let segment_count = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
 
-            let _uncompressed_size = u32::from_le_bytes([
-                data[pos],
-                data[pos + 1],
-                data[pos + 2],
-                data[pos + 3],
-            ]);
+            let _uncompressed_size =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
             pos += 4;
 
             // Process each segment
@@ -399,12 +500,9 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
                     bail!("Invalid segment header");
                 }
 
-                let segment_size = u32::from_le_bytes([
-                    data[pos],
-                    data[pos + 1],
-                    data[pos + 2],
-                    data[pos + 3],
-                ]) as usize;
+                let segment_size =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
 
                 if pos + segment_size > data.len() {
@@ -435,8 +533,11 @@ mod tests {
         // Single segment, uncompressed
         let data = vec![
             ZGFX_SEGMENTED_SINGLE, // descriptor
-            0x00,                   // flags (not compressed)
-            0x01, 0x02, 0x03, 0x04, // data
+            0x00,                  // flags (not compressed)
+            0x01,
+            0x02,
+            0x03,
+            0x04, // data
         ];
 
         let result = decompress(&data).unwrap();

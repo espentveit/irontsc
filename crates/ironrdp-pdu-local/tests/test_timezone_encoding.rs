@@ -1,5 +1,8 @@
-use ironrdp_pdu::rdp::client_info::{TimezoneInfo, OptionalSystemTime, SystemTime, Month, DayOfWeek, DayOfWeekOccurrence, ExtendedClientOptionalInfo, PerformanceFlags};
 use ironrdp_core::Encode;
+use ironrdp_pdu::rdp::client_info::{
+    DayOfWeek, DayOfWeekOccurrence, ExtendedClientOptionalInfo, Month, OptionalSystemTime,
+    PerformanceFlags, SystemTime, TimezoneInfo,
+};
 
 #[test]
 fn test_timezone_encoding() {
@@ -28,18 +31,20 @@ fn test_timezone_encoding() {
         })),
         daylight_bias: 0,
     };
-    
+
     let optional_info = ExtendedClientOptionalInfo::builder()
         .timezone(timezone)
         .session_id(2)
-        .performance_flags(PerformanceFlags::DISABLE_FULLWINDOWDRAG | PerformanceFlags::DISABLE_MENUANIMATIONS)
+        .performance_flags(
+            PerformanceFlags::DISABLE_FULLWINDOWDRAG | PerformanceFlags::DISABLE_MENUANIMATIONS,
+        )
         .build();
-    
+
     let mut buffer = vec![0u8; 512];
     let mut cursor = ironrdp_core::WriteCursor::new(&mut buffer);
-    
+
     optional_info.encode(&mut cursor).expect("encode failed");
-    
+
     let written = cursor.pos();
     println!("Encoded {} bytes", written);
     println!("Hex dump:");
@@ -50,15 +55,25 @@ fn test_timezone_encoding() {
         }
         println!();
     }
-    
+
     // Check that timezone is actually encoded
-    assert!(written > 172, "Timezone should be 172 bytes, got {}", written);
-    
+    assert!(
+        written > 172,
+        "Timezone should be 172 bytes, got {}",
+        written
+    );
+
     // Check for the string "Coordinated Universal Time" in UTF-16
-    let expected_utf16: Vec<u8> = "Coordinated Universal Time".encode_utf16()
+    let expected_utf16: Vec<u8> = "Coordinated Universal Time"
+        .encode_utf16()
         .flat_map(|c| c.to_le_bytes())
         .collect();
-    
+
     let buffer_str = String::from_utf8_lossy(&buffer[..written]);
-    println!("Buffer contains 'Coordinated': {}", buffer.windows(expected_utf16.len()).any(|w| w == expected_utf16));
+    println!(
+        "Buffer contains 'Coordinated': {}",
+        buffer
+            .windows(expected_utf16.len())
+            .any(|w| w == expected_utf16)
+    );
 }

@@ -1,6 +1,5 @@
 /// UDP connection state machine and transport implementation
 /// Based on MS-RDPEUDP spec sections 3.1.5
-
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -94,29 +93,29 @@ struct PendingPacket {
 pub struct UdpConnection {
     config: UdpConfig,
     state: ConnectionState,
-    
+
     // Sequence numbers
     next_send_sequence: u32,
     next_receive_sequence: u32,
     last_ack_received: u32,
-    
+
     // Correlation ID for multitransport
     correlation_id: Option<CorrelationId>,
-    
+
     // Pending outgoing packets (for reliable mode)
     pending_packets: HashMap<u32, PendingPacket>,
-    
+
     // Received packets buffer
     receive_buffer: HashMap<u32, Vec<u8>>,
-    
+
     // FEC state
     fec_codec: FecCodec,
     source_packets_in_block: Vec<Vec<u8>>,
-    
+
     // Timing
     last_keepalive: Instant,
     last_ack_sent: Instant,
-    
+
     // Remote peer info
     remote_mtu: u16,
     remote_window_size: u16,
@@ -163,7 +162,7 @@ impl UdpConnection {
         }
 
         self.next_send_sequence = self.config.initial_sequence_number;
-        
+
         let syn_data = SynData {
             initial_sequence_number: self.next_send_sequence,
             upstream_mtu: self.config.mtu,
@@ -181,7 +180,7 @@ impl UdpConnection {
         };
 
         let syn_lossy = self.config.mode == TransportMode::Lossy;
-        
+
         let packet = SynPacket::new(
             self.config.receive_window_size,
             syn_lossy,
@@ -205,11 +204,11 @@ impl UdpConnection {
 
         let packet = SynPacket::decode(bytes)?;
         let inner = packet.inner();
-        
+
         self.next_receive_sequence = inner.syn_data.initial_sequence_number;
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
-        
+
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
                 // Negotiate protocol version
@@ -232,7 +231,7 @@ impl UdpConnection {
         }
 
         self.next_send_sequence = self.config.initial_sequence_number;
-        
+
         let syn_data = SynData {
             initial_sequence_number: self.next_send_sequence,
             upstream_mtu: self.config.mtu,
@@ -272,7 +271,7 @@ impl UdpConnection {
 
         let packet = SynAckPacket::decode(bytes)?;
         let inner = packet.inner();
-        
+
         self.next_receive_sequence = inner.syn_data.initial_sequence_number;
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
@@ -338,15 +337,16 @@ impl UdpConnection {
     /// Process received source packet
     pub fn process_source_packet(&mut self, bytes: &[u8]) -> UdpResult<Option<Vec<u8>>> {
         let packet = SourcePacket::decode(bytes)?;
-        
+
         // Update ACK state
         self.last_ack_received = packet.header.sn_source_ack;
-        
+
         // Remove acknowledged packets from pending
-        self.pending_packets.retain(|seq, _| *seq > self.last_ack_received);
+        self.pending_packets
+            .retain(|seq, _| *seq > self.last_ack_received);
 
         let seq = packet.sequence_number();
-        
+
         // Check if this is the expected packet
         if seq == self.next_receive_sequence {
             self.next_receive_sequence = self.next_receive_sequence.wrapping_add(1);
@@ -419,9 +419,9 @@ mod tests {
     fn test_connection_initialization_client() {
         let config = UdpConfig::default();
         let mut conn = UdpConnection::new(config);
-        
+
         assert_eq!(conn.state(), ConnectionState::Idle);
-        
+
         let syn_bytes = conn.create_syn().unwrap();
         assert!(syn_bytes.len() > 0);
         assert_eq!(conn.state(), ConnectionState::SynSent);
@@ -432,18 +432,18 @@ mod tests {
         let config = UdpConfig::default();
         let mut server = UdpConnection::new(config.clone());
         let mut client = UdpConnection::new(config);
-        
+
         // Client sends SYN
         let syn_bytes = client.create_syn().unwrap();
-        
+
         // Server receives SYN
         server.process_syn(&syn_bytes).unwrap();
         assert_eq!(server.state(), ConnectionState::SynReceived);
-        
+
         // Server sends SYN+ACK
         let syn_ack_bytes = server.create_syn_ack().unwrap();
         assert_eq!(server.state(), ConnectionState::Connected);
-        
+
         // Client receives SYN+ACK
         client.process_syn_ack(&syn_ack_bytes).unwrap();
         assert_eq!(client.state(), ConnectionState::Connected);
@@ -454,15 +454,15 @@ mod tests {
         let config = UdpConfig::default();
         let mut sender = UdpConnection::new(config.clone());
         let mut receiver = UdpConnection::new(config);
-        
+
         // Establish connection
         sender.state = ConnectionState::Connected;
         receiver.state = ConnectionState::Connected;
-        
+
         // Send data
         let data = b"Hello, RDP-UDP!".to_vec();
         let packet_bytes = sender.send_data(data.clone()).unwrap();
-        
+
         // Receive data
         let received = receiver.process_source_packet(&packet_bytes).unwrap();
         assert_eq!(received, Some(data));

@@ -20,6 +20,9 @@ pub enum MultitransportProtocol {
 }
 
 impl MultitransportProtocol {
+    pub const KNOWN_TRANSPORT_MASK: u16 =
+        Self::UdpFecReliable.as_u16() | Self::UdpFecLossy.as_u16();
+
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
             0x01 => Some(Self::UdpFecReliable),
@@ -28,12 +31,20 @@ impl MultitransportProtocol {
         }
     }
 
-    pub fn as_u16(self) -> u16 {
+    pub const fn as_u16(self) -> u16 {
         match self {
             Self::UdpFecReliable => 0x01,
             Self::UdpFecLossy => 0x02,
             Self::Unknown(v) => v,
         }
+    }
+
+    pub const fn contains_known_transport_bits(value: u16) -> bool {
+        value & Self::KNOWN_TRANSPORT_MASK != 0
+    }
+
+    pub const fn extra_bits(value: u16) -> u16 {
+        value & !Self::KNOWN_TRANSPORT_MASK
     }
 }
 
@@ -63,7 +74,7 @@ impl InitiateMultitransportRequest {
     pub fn new(request_id: u32, requested_protocol: MultitransportProtocol) -> Self {
         let mut security_cookie = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut security_cookie);
-        
+
         Self {
             request_id,
             requested_protocol,
@@ -111,12 +122,8 @@ impl<'de> Decode<'de> for InitiateMultitransportRequest {
 
         let request_id = src.read_u32();
         let protocol_value = src.read_u16();
-        let requested_protocol = MultitransportProtocol::from_u16(protocol_value).ok_or_else(|| {
-            invalid_field_err!(
-                "requestedProtocol",
-                "invalid protocol value"
-            )
-        })?;
+        let requested_protocol = MultitransportProtocol::from_u16(protocol_value)
+            .ok_or_else(|| invalid_field_err!("requestedProtocol", "invalid protocol value"))?;
         let _reserved = src.read_u16();
 
         let security_cookie_bytes = src.read_slice(16);
@@ -217,7 +224,10 @@ mod tests {
         let request = InitiateMultitransportRequest::with_cookie(
             12345,
             MultitransportProtocol::UdpFecReliable,
-            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10],
+            [
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+                0x0F, 0x10,
+            ],
         );
 
         let mut buffer = vec![0u8; request.size()];

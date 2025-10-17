@@ -123,7 +123,13 @@ impl Rectangle {
         let bottom = data.get_u16_le();
 
         if left >= right || top >= bottom {
-            bail!("Invalid rectangle: ({},{}) - ({},{})", left, top, right, bottom);
+            bail!(
+                "Invalid rectangle: ({},{}) - ({},{})",
+                left,
+                top,
+                right,
+                bottom
+            );
         }
 
         Ok(Self {

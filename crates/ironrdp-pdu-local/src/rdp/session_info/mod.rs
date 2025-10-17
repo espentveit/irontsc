@@ -1,8 +1,8 @@
 use std::io;
 
 use ironrdp_core::{
-    ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, write_padding, Decode, DecodeResult, Encode,
-    EncodeResult, ReadCursor, WriteCursor,
+    ensure_fixed_part_size, ensure_size, invalid_field_err, read_padding, write_padding, Decode,
+    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -17,8 +17,8 @@ mod logon_extended;
 mod logon_info;
 
 pub use self::logon_extended::{
-    LogonErrorNotificationData, LogonErrorNotificationDataErrorCode, LogonErrorNotificationType, LogonErrorsInfo,
-    LogonExFlags, LogonInfoExtended, ServerAutoReconnect,
+    LogonErrorNotificationData, LogonErrorNotificationDataErrorCode, LogonErrorNotificationType,
+    LogonErrorsInfo, LogonExFlags, LogonInfoExtended, ServerAutoReconnect,
 };
 pub use self::logon_info::{LogonInfo, LogonInfoVersion1, LogonInfoVersion2};
 
@@ -96,7 +96,10 @@ impl<'de> Decode<'de> for SaveSessionInfoPdu {
             InfoType::LogonExtended => InfoData::LogonExtended(LogonInfoExtended::decode(src)?),
         };
 
-        Ok(Self { info_type, info_data })
+        Ok(Self {
+            info_type,
+            info_data,
+        })
     }
 }
 

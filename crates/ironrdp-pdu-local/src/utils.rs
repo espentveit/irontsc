@@ -8,11 +8,17 @@ use num_derive::FromPrimitive;
 use crate::{DecodeResult, EncodeResult};
 
 pub fn split_u64(value: u64) -> (u32, u32) {
-    #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer downcast)")]
-    let low =
-        u32::try_from(value & 0xFFFF_FFFF).expect("masking with 0xFFFF_FFFF ensures that the value fits into u32");
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "unreachable panic (checked integer downcast)"
+    )]
+    let low = u32::try_from(value & 0xFFFF_FFFF)
+        .expect("masking with 0xFFFF_FFFF ensures that the value fits into u32");
 
-    #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer downcast)")]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "unreachable panic (checked integer downcast)"
+    )]
     let high = u32::try_from(value >> 32).expect("(u64 >> 32) fits into u32");
 
     (low, high)
@@ -35,7 +41,10 @@ pub fn to_utf16_bytes(value: &str) -> Vec<u8> {
 pub fn from_utf16_bytes(mut value: &[u8]) -> String {
     let mut value_u16 = vec![0x00; value.len() / 2];
 
-    #[expect(clippy::missing_panics_doc, reason = "unreachable panic (prior constrain)")]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "unreachable panic (prior constrain)"
+    )]
     value
         .read_u16_into::<LittleEndian>(value_u16.as_mut())
         .expect("read_u16_into cannot fail at this point");
@@ -111,27 +120,40 @@ pub fn read_string_from_cursor(
             let str_buffer = &mut slice;
             let mut u16_buffer = vec![0u16; str_buffer.len() / 2];
 
-            #[expect(clippy::missing_panics_doc, reason = "unreachable panic (prior constrain)")]
+            #[expect(
+                clippy::missing_panics_doc,
+                reason = "unreachable panic (prior constrain)"
+            )]
             str_buffer
                 .read_u16_into::<LittleEndian>(u16_buffer.as_mut())
                 .expect("BUG: str_buffer is always even for UTF16");
 
-            String::from_utf16(&u16_buffer)
-                .map_err(|_| invalid_field_err!("UTF16 decode", "buffer", "Failed to decode UTF16 string"))?
+            String::from_utf16(&u16_buffer).map_err(|_| {
+                invalid_field_err!("UTF16 decode", "buffer", "Failed to decode UTF16 string")
+            })?
         }
         CharacterSet::Ansi => {
             ensure_size!(ctx: "Decode string (UTF-8)", in: cursor, size: size);
             let slice = cursor.read_slice(size);
-            String::from_utf8(slice.to_vec())
-                .map_err(|_| invalid_field_err!("UTF8 decode", "buffer", "Failed to decode UTF8 string"))?
+            String::from_utf8(slice.to_vec()).map_err(|_| {
+                invalid_field_err!("UTF8 decode", "buffer", "Failed to decode UTF8 string")
+            })?
         }
     };
 
     Ok(result.trim_end_matches('\0').into())
 }
 
-pub fn decode_string(src: &[u8], character_set: CharacterSet, read_null_terminator: bool) -> DecodeResult<String> {
-    read_string_from_cursor(&mut ReadCursor::new(src), character_set, read_null_terminator)
+pub fn decode_string(
+    src: &[u8],
+    character_set: CharacterSet,
+    read_null_terminator: bool,
+) -> DecodeResult<String> {
+    read_string_from_cursor(
+        &mut ReadCursor::new(src),
+        character_set,
+        read_null_terminator,
+    )
 }
 
 pub fn read_multistring_from_cursor(
@@ -191,7 +213,12 @@ pub fn write_string_to_cursor(
     character_set: CharacterSet,
     write_null_terminator: bool,
 ) -> EncodeResult<()> {
-    let len = encode_string(cursor.remaining_mut(), value, character_set, write_null_terminator)?;
+    let len = encode_string(
+        cursor.remaining_mut(),
+        value,
+        character_set,
+        write_null_terminator,
+    )?;
     cursor.advance(len);
     Ok(())
 }
@@ -223,10 +250,16 @@ pub fn write_multistring_to_cursor(
 
 /// Returns the length in bytes of the encoded value
 /// based on the passed CharacterSet and with_null_terminator flag.
-pub fn encoded_str_len(value: &str, character_set: CharacterSet, with_null_terminator: bool) -> usize {
+pub fn encoded_str_len(
+    value: &str,
+    character_set: CharacterSet,
+    with_null_terminator: bool,
+) -> usize {
     match character_set {
         CharacterSet::Ansi => value.len() + if with_null_terminator { 1 } else { 0 },
-        CharacterSet::Unicode => value.encode_utf16().count() * 2 + if with_null_terminator { 2 } else { 0 },
+        CharacterSet::Unicode => {
+            value.encode_utf16().count() * 2 + if with_null_terminator { 2 } else { 0 }
+        }
     }
 }
 
@@ -237,7 +270,11 @@ pub fn encoded_multistring_len(strings: &[String], character_set: CharacterSet) 
         .iter()
         .map(|s| encoded_str_len(s, character_set, true))
         .sum::<usize>()
-        + if character_set == CharacterSet::Unicode { 2 } else { 1 }
+        + if character_set == CharacterSet::Unicode {
+            2
+        } else {
+            1
+        }
 }
 
 // FIXME: legacy trait

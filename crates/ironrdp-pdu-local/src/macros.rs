@@ -5,14 +5,20 @@
 #[macro_export]
 macro_rules! decode_err {
     ($source:expr $(,)? ) => {
-        <$crate::PduError as $crate::PduErrorExt>::decode($crate::ironrdp_core::function!(), $source)
+        <$crate::PduError as $crate::PduErrorExt>::decode(
+            $crate::ironrdp_core::function!(),
+            $source,
+        )
     };
 }
 
 #[macro_export]
 macro_rules! encode_err {
     ($source:expr $(,)? ) => {
-        <$crate::PduError as $crate::PduErrorExt>::encode($crate::ironrdp_core::function!(), $source)
+        <$crate::PduError as $crate::PduErrorExt>::encode(
+            $crate::ironrdp_core::function!(),
+            $source,
+        )
     };
 }
 

@@ -3,8 +3,8 @@ use core::fmt::Debug;
 use bit_field::BitField as _;
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 
 use crate::geometry::InclusiveRectangle;
@@ -188,8 +188,9 @@ impl<'de> Decode<'de> for Avc444BitmapStream<'de> {
 
         let stream_info = src.read_u32();
         let stream_len = stream_info.get_bits(0..30);
-        let encoding =
-            Encoding::from_bits_truncate(u8::try_from(stream_info.get_bits(30..32)).expect("value fits into u8"));
+        let encoding = Encoding::from_bits_truncate(
+            u8::try_from(stream_info.get_bits(30..32)).expect("value fits into u8"),
+        );
 
         if stream_len == 0 {
             if encoding == Encoding::LUMA_AND_CHROMA {
@@ -203,7 +204,8 @@ impl<'de> Decode<'de> for Avc444BitmapStream<'de> {
                 stream2: None,
             })
         } else {
-            let (mut stream1, mut stream2) = src.split_at(cast_length!("first stream length", stream_len)?);
+            let (mut stream1, mut stream2) =
+                src.split_at(cast_length!("first stream length", stream_len)?);
             let stream1 = Avc420BitmapStream::decode(&mut stream1)?;
             let stream2 = if encoding == Encoding::LUMA_AND_CHROMA {
                 Some(Avc420BitmapStream::decode(&mut stream2)?)

@@ -5,9 +5,8 @@ use crate::SessionError;
 impl From<ironrdp_connector::ConnectorErrorKind> for crate::SessionErrorKind {
     fn from(value: ironrdp_connector::ConnectorErrorKind) -> Self {
         match value {
-            ironrdp_connector::ConnectorErrorKind::Custom | ironrdp_connector::ConnectorErrorKind::Credssp(_) => {
-                crate::SessionErrorKind::Custom
-            }
+            ironrdp_connector::ConnectorErrorKind::Custom
+            | ironrdp_connector::ConnectorErrorKind::Credssp(_) => crate::SessionErrorKind::Custom,
             _ => crate::SessionErrorKind::General,
         }
     }

@@ -3,8 +3,8 @@ use core::iter;
 use bit_field::BitField as _;
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
-    ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeResult,
+    Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
@@ -85,7 +85,10 @@ impl<'de> Decode<'de> for ContextPdu {
         let flags = OperatingMode::from_bits_truncate(properties.get_bits(0..3));
         let color_conversion_transform = properties.get_bits(3..5);
         if color_conversion_transform != COLOR_CONVERSION_ICT {
-            return Err(invalid_field_err!("cct", "Invalid color conversion transform"));
+            return Err(invalid_field_err!(
+                "cct",
+                "Invalid color conversion transform"
+            ));
         }
 
         let dwt = properties.get_bits(5..9);
@@ -264,7 +267,10 @@ impl<'de> Decode<'de> for RegionPdu {
 
         let number_of_tilesets = src.read_u16();
         if number_of_tilesets != NUMBER_OF_TILESETS {
-            return Err(invalid_field_err!("numTilesets", "Invalid number of tilesets"));
+            return Err(invalid_field_err!(
+                "numTilesets",
+                "Invalid number of tilesets"
+            ));
         }
 
         Ok(Self { rectangles })
@@ -307,7 +313,11 @@ impl Encode for TileSetPdu<'_> {
         dst.write_u8(u8::try_from(TILE_SIZE).expect("TILE_SIZE value fits into u8"));
         dst.write_u16(cast_length!("numTiles", self.tiles.len())?);
 
-        let tiles_data_size = self.tiles.iter().map(|t| Block::Tile(t.clone()).size()).sum::<usize>();
+        let tiles_data_size = self
+            .tiles
+            .iter()
+            .map(|t| Block::Tile(t.clone()).size())
+            .sum::<usize>();
         dst.write_u32(cast_length!("tilesDataSize", tiles_data_size)?);
 
         for quant in &self.quants {
@@ -328,7 +338,11 @@ impl Encode for TileSetPdu<'_> {
     fn size(&self) -> usize {
         Self::FIXED_PART_SIZE
             + self.quants.iter().map(Encode::size).sum::<usize>()
-            + self.tiles.iter().map(|t| Block::Tile(t.clone()).size()).sum::<usize>()
+            + self
+                .tiles
+                .iter()
+                .map(|t| Block::Tile(t.clone()).size())
+                .sum::<usize>()
     }
 }
 
@@ -398,7 +412,10 @@ impl<'de> Decode<'de> for TileSetPdu<'de> {
             .into_iter()
             .map(|b| match b {
                 Block::Tile(tile) => Ok(tile),
-                _ => Err(invalid_field_err!("tile", "Invalid block type, expected Tile")),
+                _ => Err(invalid_field_err!(
+                    "tile",
+                    "Invalid block type, expected Tile"
+                )),
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -456,7 +473,12 @@ impl<'de> Decode<'de> for RfxRectangle {
         let width = src.read_u16();
         let height = src.read_u16();
 
-        Ok(Self { x, y, width, height })
+        Ok(Self {
+            x,
+            y,
+            width,
+            height,
+        })
     }
 }
 

@@ -2,15 +2,17 @@ use std::io;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, invalid_field_err, unsupported_value_err, Decode, DecodeResult, Encode,
-    EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, invalid_field_err, unsupported_value_err, Decode,
+    DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use md5::Digest as _;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
 use thiserror::Error;
 
-use crate::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags, BASIC_SECURITY_HEADER_SIZE};
+use crate::rdp::headers::{
+    BasicSecurityHeader, BasicSecurityHeaderFlags, BASIC_SECURITY_HEADER_SIZE,
+};
 pub use crate::rdp::server_license::client_license_info::ClientLicenseInfo;
 use crate::PduError;
 
@@ -29,8 +31,12 @@ pub use self::client_new_license_request::{ClientNewLicenseRequest, PLATFORM_ID}
 pub use self::client_platform_challenge_response::{
     ClientHardwareIdentification, ClientPlatformChallengeResponse, PlatformChallengeResponseData,
 };
-pub use self::licensing_error_message::{LicenseErrorCode, LicensingErrorMessage, LicensingStateTransition};
-pub use self::server_license_request::{cert, ProductInfo, Scope, ServerCertificate, ServerLicenseRequest};
+pub use self::licensing_error_message::{
+    LicenseErrorCode, LicensingErrorMessage, LicensingStateTransition,
+};
+pub use self::server_license_request::{
+    cert, ProductInfo, Scope, ServerCertificate, ServerLicenseRequest,
+};
 pub use self::server_platform_challenge::ServerPlatformChallenge;
 pub use self::server_upgrade_license::{LicenseInformation, ServerUpgradeLicense};
 
@@ -102,7 +108,10 @@ impl<'de> Decode<'de> for LicenseHeader {
 
         let security_header = BasicSecurityHeader::decode(src)?;
 
-        if !security_header.flags.contains(BasicSecurityHeaderFlags::LICENSE_PKT) {
+        if !security_header
+            .flags
+            .contains(BasicSecurityHeaderFlags::LICENSE_PKT)
+        {
             return Err(invalid_field_err!(
                 "securityHeaderFlags",
                 "invalid security header flags"
@@ -119,7 +128,9 @@ impl<'de> Decode<'de> for LicenseHeader {
             .ok_or_else(|| invalid_field_err!("preambleFlags", "Got invalid flags field"))?;
 
         let preamble_version = PreambleVersion::from_u8(flags_with_version & PROTOCOL_VERSION_MASK)
-            .ok_or_else(|| invalid_field_err!("preambleVersion", "Got invalid version in the flags filed"))?;
+            .ok_or_else(|| {
+                invalid_field_err!("preambleVersion", "Got invalid version in the flags filed")
+            })?;
 
         Ok(Self {
             security_header,
@@ -349,9 +360,14 @@ fn compute_mac_data(mac_salt_key: &[u8], data: &[u8]) -> Result<Vec<u8>, ServerL
 
     let mut hasher = sha1::Sha1::new();
     hasher.update(
-        [mac_salt_key, pad_one.as_ref(), data_len_buffer.as_ref(), data]
-            .concat()
-            .as_slice(),
+        [
+            mac_salt_key,
+            pad_one.as_ref(),
+            data_len_buffer.as_ref(),
+            data,
+        ]
+        .concat()
+        .as_slice(),
     );
     let sha_result = hasher.finalize();
 
@@ -383,8 +399,12 @@ impl<'de> Decode<'de> for LicensePdu {
         let license_header = LicenseHeader::decode(src)?;
 
         match license_header.preamble_message_type {
-            PreambleType::LicenseRequest => Ok(ServerLicenseRequest::decode(license_header, src)?.into()),
-            PreambleType::PlatformChallenge => Ok(ServerPlatformChallenge::decode(license_header, src)?.into()),
+            PreambleType::LicenseRequest => {
+                Ok(ServerLicenseRequest::decode(license_header, src)?.into())
+            }
+            PreambleType::PlatformChallenge => {
+                Ok(ServerPlatformChallenge::decode(license_header, src)?.into())
+            }
             PreambleType::NewLicense | PreambleType::UpgradeLicense => {
                 Ok(ServerUpgradeLicense::decode(license_header, src)?.into())
             }
@@ -392,11 +412,15 @@ impl<'de> Decode<'de> for LicensePdu {
                 "LicensePdu::LicenseInfo",
                 "LicenseInfo is not supported".to_owned()
             )),
-            PreambleType::NewLicenseRequest => Ok(ClientNewLicenseRequest::decode(license_header, src)?.into()),
+            PreambleType::NewLicenseRequest => {
+                Ok(ClientNewLicenseRequest::decode(license_header, src)?.into())
+            }
             PreambleType::PlatformChallengeResponse => {
                 Ok(ClientPlatformChallengeResponse::decode(license_header, src)?.into())
             }
-            PreambleType::ErrorAlert => Ok(LicensingErrorMessage::decode(license_header, src)?.into()),
+            PreambleType::ErrorAlert => {
+                Ok(LicensingErrorMessage::decode(license_header, src)?.into())
+            }
         }
     }
 }
