@@ -84,7 +84,7 @@ impl DrdynvcClient {
 
     fn create_capabilities_response(&mut self) -> SvcMessage {
         let caps_response =
-            DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(CapsVersion::V1));
+            DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(CapsVersion::V3));
         debug!("Send DVC Capabilities Response PDU: {caps_response:?}");
         self.cap_handshake_done = true;
         SvcMessage::from(caps_response)
