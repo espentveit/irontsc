@@ -1567,6 +1567,7 @@ fn detect_multitransport_request(
 
 fn encode_multitransport_response_frame(
     request: MultitransportRequestInfo,
+    message_channel_id: Option<u16>,
 ) -> ConnectorResult<Vec<u8>> {
     struct MultitransportResponsePdu {
         security_flags: BasicSecurityHeaderFlags,
@@ -1603,9 +1604,26 @@ fn encode_multitransport_response_frame(
     };
 
     let mut buf = WriteBuf::new();
+    
+    // Use message channel ID from server if available (per MS-RDPBCGR spec requirement)
+    // Otherwise fall back to the channel from the request
+    let channel_id = message_channel_id.unwrap_or(request.channel_id);
+    
+    if let Some(msg_ch_id) = message_channel_id {
+        info!(
+            "📨 Sending Multitransport Response on MCS Message Channel 0x{:04x} (from ServerMessageChannelData)",
+            msg_ch_id
+        );
+    } else {
+        warn!(
+            "⚠️  No message channel ID available - falling back to request channel 0x{:04x}",
+            request.channel_id
+        );
+    }
+    
     legacy::encode_send_data_request(
         request.initiator_id,
-        request.channel_id,
+        channel_id,
         &response_pdu,
         &mut buf,
     )?;
@@ -1630,6 +1648,7 @@ async fn active_session<T: RdpEventSender>(
 
     // Extract needed values before connection_result is consumed
     let correlation_id = connection_result.correlation_id;
+    let message_channel_id = connection_result.message_channel_id;
 
     let mut active_stage = ActiveStage::new(connection_result);
 
@@ -1733,9 +1752,13 @@ async fn active_session<T: RdpEventSender>(
 
                     // Only start UDP handshake if this is a new request (not a duplicate)
                     if !is_duplicate {
-                        match encode_multitransport_response_frame(request_info) {
+                        match encode_multitransport_response_frame(request_info, message_channel_id) {
                             Ok(frame) => {
                                 info!("📨 Sending Initiate Multitransport Response (S_OK) for request_id={}", request_id);
+                                eprintln!("🔍 Multitransport Response bytes ({} bytes):", frame.len());
+                                for chunk in frame.chunks(32) {
+                                    eprintln!("    {:02x?}", chunk);
+                                }
                                 extra_outputs.push(ActiveStageOutput::ResponseFrame(frame));
                             }
                             Err(err) => {
@@ -1808,24 +1831,12 @@ async fn active_session<T: RdpEventSender>(
                         }
                     }
 
-                    // Process the rest of the PDU normally after handling multitransport setup
-                    match active_stage.process(&mut image, action, &payload) {
-                        Ok(mut main_outputs) => {
-                            extra_outputs.append(&mut main_outputs);
-                            extra_outputs
-                        }
-                        Err(e) => {
-                            // After multitransport request, ANY error during PDU processing is handled gracefully
-                            // The multitransport response has already been sent, so we just continue
-                            let err_msg = format!("{:?}", e);
-                            warn!(
-                                "⚠️  Error during process after multitransport setup (ignored): {}",
-                                err_msg
-                            );
-                            // Return the multitransport response that was already added to extra_outputs
-                            extra_outputs
-                        }
-                    }
+                    // IMPORTANT: Multitransport request PDUs are control PDUs that should NOT be processed
+                    // by the normal RDP state machine. We've already sent the response above, so just return.
+                    // Additionally, we ignore all TCP data until UDP SYN+ACK completes, since the server
+                    // may send protocol errors or control messages that don't apply to UDP session init.
+                    info!("✅ Multitransport request handled, skipping TCP processing during UDP handshake");
+                    extra_outputs
                 } else {
                     // Not a multitransport request - process normally
                     match active_stage.process(&mut image, action, &payload) {

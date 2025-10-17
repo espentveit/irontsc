@@ -28,6 +28,9 @@ pub struct ConnectionResult {
     pub pointer_software_rendering: bool,
     pub connection_activation: ConnectionActivationSequence,
     pub correlation_id: Option<[u8; 16]>,
+    /// MCS message channel ID from server's GCC ServerMessageChannelData (for multitransport responses)
+    /// This must be used for sending InitiateMultitransportResponse PDUs per MS-RDPBCGR spec
+    pub message_channel_id: Option<u16>,
 }
 
 #[derive(Default, Debug)]
@@ -130,6 +133,8 @@ pub struct ClientConnector {
     pub client_addr: SocketAddr,
     pub static_channels: StaticChannelSet,
     pub correlation_id: Option<[u8; 16]>,
+    /// MCS message channel ID from server's GCC ServerMessageChannelData (for multitransport responses)
+    pub message_channel_id: Option<u16>,
 }
 
 impl ClientConnector {
@@ -140,6 +145,7 @@ impl ClientConnector {
             client_addr,
             static_channels: StaticChannelSet::new(),
             correlation_id: None,
+            message_channel_id: None,
         }
     }
 
@@ -470,8 +476,12 @@ impl Sequence for ClientConnector {
                     return Err(general_err!("can't satisfy server security settings"));
                 }
 
-                if server_gcc_blocks.message_channel.is_some() {
-                    warn!("Unexpected ServerMessageChannelData GCC block (not supported)");
+                // Extract the MCS message channel ID if available (used for multitransport responses)
+                if let Some(ref message_channel_data) = server_gcc_blocks.message_channel {
+                    info!("📨 Server MCS Message Channel ID: 0x{:04x}", message_channel_data.mcs_message_channel_id);
+                    self.message_channel_id = Some(message_channel_data.mcs_message_channel_id);
+                } else {
+                    warn!("⚠️  No ServerMessageChannelData GCC block - multitransport responses may not work");
                 }
 
                 if server_gcc_blocks.multi_transport_channel.is_some() {
@@ -696,6 +706,7 @@ impl Sequence for ClientConnector {
                                 pointer_software_rendering,
                                 connection_activation,
                                 correlation_id: self.correlation_id,
+                                message_channel_id: self.message_channel_id,
                             },
                         },
                         _ => return Err(general_err!("invalid state (this is a bug)")),
