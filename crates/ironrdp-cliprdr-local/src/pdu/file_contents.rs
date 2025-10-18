@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_int, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, IntoOwned, ReadCursor,
-    WriteCursor,
+    cast_int, ensure_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
+    IntoOwned, ReadCursor, WriteCursor,
 };
 use ironrdp_pdu::impl_pdu_borrowing;
 use ironrdp_pdu::utils::{combine_u64, split_u64};
@@ -94,11 +94,9 @@ impl<'a> FileContentsResponse<'a> {
 
     /// Read data as u64 size value
     pub fn data_as_size(&self) -> DecodeResult<u64> {
-        let chunk = self
-            .data
-            .as_ref()
-            .try_into()
-            .map_err(|_| invalid_field_err!("requestedFileContentsData", "not enough bytes for u64 size"))?;
+        let chunk = self.data.as_ref().try_into().map_err(|_| {
+            invalid_field_err!("requestedFileContentsData", "not enough bytes for u64 size")
+        })?;
 
         Ok(u64::from_le_bytes(chunk))
     }
@@ -136,12 +134,17 @@ impl<'de> Decode<'de> for FileContentsResponse<'de> {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
         let header = PartialHeader::decode(src)?;
 
-        let is_error = header.message_flags.contains(ClipboardPduFlags::RESPONSE_FAIL);
+        let is_error = header
+            .message_flags
+            .contains(ClipboardPduFlags::RESPONSE_FAIL);
 
         ensure_size!(in: src, size: header.data_length());
 
         if header.data_length() < Self::FIXED_PART_SIZE {
-            return Err(invalid_field_err!("requestedFileContentsData", "Invalid data size"));
+            return Err(invalid_field_err!(
+                "requestedFileContentsData",
+                "Invalid data size"
+            ));
         };
 
         let data_size = header.data_length() - Self::FIXED_PART_SIZE;
@@ -234,7 +237,11 @@ impl<'de> Decode<'de> for FileContentsRequest {
         let position_hi = src.read_u32();
         let position = combine_u64(position_lo, position_hi);
         let requested_size = src.read_u32();
-        let data_id = if read_data_id { Some(src.read_u32()) } else { None };
+        let data_id = if read_data_id {
+            Some(src.read_u32())
+        } else {
+            None
+        };
 
         Ok(Self {
             stream_id,

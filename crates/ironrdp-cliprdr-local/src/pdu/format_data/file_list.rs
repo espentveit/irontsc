@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
+    WriteCursor,
 };
 use ironrdp_pdu::utils::{combine_u64, decode_string, encode_string, split_u64, CharacterSet};
 use ironrdp_pdu::{impl_pdu_pod, write_padding};
@@ -89,7 +90,11 @@ impl Encode for FileDescriptor {
 
         dst.write_u32(flags.bits());
         dst.write_array([0u8; 32]);
-        dst.write_u32(self.attributes.unwrap_or(ClipboardFileAttributes::empty()).bits());
+        dst.write_u32(
+            self.attributes
+                .unwrap_or(ClipboardFileAttributes::empty())
+                .bits(),
+        );
         dst.write_array([0u8; 16]);
         dst.write_u64(self.last_write_time.unwrap_or_default());
 

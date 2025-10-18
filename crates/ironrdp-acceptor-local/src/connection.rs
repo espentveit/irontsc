@@ -1,8 +1,8 @@
 use core::mem;
 
 use ironrdp_connector::{
-    encode_x224_packet, general_err, reason_err, ConnectorError, ConnectorErrorExt as _, ConnectorResult, DesktopSize,
-    Sequence, State, Written,
+    encode_x224_packet, general_err, reason_err, ConnectorError, ConnectorErrorExt as _,
+    ConnectorResult, DesktopSize, Sequence, State, Written,
 };
 use ironrdp_core::{decode, WriteBuf};
 use ironrdp_pdu as pdu;
@@ -128,7 +128,8 @@ impl Acceptor {
     /// Panics if state is not [AcceptorState::SecurityUpgrade].
     pub fn mark_security_upgrade_as_done(&mut self) {
         assert!(self.reached_security_upgrade().is_some());
-        self.step(&[], &mut WriteBuf::new()).expect("transition to next state");
+        self.step(&[], &mut WriteBuf::new())
+            .expect("transition to next state");
         debug_assert!(self.reached_security_upgrade().is_none());
     }
 
@@ -141,7 +142,9 @@ impl Acceptor {
     /// Panics if state is not [AcceptorState::Credssp].
     pub fn mark_credssp_as_done(&mut self) {
         assert!(self.should_perform_credssp());
-        let res = self.step(&[], &mut WriteBuf::new()).expect("transition to next state");
+        let res = self
+            .step(&[], &mut WriteBuf::new())
+            .expect("transition to next state");
         debug_assert!(!self.should_perform_credssp());
         assert_eq!(res, Written::Nothing);
     }
@@ -285,7 +288,9 @@ impl Sequence for Acceptor {
             AcceptorState::CapabilitiesSendServer { .. } => None,
             AcceptorState::MonitorLayoutSend { .. } => None,
             AcceptorState::CapabilitiesWaitConfirm { .. } => Some(&pdu::X224_HINT),
-            AcceptorState::ConnectionFinalization { finalization, .. } => finalization.next_pdu_hint(),
+            AcceptorState::ConnectionFinalization { finalization, .. } => {
+                finalization.next_pdu_hint()
+            }
             AcceptorState::Accepted { .. } => None,
         }
     }
@@ -324,7 +329,9 @@ impl Sequence for Acceptor {
                 } else if self.security.is_empty() {
                     SecurityProtocol::empty()
                 } else {
-                    return Err(ConnectorError::general("failed to negotiate security protocol"));
+                    return Err(ConnectorError::general(
+                        "failed to negotiate security protocol",
+                    ));
                 };
                 let connection_confirm = nego::ConnectionConfirm::Response {
                     flags: nego::ResponseFlags::empty(),
@@ -333,8 +340,8 @@ impl Sequence for Acceptor {
 
                 debug!(message = ?connection_confirm, "Send");
 
-                let written =
-                    ironrdp_core::encode_buf(&X224(connection_confirm), output).map_err(ConnectorError::encode)?;
+                let written = ironrdp_core::encode_buf(&X224(connection_confirm), output)
+                    .map_err(ConnectorError::encode)?;
 
                 (
                     Written::from_size(written)?,
@@ -350,7 +357,9 @@ impl Sequence for Acceptor {
                 protocol,
             } => {
                 debug!(?requested_protocol);
-                let next_state = if protocol.intersects(SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX) {
+                let next_state = if protocol
+                    .intersects(SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX)
+                {
                     AcceptorState::Credssp {
                         requested_protocol,
                         protocol,
@@ -382,8 +391,8 @@ impl Sequence for Acceptor {
                 let x224_payload = decode::<X224<pdu::x224::X224Data<'_>>>(input)
                     .map_err(ConnectorError::decode)
                     .map(|p| p.0)?;
-                let settings_initial =
-                    decode::<mcs::ConnectInitial>(x224_payload.data.as_ref()).map_err(ConnectorError::decode)?;
+                let settings_initial = decode::<mcs::ConnectInitial>(x224_payload.data.as_ref())
+                    .map_err(ConnectorError::decode)?;
 
                 debug!(message = ?settings_initial, "Received");
 
@@ -405,12 +414,14 @@ impl Sequence for Acceptor {
                     })
                     .unwrap_or_default();
 
-                #[expect(clippy::arithmetic_side_effects)] // IO channel ID is not big enough for overflowing.
+                #[expect(clippy::arithmetic_side_effects)]
+                // IO channel ID is not big enough for overflowing.
                 let channels = joined
                     .into_iter()
                     .enumerate()
                     .map(|(i, channel)| {
-                        let channel_id = u16::try_from(i).expect("always in the range") + self.io_channel_id + 1;
+                        let channel_id =
+                            u16::try_from(i).expect("always in the range") + self.io_channel_id + 1;
                         if let Some((type_id, c)) = channel {
                             self.static_channels.attach_channel_id(type_id, channel_id);
                             (channel_id, Some(c))
@@ -439,8 +450,9 @@ impl Sequence for Acceptor {
             } => {
                 let channel_ids: Vec<u16> = channels.iter().map(|&(i, _)| i).collect();
 
-                let skip_channel_join = early_capability
-                    .is_some_and(|client| client.contains(gcc::ClientEarlyCapabilityFlags::SUPPORT_SKIP_CHANNELJOIN));
+                let skip_channel_join = early_capability.is_some_and(|client| {
+                    client.contains(gcc::ClientEarlyCapabilityFlags::SUPPORT_SKIP_CHANNELJOIN)
+                });
 
                 let server_blocks = create_gcc_blocks(
                     self.io_channel_id,
@@ -450,8 +462,11 @@ impl Sequence for Acceptor {
                 );
 
                 let settings_response = mcs::ConnectResponse {
-                    conference_create_response: gcc::ConferenceCreateResponse::new(self.user_channel_id, server_blocks)
-                        .map_err(ConnectorError::decode)?,
+                    conference_create_response: gcc::ConferenceCreateResponse::new(
+                        self.user_channel_id,
+                        server_blocks,
+                    )
+                    .map_err(ConnectorError::decode)?,
                     called_connect_id: 1,
                     domain_parameters: mcs::DomainParameters::target(),
                 };
@@ -459,7 +474,10 @@ impl Sequence for Acceptor {
                 debug!(message = ?settings_response, "Send");
 
                 let written = encode_x224_packet(&settings_response, output)?;
-                let channels = channels.into_iter().filter_map(|(i, c)| c.map(|c| (i, c))).collect();
+                let channels = channels
+                    .into_iter()
+                    .filter_map(|(i, c)| c.map(|c| (i, c)))
+                    .collect();
 
                 (
                     Written::from_size(written)?,
@@ -470,7 +488,11 @@ impl Sequence for Acceptor {
                         connection: if skip_channel_join {
                             ChannelConnectionSequence::skip_channel_join(self.user_channel_id)
                         } else {
-                            ChannelConnectionSequence::new(self.user_channel_id, self.io_channel_id, channel_ids)
+                            ChannelConnectionSequence::new(
+                                self.user_channel_id,
+                                self.io_channel_id,
+                                channel_ids,
+                            )
                         },
                     },
                 )
@@ -520,7 +542,8 @@ impl Sequence for Acceptor {
                 early_capability,
                 channels,
             } => {
-                let data: X224<mcs::SendDataRequest<'_>> = decode(input).map_err(ConnectorError::decode)?;
+                let data: X224<mcs::SendDataRequest<'_>> =
+                    decode(input).map_err(ConnectorError::decode)?;
                 let data = data.0;
                 let client_info: rdp::ClientInfoPdu =
                     decode(data.user_data.as_ref()).map_err(ConnectorError::decode)?;
@@ -539,7 +562,12 @@ impl Sequence for Acceptor {
 
                         debug!(message = ?info, "Send");
 
-                        util::encode_send_data_indication(self.user_channel_id, self.io_channel_id, &info, output)?;
+                        util::encode_send_data_indication(
+                            self.user_channel_id,
+                            self.io_channel_id,
+                            &info,
+                            output,
+                        )?;
 
                         return Err(ConnectorError::general("invalid credentials"));
                     }
@@ -564,8 +592,12 @@ impl Sequence for Acceptor {
 
                 debug!(message = ?license, "Send");
 
-                let written =
-                    util::encode_send_data_indication(self.user_channel_id, self.io_channel_id, &license, output)?;
+                let written = util::encode_send_data_indication(
+                    self.user_channel_id,
+                    self.io_channel_id,
+                    &license,
+                    output,
+                )?;
 
                 self.saved_for_reactivation = AcceptorState::CapabilitiesSendServer {
                     early_capability,
@@ -588,12 +620,14 @@ impl Sequence for Acceptor {
                 let demand_active = rdp::headers::ShareControlHeader {
                     share_id: 0,
                     pdu_source: self.io_channel_id,
-                    share_control_pdu: ShareControlPdu::ServerDemandActive(rdp::capability_sets::ServerDemandActive {
-                        pdu: rdp::capability_sets::DemandActive {
-                            source_descriptor: "".into(),
-                            capability_sets: self.server_capabilities.clone(),
+                    share_control_pdu: ShareControlPdu::ServerDemandActive(
+                        rdp::capability_sets::ServerDemandActive {
+                            pdu: rdp::capability_sets::DemandActive {
+                                source_descriptor: "".into(),
+                                capability_sets: self.server_capabilities.clone(),
+                            },
                         },
-                    }),
+                    ),
                 };
 
                 debug!(message = ?demand_active, "Send");
@@ -616,8 +650,8 @@ impl Sequence for Acceptor {
             }
 
             AcceptorState::MonitorLayoutSend { channels } => {
-                let monitor_layout =
-                    rdp::headers::ShareDataPdu::MonitorLayout(rdp::finalization_messages::MonitorLayoutPdu {
+                let monitor_layout = rdp::headers::ShareDataPdu::MonitorLayout(
+                    rdp::finalization_messages::MonitorLayoutPdu {
                         monitors: vec![gcc::Monitor {
                             left: 0,
                             top: 0,
@@ -625,14 +659,19 @@ impl Sequence for Acceptor {
                             bottom: i32::from(self.desktop_size.height),
                             flags: gcc::MonitorFlags::PRIMARY,
                         }],
-                    });
+                    },
+                );
 
                 debug!(message = ?monitor_layout, "Send");
 
                 let share_data = wrap_share_data(monitor_layout, self.io_channel_id);
 
-                let written =
-                    util::encode_send_data_indication(self.user_channel_id, self.io_channel_id, &share_data, output)?;
+                let written = util::encode_send_data_indication(
+                    self.user_channel_id,
+                    self.io_channel_id,
+                    &share_data,
+                    output,
+                )?;
 
                 (
                     Written::from_size(written)?,
@@ -658,8 +697,9 @@ impl Sequence for Acceptor {
                 };
                 match message {
                     mcs::McsMessage::SendDataRequest(data) => {
-                        let capabilities_confirm = decode::<rdp::headers::ShareControlHeader>(data.user_data.as_ref())
-                            .map_err(ConnectorError::decode);
+                        let capabilities_confirm =
+                            decode::<rdp::headers::ShareControlHeader>(data.user_data.as_ref())
+                                .map_err(ConnectorError::decode);
                         let capabilities_confirm = match capabilities_confirm {
                             Ok(capabilities_confirm) => capabilities_confirm,
                             Err(e) => {
@@ -675,7 +715,8 @@ impl Sequence for Acceptor {
 
                         debug!(message = ?capabilities_confirm, "Received");
 
-                        let ShareControlPdu::ClientConfirmActive(confirm) = capabilities_confirm.share_control_pdu
+                        let ShareControlPdu::ClientConfirmActive(confirm) =
+                            capabilities_confirm.share_control_pdu
                         else {
                             return Err(ConnectorError::general("expected client confirm active"));
                         };
@@ -684,14 +725,21 @@ impl Sequence for Acceptor {
                             Written::Nothing,
                             AcceptorState::ConnectionFinalization {
                                 channels: channels.clone(),
-                                finalization: FinalizationSequence::new(self.user_channel_id, self.io_channel_id),
+                                finalization: FinalizationSequence::new(
+                                    self.user_channel_id,
+                                    self.io_channel_id,
+                                ),
                                 client_capabilities: confirm.pdu.capability_sets,
                             },
                         )
                     }
 
                     mcs::McsMessage::DisconnectProviderUltimatum(ultimatum) => {
-                        return Err(reason_err!("received disconnect ultimatum", "{:?}", ultimatum.reason))
+                        return Err(reason_err!(
+                            "received disconnect ultimatum",
+                            "{:?}",
+                            ultimatum.reason
+                        ))
                     }
 
                     _ => {

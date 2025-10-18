@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_int, cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode, DecodeError, DecodeResult,
-    Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_int, cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, Decode,
+    DecodeError, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use ironrdp_pdu::{impl_pdu_pod, read_padding, write_padding};
 
@@ -23,8 +23,14 @@ impl Capabilities {
         Self::FIXED_PART_SIZE + self.capabilities.iter().map(|c| c.size()).sum::<usize>()
     }
 
-    pub fn new(version: ClipboardProtocolVersion, general_flags: ClipboardGeneralCapabilityFlags) -> Self {
-        let capabilities = vec![CapabilitySet::General(GeneralCapabilitySet { version, general_flags })];
+    pub fn new(
+        version: ClipboardProtocolVersion,
+        general_flags: ClipboardGeneralCapabilityFlags,
+    ) -> Self {
+        let capabilities = vec![CapabilitySet::General(GeneralCapabilitySet {
+            version,
+            general_flags,
+        })];
 
         Self { capabilities }
     }
@@ -65,7 +71,11 @@ impl Encode for Capabilities {
 
         ensure_size!(in: dst, size: self.inner_size());
 
-        dst.write_u16(cast_length!(Self::NAME, "cCapabilitiesSets", self.capabilities.len())?);
+        dst.write_u16(cast_length!(
+            Self::NAME,
+            "cCapabilitiesSets",
+            self.capabilities.len()
+        )?);
         write_padding!(dst, 2);
 
         for capability in &self.capabilities {
@@ -216,7 +226,10 @@ impl<'de> Decode<'de> for GeneralCapabilitySet {
         let version: ClipboardProtocolVersion = src.read_u32().try_into()?;
         let general_flags = ClipboardGeneralCapabilityFlags::from_bits_truncate(src.read_u32());
 
-        Ok(Self { version, general_flags })
+        Ok(Self {
+            version,
+            general_flags,
+        })
     }
 }
 
@@ -258,7 +271,10 @@ impl TryFrom<u32> for ClipboardProtocolVersion {
         match value {
             Self::VERSION_VALUE_V1 => Ok(Self::V1),
             Self::VERSION_VALUE_V2 => Ok(Self::V2),
-            _ => Err(invalid_field_err!("version", "Invalid clipboard capabilities version")),
+            _ => Err(invalid_field_err!(
+                "version",
+                "Invalid clipboard capabilities version"
+            )),
         }
     }
 }

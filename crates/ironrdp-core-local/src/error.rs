@@ -53,7 +53,11 @@ pub trait NotEnoughBytesErr {
 /// # Returns
 ///
 /// A new error instance of type `T` that implements `NotEnoughBytesErr`.
-pub fn not_enough_bytes_err<T: NotEnoughBytesErr>(context: &'static str, received: usize, expected: usize) -> T {
+pub fn not_enough_bytes_err<T: NotEnoughBytesErr>(
+    context: &'static str,
+    received: usize,
+    expected: usize,
+) -> T {
     T::not_enough_bytes(context, received, expected)
 }
 
@@ -97,7 +101,11 @@ pub fn invalid_field_err_with_source<T: InvalidFieldErr + WithSource, E: Source>
 }
 
 /// Helper function to create an "invalid field" error.
-pub fn invalid_field_err<T: InvalidFieldErr>(context: &'static str, field: &'static str, reason: &'static str) -> T {
+pub fn invalid_field_err<T: InvalidFieldErr>(
+    context: &'static str,
+    field: &'static str,
+    reason: &'static str,
+) -> T {
     T::invalid_field(context, field, reason)
 }
 
@@ -128,7 +136,10 @@ pub trait UnexpectedMessageTypeErr {
 /// # Returns
 ///
 /// A new error instance of type `T` that implements `UnexpectedMessageTypeErr`.
-pub fn unexpected_message_type_err<T: UnexpectedMessageTypeErr>(context: &'static str, got: u8) -> T {
+pub fn unexpected_message_type_err<T: UnexpectedMessageTypeErr>(
+    context: &'static str,
+    got: u8,
+) -> T {
     T::unexpected_message_type(context, got)
 }
 
@@ -207,13 +218,20 @@ pub trait UnsupportedValueErr {
 ///
 /// A new error instance of type `T` that implements `UnsupportedValueErr`.]
 #[cfg(feature = "alloc")]
-pub fn unsupported_value_err<T: UnsupportedValueErr>(context: &'static str, name: &'static str, value: String) -> T {
+pub fn unsupported_value_err<T: UnsupportedValueErr>(
+    context: &'static str,
+    name: &'static str,
+    value: String,
+) -> T {
     T::unsupported_value(context, name, value)
 }
 
 /// Helper function to create an "unsupported value" error.
 #[cfg(not(feature = "alloc"))]
-pub fn unsupported_value_err<T: UnsupportedValueErr>(context: &'static str, name: &'static str) -> T {
+pub fn unsupported_value_err<T: UnsupportedValueErr>(
+    context: &'static str,
+    name: &'static str,
+) -> T {
     T::unsupported_value(context, name)
 }
 

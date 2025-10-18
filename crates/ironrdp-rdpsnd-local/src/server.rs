@@ -1,7 +1,9 @@
 use ironrdp_core::{impl_as_any, Decode as _, ReadCursor};
 use ironrdp_pdu::gcc::ChannelName;
 use ironrdp_pdu::{decode_err, pdu_other_err, PduResult};
-use ironrdp_svc::{CompressionCondition, SvcMessage, SvcProcessor, SvcProcessorMessages, SvcServerProcessor};
+use ironrdp_svc::{
+    CompressionCondition, SvcMessage, SvcProcessor, SvcProcessorMessages, SvcServerProcessor,
+};
 use tracing::{debug, error};
 
 use crate::pdu::{self, ClientAudioFormatPdu, QualityMode};
@@ -94,7 +96,7 @@ impl RdpsndServer {
             data: vec![],
         };
         Ok(RdpsndSvcMessages::new(vec![
-            pdu::ServerAudioOutputPdu::Training(pdu).into()
+            pdu::ServerAudioOutputPdu::Training(pdu).into(),
         ]))
     }
 
@@ -129,7 +131,11 @@ impl RdpsndServer {
         Ok(msg)
     }
 
-    pub fn set_volume(&mut self, volume_left: u16, volume_right: u16) -> PduResult<RdpsndSvcMessages> {
+    pub fn set_volume(
+        &mut self,
+        volume_left: u16,
+        volume_right: u16,
+    ) -> PduResult<RdpsndSvcMessages> {
         if !self.flags()?.contains(pdu::AudioFormatFlags::VOLUME) {
             return Err(pdu_other_err!("client doesn't support volume"));
         }
@@ -138,12 +144,14 @@ impl RdpsndServer {
             volume_right,
         };
         Ok(RdpsndSvcMessages::new(vec![
-            pdu::ServerAudioOutputPdu::Volume(pdu).into()
+            pdu::ServerAudioOutputPdu::Volume(pdu).into(),
         ]))
     }
 
     pub fn close(&mut self) -> PduResult<RdpsndSvcMessages> {
-        Ok(RdpsndSvcMessages::new(vec![pdu::ServerAudioOutputPdu::Close.into()]))
+        Ok(RdpsndSvcMessages::new(vec![
+            pdu::ServerAudioOutputPdu::Close.into(),
+        ]))
     }
 }
 
@@ -159,7 +167,8 @@ impl SvcProcessor for RdpsndServer {
     }
 
     fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>> {
-        let pdu = pdu::ClientAudioOutputPdu::decode(&mut ReadCursor::new(payload)).map_err(|e| decode_err!(e))?;
+        let pdu = pdu::ClientAudioOutputPdu::decode(&mut ReadCursor::new(payload))
+            .map_err(|e| decode_err!(e))?;
         debug!(?pdu);
         let msg = match self.state {
             RdpsndState::WaitingForClientFormats => {
@@ -193,7 +202,10 @@ impl SvcProcessor for RdpsndServer {
                     self.state = RdpsndState::Stop;
                     return Ok(vec![]);
                 };
-                let client_format = self.client_format.as_ref().expect("available in this state");
+                let client_format = self
+                    .client_format
+                    .as_ref()
+                    .expect("available in this state");
                 self.state = RdpsndState::Ready;
                 self.format_no = self.handler.start(client_format);
                 vec![]

@@ -57,8 +57,13 @@ impl DisplayControlClient {
         physical_dims: Option<(u32, u32)>,
     ) -> EncodeResult<Vec<SvcMessage>> {
         // TODO: prevent resolution with values greater than max monitor area received in caps.
-        let pdu: DisplayControlPdu =
-            DisplayControlMonitorLayout::new_single_primary_monitor(width, height, scale_factor, physical_dims)?.into();
+        let pdu: DisplayControlPdu = DisplayControlMonitorLayout::new_single_primary_monitor(
+            width,
+            height,
+            scale_factor,
+            physical_dims,
+        )?
+        .into();
         debug!(?pdu, "Sending monitor layout");
         encode_dvc_messages(channel_id, vec![Box::new(pdu)], ChannelFlags::empty())
     }
@@ -76,7 +81,8 @@ impl DvcProcessor for DisplayControlClient {
     }
 
     fn process(&mut self, _channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
-        let caps = DisplayControlCapabilities::decode(&mut ReadCursor::new(payload)).map_err(|e| decode_err!(e))?;
+        let caps = DisplayControlCapabilities::decode(&mut ReadCursor::new(payload))
+            .map_err(|e| decode_err!(e))?;
         debug!("Received {:?}", caps);
         self.ready = true;
         (self.on_capabilities_received)(caps)
@@ -85,4 +91,5 @@ impl DvcProcessor for DisplayControlClient {
 
 impl DvcClientProcessor for DisplayControlClient {}
 
-type OnCapabilitiesReceived = Box<dyn Fn(DisplayControlCapabilities) -> PduResult<Vec<DvcMessage>> + Send>;
+type OnCapabilitiesReceived =
+    Box<dyn Fn(DisplayControlCapabilities) -> PduResult<Vec<DvcMessage>> + Send>;

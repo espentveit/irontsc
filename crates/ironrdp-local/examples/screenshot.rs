@@ -154,9 +154,12 @@ fn run(
 
     active_stage(connection_result, framed, &mut image).context("active stage")?;
 
-    let img: image::ImageBuffer<image::Rgba<u8>, _> =
-        image::ImageBuffer::from_raw(u32::from(image.width()), u32::from(image.height()), image.data())
-            .context("invalid image")?;
+    let img: image::ImageBuffer<image::Rgba<u8>, _> = image::ImageBuffer::from_raw(
+        u32::from(image.width()),
+        u32::from(image.height()),
+        image.data(),
+    )
+    .context("invalid image")?;
 
     img.save(output).context("save image to disk")?;
 
@@ -216,7 +219,8 @@ fn build_config(username: String, password: String, domain: Option<String>) -> c
     }
 }
 
-type UpgradedFramed = ironrdp_blocking::Framed<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
+type UpgradedFramed =
+    ironrdp_blocking::Framed<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
 fn connect(
     config: connector::Config,
@@ -235,13 +239,16 @@ fn connect(
         .set_read_timeout(Some(Duration::from_secs(3)))
         .expect("set_read_timeout call failed");
 
-    let client_addr = tcp_stream.local_addr().context("get socket local address")?;
+    let client_addr = tcp_stream
+        .local_addr()
+        .context("get socket local address")?;
 
     let mut framed = ironrdp_blocking::Framed::new(tcp_stream);
 
     let mut connector = connector::ClientConnector::new(config, client_addr);
 
-    let should_upgrade = ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("begin connection")?;
+    let should_upgrade =
+        ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("begin connection")?;
 
     debug!("TLS upgrade");
 
@@ -290,7 +297,9 @@ fn active_stage(
 
         for out in outputs {
             match out {
-                ActiveStageOutput::ResponseFrame(frame) => framed.write_all(&frame).context("write response")?,
+                ActiveStageOutput::ResponseFrame(frame) => {
+                    framed.write_all(&frame).context("write response")?
+                }
                 ActiveStageOutput::Terminate(_) => break 'outer,
                 _ => {}
             }
@@ -312,7 +321,10 @@ fn lookup_addr(hostname: &str, port: u16) -> anyhow::Result<core::net::SocketAdd
 fn tls_upgrade(
     stream: TcpStream,
     server_name: String,
-) -> anyhow::Result<(rustls::StreamOwned<rustls::ClientConnection, TcpStream>, Vec<u8>)> {
+) -> anyhow::Result<(
+    rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    Vec<u8>,
+)> {
     let mut config = rustls::client::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(std::sync::Arc::new(danger::NoCertificateVerification))
@@ -370,7 +382,9 @@ fn extract_tls_server_public_key(cert: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 mod danger {
-    use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use tokio_rustls::rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
     use tokio_rustls::rustls::{pki_types, DigitallySignedStruct, Error, SignatureScheme};
 
     #[derive(Debug)]

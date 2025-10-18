@@ -7,8 +7,8 @@ use std::fmt;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, other_err, Decode, DecodeError, DecodeResult,
-    Encode, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, other_err, Decode,
+    DecodeError, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
 };
 use ironrdp_pdu::{read_padding, write_padding};
 use ironrdp_svc::SvcEncode;
@@ -45,7 +45,10 @@ impl TryFrom<u16> for Version {
             0x05 => Ok(Self::V5),
             0x06 => Ok(Self::V6),
             0x08 => Ok(Self::V8),
-            _ => Err(invalid_field_err!("Version", "unknown audio output version")),
+            _ => Err(invalid_field_err!(
+                "Version",
+                "unknown audio output version"
+            )),
         }
     }
 }
@@ -204,7 +207,12 @@ impl fmt::Debug for WaveFormat {
 
 impl fmt::Display for WaveFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.0, self.as_str().unwrap_or("<unknown wave format>"))
+        write!(
+            f,
+            "{} {}",
+            self.0,
+            self.as_str().unwrap_or("<unknown wave format>")
+        )
     }
 }
 
@@ -321,7 +329,10 @@ impl Encode for ServerAudioFormatPdu {
         write_padding!(dst, 4); /* volume */
         write_padding!(dst, 4); /* pitch */
         write_padding!(dst, 2); /* DGramPort */
-        dst.write_u16(cast_length!("AudioFormatPdu::n_formats", self.formats.len())?);
+        dst.write_u16(cast_length!(
+            "AudioFormatPdu::n_formats",
+            self.formats.len()
+        )?);
         write_padding!(dst, 1); /* blockNo */
         dst.write_u16(self.version.into());
         write_padding!(dst, 1);
@@ -415,7 +426,10 @@ impl Encode for ClientAudioFormatPdu {
         dst.write_u32(volume);
         dst.write_u32(self.pitch);
         dst.write_u16_be(self.dgram_port);
-        dst.write_u16(cast_length!("AudioFormatPdu::n_formats", self.formats.len())?);
+        dst.write_u16(cast_length!(
+            "AudioFormatPdu::n_formats",
+            self.formats.len()
+        )?);
         dst.write_u8(0); /* blockNo */
         dst.write_u16(self.version.into());
         write_padding!(dst, 1);
@@ -483,7 +497,10 @@ impl TryFrom<u16> for QualityMode {
             0x00 => Ok(Self::Dynamic),
             0x01 => Ok(Self::Medium),
             0x02 => Ok(Self::High),
-            _ => Err(invalid_field_err!("QualityMode", "unknown audio quality mode")),
+            _ => Err(invalid_field_err!(
+                "QualityMode",
+                "unknown audio quality mode"
+            )),
         }
     }
 }
@@ -682,7 +699,10 @@ impl<'de> Decode<'de> for TrainingConfirmPdu {
         let timestamp = src.read_u16();
         let pack_size = src.read_u16();
 
-        Ok(Self { timestamp, pack_size })
+        Ok(Self {
+            timestamp,
+            pack_size,
+        })
     }
 }
 
@@ -901,7 +921,10 @@ impl<'de> Decode<'de> for WaveConfirmPdu {
         let block_no = src.read_u8();
         read_padding!(src, 1);
 
-        Ok(Self { timestamp, block_no })
+        Ok(Self {
+            timestamp,
+            block_no,
+        })
     }
 }
 

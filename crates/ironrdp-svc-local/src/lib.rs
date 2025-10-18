@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 
 // TODO: #![warn(missing_docs)]
 
@@ -13,8 +15,8 @@ use std::borrow::Cow;
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    assert_obj_safe, decode_cursor, encode_buf, AsAny, DecodeResult, Encode, EncodeResult, ReadCursor, WriteBuf,
-    WriteCursor,
+    assert_obj_safe, decode_cursor, encode_buf, AsAny, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteBuf, WriteCursor,
 };
 use ironrdp_pdu::gcc::{ChannelDef, ChannelName, ChannelOptions};
 use ironrdp_pdu::rdp::vc::ChannelControlFlags;
@@ -338,7 +340,9 @@ impl ChunkProcessor {
     fn process_header(payload: &mut ReadCursor<'_>) -> DecodeResult<bool> {
         let channel_header: ironrdp_pdu::rdp::vc::ChannelPduHeader = decode_cursor(payload)?;
 
-        Ok(channel_header.flags.contains(ChannelControlFlags::FLAG_LAST))
+        Ok(channel_header
+            .flags
+            .contains(ChannelControlFlags::FLAG_LAST))
     }
 
     /// Takes a single PDU and breaks it into chunks prefixed with a [`ChannelPduHeader`].
@@ -401,7 +405,8 @@ impl ChunkProcessor {
 
             // Otherwise, update the chunk start and end indices for the next iteration.
             chunk_start_index = chunk_end_index;
-            chunk_end_index = core::cmp::min(total_len, chunk_end_index.saturating_add(max_chunk_len));
+            chunk_end_index =
+                core::cmp::min(total_len, chunk_end_index.saturating_add(max_chunk_len));
         }
 
         Ok(chunks)
@@ -464,7 +469,8 @@ impl StaticChannelSet {
     ///
     /// If a static virtual channel of this type already exists, it is returned.
     pub fn insert<T: SvcProcessor + 'static>(&mut self, val: T) -> Option<StaticVirtualChannel> {
-        self.channels.insert(TypeId::of::<T>(), StaticVirtualChannel::new(val))
+        self.channels
+            .insert(TypeId::of::<T>(), StaticVirtualChannel::new(val))
     }
 
     /// Gets a reference to a [`StaticVirtualChannel`] by looking up its internal [`SvcProcessor`]'s [`TypeId`].
@@ -483,13 +489,19 @@ impl StaticChannelSet {
     }
 
     /// Gets a mutable reference to a [`StaticVirtualChannel`] by looking up its internal [`SvcProcessor`]'s [`TypeId`].
-    pub fn get_by_type_mut<T: SvcProcessor + 'static>(&mut self) -> Option<&mut StaticVirtualChannel> {
+    pub fn get_by_type_mut<T: SvcProcessor + 'static>(
+        &mut self,
+    ) -> Option<&mut StaticVirtualChannel> {
         self.get_by_type_id_mut(TypeId::of::<T>())
     }
 
     /// Gets a reference to a [`StaticVirtualChannel`] by looking up its channel name.
-    pub fn get_by_channel_name(&self, name: &ChannelName) -> Option<(TypeId, &StaticVirtualChannel)> {
-        self.iter().find(|(_, x)| x.channel_processor.channel_name() == *name)
+    pub fn get_by_channel_name(
+        &self,
+        name: &ChannelName,
+    ) -> Option<(TypeId, &StaticVirtualChannel)> {
+        self.iter()
+            .find(|(_, x)| x.channel_processor.channel_name() == *name)
     }
 
     /// Gets a reference to a [`StaticVirtualChannel`] by looking up its channel ID.
@@ -499,7 +511,10 @@ impl StaticChannelSet {
     }
 
     /// Gets a mutable reference to a [`StaticVirtualChannel`] by looking up its channel ID.
-    pub fn get_by_channel_id_mut(&mut self, channel_id: StaticChannelId) -> Option<&mut StaticVirtualChannel> {
+    pub fn get_by_channel_id_mut(
+        &mut self,
+        channel_id: StaticChannelId,
+    ) -> Option<&mut StaticVirtualChannel> {
         self.get_type_id_by_channel_id(channel_id)
             .and_then(|type_id| self.get_by_type_id_mut(type_id))
     }
@@ -526,7 +541,11 @@ impl StaticChannelSet {
     /// Attaches a channel ID to a static virtual channel.
     ///
     /// If a channel ID was already attached, it will be returned.
-    pub fn attach_channel_id(&mut self, type_id: TypeId, channel_id: StaticChannelId) -> Option<StaticChannelId> {
+    pub fn attach_channel_id(
+        &mut self,
+        type_id: TypeId,
+        channel_id: StaticChannelId,
+    ) -> Option<StaticChannelId> {
         self.to_type_id.insert(channel_id, type_id);
         self.to_channel_id.insert(type_id, channel_id)
     }
@@ -562,7 +581,9 @@ impl StaticChannelSet {
     }
 
     #[inline]
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (TypeId, &mut StaticVirtualChannel, Option<StaticChannelId>)> {
+    pub fn iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (TypeId, &mut StaticVirtualChannel, Option<StaticChannelId>)> {
         let to_channel_id = self.to_channel_id.clone();
         self.channels
             .iter_mut()

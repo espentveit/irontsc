@@ -18,7 +18,8 @@ pub use self::lock::*;
 #[rustfmt::skip]
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 use ironrdp_svc::SvcEncode;
 
@@ -234,13 +235,25 @@ impl<'de> Decode<'de> for ClipboardPdu<'de> {
                 ClipboardPdu::MonitorReady
             }
             MSG_TYPE_FORMAT_LIST => ClipboardPdu::FormatList(FormatList::decode(src)?),
-            MSG_TYPE_FORMAT_LIST_RESPONSE => ClipboardPdu::FormatListResponse(FormatListResponse::decode(src)?),
-            MSG_TYPE_FORMAT_DATA_REQUEST => ClipboardPdu::FormatDataRequest(FormatDataRequest::decode(src)?),
-            MSG_TYPE_FORMAT_DATA_RESPONSE => ClipboardPdu::FormatDataResponse(FormatDataResponse::decode(src)?),
-            MSG_TYPE_TEMPORARY_DIRECTORY => ClipboardPdu::TemporaryDirectory(ClientTemporaryDirectory::decode(src)?),
+            MSG_TYPE_FORMAT_LIST_RESPONSE => {
+                ClipboardPdu::FormatListResponse(FormatListResponse::decode(src)?)
+            }
+            MSG_TYPE_FORMAT_DATA_REQUEST => {
+                ClipboardPdu::FormatDataRequest(FormatDataRequest::decode(src)?)
+            }
+            MSG_TYPE_FORMAT_DATA_RESPONSE => {
+                ClipboardPdu::FormatDataResponse(FormatDataResponse::decode(src)?)
+            }
+            MSG_TYPE_TEMPORARY_DIRECTORY => {
+                ClipboardPdu::TemporaryDirectory(ClientTemporaryDirectory::decode(src)?)
+            }
             MSG_TYPE_CAPABILITIES => ClipboardPdu::Capabilities(Capabilities::decode(src)?),
-            MSG_TYPE_FILE_CONTENTS_REQUEST => ClipboardPdu::FileContentsRequest(FileContentsRequest::decode(src)?),
-            MSG_TYPE_FILE_CONTENTS_RESPONSE => ClipboardPdu::FileContentsResponse(FileContentsResponse::decode(src)?),
+            MSG_TYPE_FILE_CONTENTS_REQUEST => {
+                ClipboardPdu::FileContentsRequest(FileContentsRequest::decode(src)?)
+            }
+            MSG_TYPE_FILE_CONTENTS_RESPONSE => {
+                ClipboardPdu::FileContentsResponse(FileContentsResponse::decode(src)?)
+            }
             MSG_TYPE_LOCK_CLIPDATA => ClipboardPdu::LockData(LockDataId::decode(src)?),
             MSG_TYPE_UNLOCK_CLIPDATA => ClipboardPdu::UnlockData(LockDataId::decode(src)?),
             _ => return Err(invalid_field_err!("msgType", "Unknown clipboard PDU type")),

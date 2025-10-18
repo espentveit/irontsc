@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 
 #[macro_use]
 mod macros;
@@ -31,8 +33,8 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::PollSender;
 
 use self::proto::{
-    ChannelPkt, ChannelResp, DataPkt, HandshakeReqPkt, HandshakeRespPkt, HttpCapsTy, KeepalivePkt, PktHdr, PktTy,
-    TunnelAuthPkt, TunnelAuthRespPkt, TunnelReqPkt, TunnelRespPkt,
+    ChannelPkt, ChannelResp, DataPkt, HandshakeReqPkt, HandshakeRespPkt, HttpCapsTy, KeepalivePkt,
+    PktHdr, PktTy, TunnelAuthPkt, TunnelAuthRespPkt, TunnelReqPkt, TunnelRespPkt,
 };
 
 #[derive(Clone, Debug)]
@@ -169,7 +171,11 @@ impl GwClient {
         }
 
         let _ = tx.send(()); // TODO: Not needed since it doesnt keep alive conn?
-        let stream = jh.await.map_err(|e| custom_err!("WS join", e))?.io.into_inner();
+        let stream = jh
+            .await
+            .map_err(|e| custom_err!("WS join", e))?
+            .io
+            .into_inner();
 
         Self::connect_ws(target.clone(), client_name, stream)
             .await
@@ -181,7 +187,8 @@ impl GwClient {
         client_name: &str,
         tls_stream: TlsStream<TcpStream>,
     ) -> Result<GwClient, Error> {
-        let ws_stream: WebSocketStream<_> = WebSocketStream::from_raw_socket(tls_stream, Role::Client, None).await;
+        let ws_stream: WebSocketStream<_> =
+            WebSocketStream::from_raw_socket(tls_stream, Role::Client, None).await;
         let (ws_sink, ws_stream) = ws_stream.split();
         let mut gw = GwConn {
             client_name: client_name.to_owned(),
@@ -200,7 +207,8 @@ impl GwClient {
 
         let work = tokio::spawn(async move {
             let iv = Duration::from_secs(15 * 60);
-            let mut keepalive_interval = tokio::time::interval_at(tokio::time::Instant::now() + iv, iv);
+            let mut keepalive_interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + iv, iv);
 
             loop {
                 let mut wsbuf = [0u8; 8192];
@@ -286,7 +294,8 @@ impl GwConn {
             .into_data();
         let mut cur = ReadCursor::new(&msg);
 
-        let hdr = PktHdr::decode(&mut cur).map_err(|_| Error::new("PktHdr", GwErrorKind::Decode))?;
+        let hdr =
+            PktHdr::decode(&mut cur).map_err(|_| Error::new("PktHdr", GwErrorKind::Decode))?;
         if cur.len() != hdr.length as usize - hdr.size() {
             return Err(Error::new("read_packet", GwErrorKind::PacketEof));
         }
@@ -305,8 +314,13 @@ impl GwConn {
         let (_hdr, bytes) = self.read_packet().await?;
 
         let mut cur = ReadCursor::new(&bytes);
-        let resp = HandshakeRespPkt::decode(&mut cur).map_err(|_| Error::new("Handshake", GwErrorKind::Decode))?;
-        if resp.error_code != 0 || resp.ver_major != 1 || resp.ver_minor != 0 || resp.server_version != 0 {
+        let resp = HandshakeRespPkt::decode(&mut cur)
+            .map_err(|_| Error::new("Handshake", GwErrorKind::Decode))?;
+        if resp.error_code != 0
+            || resp.ver_major != 1
+            || resp.ver_minor != 0
+            || resp.server_version != 0
+        {
             return Err(Error::new("Handshake", GwErrorKind::Connect));
         }
         Ok(())
@@ -324,7 +338,8 @@ impl GwConn {
         let (_hdr, bytes) = self.read_packet().await?;
         let mut cur = ReadCursor::new(&bytes);
 
-        let resp = TunnelRespPkt::decode(&mut cur).map_err(|_| Error::new("TunnelDecode", GwErrorKind::Decode))?;
+        let resp = TunnelRespPkt::decode(&mut cur)
+            .map_err(|_| Error::new("TunnelDecode", GwErrorKind::Decode))?;
         if resp.status_code != 0 {
             return Err(Error::new("Tunnel", GwErrorKind::Connect));
         }
@@ -347,8 +362,8 @@ impl GwConn {
 
         let (_hdr, bytes) = self.read_packet().await?;
         let mut cur = ReadCursor::new(&bytes);
-        let resp: TunnelAuthRespPkt =
-            TunnelAuthRespPkt::decode(&mut cur).map_err(|_| Error::new("TunnelAuth", GwErrorKind::Decode))?;
+        let resp: TunnelAuthRespPkt = TunnelAuthRespPkt::decode(&mut cur)
+            .map_err(|_| Error::new("TunnelAuth", GwErrorKind::Decode))?;
 
         if resp.error_code != 0 {
             return Err(Error::new("TunnelAuth", GwErrorKind::Connect));
@@ -367,8 +382,8 @@ impl GwConn {
         let (hdr, bytes) = self.read_packet().await?;
         assert!(hdr.ty == PktTy::ChannelResp);
         let mut cur: ReadCursor<'_> = ReadCursor::new(&bytes);
-        let resp: ChannelResp =
-            ChannelResp::decode(&mut cur).map_err(|_| Error::new("ChannelResp", GwErrorKind::Decode))?;
+        let resp: ChannelResp = ChannelResp::decode(&mut cur)
+            .map_err(|_| Error::new("ChannelResp", GwErrorKind::Decode))?;
         if resp.error_code != 0 {
             return Err(Error::new("ChannelCreate", GwErrorKind::Connect));
         }
@@ -387,7 +402,9 @@ impl AsyncRead for GwClient {
         match self.work.poll_unpin(cx) {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(io::Error::other(e))),
             Poll::Ready(Ok(Err(e))) => return Poll::Ready(Err(io::Error::other(e))),
-            Poll::Ready(_) => return Poll::Ready(Err(io::Error::other("Premature Work Task end?"))),
+            Poll::Ready(_) => {
+                return Poll::Ready(Err(io::Error::other("Premature Work Task end?")))
+            }
             _ => (),
         }
 
@@ -429,7 +446,9 @@ impl AsyncWrite for GwClient {
         match self.work.poll_unpin(cx) {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(io::Error::other(e))),
             Poll::Ready(Ok(Err(e))) => return Poll::Ready(Err(io::Error::other(e))),
-            Poll::Ready(_) => return Poll::Ready(Err(io::Error::other("Premature Work Task end?"))),
+            Poll::Ready(_) => {
+                return Poll::Ready(Err(io::Error::other("Premature Work Task end?")))
+            }
             Poll::Pending => (),
         }
 
@@ -449,12 +468,18 @@ impl AsyncWrite for GwClient {
         Poll::Pending
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut core::task::Context<'_>) -> Poll<Result<(), io::Error>> {
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
         // TODO: call flush on the backing sink (e.g. websocket, but atleast for that backend doesnt seem to matter)?
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut core::task::Context<'_>) -> Poll<Result<(), io::Error>> {
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
         Poll::Ready(Ok(()))
     }
 }

@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 #![allow(clippy::arithmetic_side_effects)] // FIXME: remove
 #![allow(clippy::cast_lossless)] // FIXME: remove
 #![allow(clippy::cast_possible_truncation)] // FIXME: remove
@@ -14,13 +16,13 @@ use ironrdp_core::{decode, AsAny, EncodeResult};
 use ironrdp_pdu::gcc::ChannelName;
 use ironrdp_pdu::{decode_err, encode_err, PduResult};
 use ironrdp_svc::{
-    ChannelFlags, CompressionCondition, SvcClientProcessor, SvcMessage, SvcProcessor, SvcProcessorMessages,
-    SvcServerProcessor,
+    ChannelFlags, CompressionCondition, SvcClientProcessor, SvcMessage, SvcProcessor,
+    SvcProcessorMessages, SvcServerProcessor,
 };
 use pdu::{
-    Capabilities, ClientTemporaryDirectory, ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags,
-    ClipboardPdu, ClipboardProtocolVersion, FileContentsResponse, FormatDataRequest, FormatListResponse,
-    OwnedFormatDataResponse,
+    Capabilities, ClientTemporaryDirectory, ClipboardFormat, ClipboardFormatId,
+    ClipboardGeneralCapabilityFlags, ClipboardPdu, ClipboardProtocolVersion, FileContentsResponse,
+    FormatDataRequest, FormatListResponse, OwnedFormatDataResponse,
 };
 use tracing::{error, info};
 
@@ -101,7 +103,8 @@ impl<R: Role> Cliprdr<R> {
 
     pub fn new(backend: Box<dyn CliprdrBackend>) -> Self {
         // This CLIPRDR implementation supports long format names by default
-        let flags = ClipboardGeneralCapabilityFlags::USE_LONG_FORMAT_NAMES | backend.client_capabilities();
+        let flags =
+            ClipboardGeneralCapabilityFlags::USE_LONG_FORMAT_NAMES | backend.client_capabilities();
 
         Self {
             backend,
@@ -138,7 +141,10 @@ impl<R: Role> Cliprdr<R> {
         Ok(Vec::new())
     }
 
-    fn handle_server_capabilities(&mut self, server_capabilities: Capabilities) -> PduResult<Vec<SvcMessage>> {
+    fn handle_server_capabilities(
+        &mut self,
+        server_capabilities: Capabilities,
+    ) -> PduResult<Vec<SvcMessage>> {
         self.capabilities.downgrade(&server_capabilities);
         self.backend
             .on_process_negotiated_capabilities(self.capabilities.flags());
@@ -154,7 +160,10 @@ impl<R: Role> Cliprdr<R> {
         Ok(Vec::new())
     }
 
-    fn handle_format_list_response(&mut self, response: FormatListResponse) -> PduResult<Vec<SvcMessage>> {
+    fn handle_format_list_response(
+        &mut self,
+        response: FormatListResponse,
+    ) -> PduResult<Vec<SvcMessage>> {
         match response {
             FormatListResponse::Ok => {
                 if !R::is_server() {
@@ -197,7 +206,10 @@ impl<R: Role> Cliprdr<R> {
     /// [`CliprdrBackend::on_format_data_request`] is called by [`Cliprdr`].
     ///
     /// If data is not available anymore, an error response should be sent instead.
-    pub fn submit_format_data(&self, response: OwnedFormatDataResponse) -> PduResult<CliprdrSvcMessages<R>> {
+    pub fn submit_format_data(
+        &self,
+        response: OwnedFormatDataResponse,
+    ) -> PduResult<CliprdrSvcMessages<R>> {
         ready_guard!(self, submit_format_data);
 
         let pdu = ClipboardPdu::FormatDataResponse(response);
@@ -212,7 +224,10 @@ impl<R: Role> Cliprdr<R> {
     /// by [`Cliprdr`].
     ///
     /// If data is not available anymore, an error response should be sent instead.
-    pub fn submit_file_contents(&self, response: FileContentsResponse<'static>) -> PduResult<CliprdrSvcMessages<R>> {
+    pub fn submit_file_contents(
+        &self,
+        response: FileContentsResponse<'static>,
+    ) -> PduResult<CliprdrSvcMessages<R>> {
         ready_guard!(self, submit_file_contents);
 
         let pdu = ClipboardPdu::FileContentsResponse(response);
@@ -235,14 +250,18 @@ impl<R: Role> Cliprdr<R> {
     /// Starts processing of `CLIPRDR` copy command. Should be called by the clipboard
     /// implementation when user performs OS-specific copy command (e.g. `Ctrl+C` shortcut on
     /// keyboard)
-    pub fn initiate_copy(&self, available_formats: &[ClipboardFormat]) -> PduResult<CliprdrSvcMessages<R>> {
+    pub fn initiate_copy(
+        &self,
+        available_formats: &[ClipboardFormat],
+    ) -> PduResult<CliprdrSvcMessages<R>> {
         let mut pdus = Vec::new();
 
         match (self.state, R::is_server()) {
             // When user initiates copy, we should send format list to server.
             (CliprdrState::Ready, _) => {
                 pdus.push(ClipboardPdu::FormatList(
-                    self.build_format_list(available_formats).map_err(|e| encode_err!(e))?,
+                    self.build_format_list(available_formats)
+                        .map_err(|e| encode_err!(e))?,
                 ));
             }
             (CliprdrState::Initialization, false) => {
@@ -250,10 +269,12 @@ impl<R: Role> Cliprdr<R> {
                 // capabilities and temporary directory PDUs.
                 pdus.push(ClipboardPdu::Capabilities(self.capabilities.clone()));
                 pdus.push(ClipboardPdu::TemporaryDirectory(
-                    ClientTemporaryDirectory::new(self.backend.temporary_directory()).map_err(|e| encode_err!(e))?,
+                    ClientTemporaryDirectory::new(self.backend.temporary_directory())
+                        .map_err(|e| encode_err!(e))?,
                 ));
                 pdus.push(ClipboardPdu::FormatList(
-                    self.build_format_list(available_formats).map_err(|e| encode_err!(e))?,
+                    self.build_format_list(available_formats)
+                        .map_err(|e| encode_err!(e))?,
                 ));
             }
             _ => {
@@ -261,13 +282,20 @@ impl<R: Role> Cliprdr<R> {
             }
         }
 
-        Ok(pdus.into_iter().map(into_cliprdr_message).collect::<Vec<_>>().into())
+        Ok(pdus
+            .into_iter()
+            .map(into_cliprdr_message)
+            .collect::<Vec<_>>()
+            .into())
     }
 
     /// Starts processing of `CLIPRDR` paste command. Should be called by the clipboard
     /// implementation when user performs OS-specific paste command (e.g. `Ctrl+V` shortcut on
     /// keyboard)
-    pub fn initiate_paste(&self, requested_format: ClipboardFormatId) -> PduResult<CliprdrSvcMessages<R>> {
+    pub fn initiate_paste(
+        &self,
+        requested_format: ClipboardFormatId,
+    ) -> PduResult<CliprdrSvcMessages<R>> {
         ready_guard!(self, initiate_paste);
 
         // When user initiates paste, we should send format data request to server, and expect to
@@ -308,7 +336,9 @@ impl<R: Role> SvcProcessor for Cliprdr<R> {
         match pdu {
             ClipboardPdu::Capabilities(caps) => self.handle_server_capabilities(caps),
             ClipboardPdu::FormatList(format_list) => self.handle_format_list(format_list),
-            ClipboardPdu::FormatListResponse(response) => self.handle_format_list_response(response),
+            ClipboardPdu::FormatListResponse(response) => {
+                self.handle_format_list_response(response)
+            }
             ClipboardPdu::MonitorReady => self.handle_monitor_ready(),
             ClipboardPdu::LockData(id) => {
                 self.backend.on_lock(id);

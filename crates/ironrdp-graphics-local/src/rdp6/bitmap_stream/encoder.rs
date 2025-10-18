@@ -177,9 +177,12 @@ impl BitmapStreamEncoder {
         ironrdp_core::encode_cursor(&header, &mut cursor).map_err(BitmapEncodeError::Encode)?;
 
         if rle {
-            compress_8bpp_plane(r, &mut cursor, self.width, self.height).map_err(BitmapEncodeError::Rle)?;
-            compress_8bpp_plane(g, &mut cursor, self.width, self.height).map_err(BitmapEncodeError::Rle)?;
-            compress_8bpp_plane(b, &mut cursor, self.width, self.height).map_err(BitmapEncodeError::Rle)?;
+            compress_8bpp_plane(r, &mut cursor, self.width, self.height)
+                .map_err(BitmapEncodeError::Rle)?;
+            compress_8bpp_plane(g, &mut cursor, self.width, self.height)
+                .map_err(BitmapEncodeError::Rle)?;
+            compress_8bpp_plane(b, &mut cursor, self.width, self.height)
+                .map_err(BitmapEncodeError::Rle)?;
         } else {
             let remaining = cursor.len();
             let needed = self.width * self.height * 3 + 1;
@@ -217,7 +220,12 @@ impl BitmapStreamEncoder {
         self.encode_channels_stream((r, g, b), dst, rle)
     }
 
-    pub fn encode_bitmap<F>(&mut self, src: &[u8], dst: &mut [u8], rle: bool) -> Result<usize, BitmapEncodeError>
+    pub fn encode_bitmap<F>(
+        &mut self,
+        src: &[u8],
+        dst: &mut [u8],
+        rle: bool,
+    ) -> Result<usize, BitmapEncodeError>
     where
         F: PixelFormat,
     {
@@ -251,10 +259,14 @@ impl BitmapStreamEncoder {
         ironrdp_core::encode_cursor(&header, &mut cursor).map_err(BitmapEncodeError::Encode)?;
 
         if rle {
-            compress_8bpp_plane(a, &mut cursor, self.width, self.height).map_err(BitmapEncodeError::rle)?;
-            compress_8bpp_plane(r, &mut cursor, self.width, self.height).map_err(BitmapEncodeError::rle)?;
-            compress_8bpp_plane(g, &mut cursor, self.width, self.height).map_err(BitmapEncodeError::rle)?;
-            compress_8bpp_plane(b, &mut cursor, self.width, self.height).map_err(BitmapEncodeError::rle)?;
+            compress_8bpp_plane(a, &mut cursor, self.width, self.height)
+                .map_err(BitmapEncodeError::rle)?;
+            compress_8bpp_plane(r, &mut cursor, self.width, self.height)
+                .map_err(BitmapEncodeError::rle)?;
+            compress_8bpp_plane(g, &mut cursor, self.width, self.height)
+                .map_err(BitmapEncodeError::rle)?;
+            compress_8bpp_plane(b, &mut cursor, self.width, self.height)
+                .map_err(BitmapEncodeError::rle)?;
         } else {
             let remaining = cursor.len();
             let needed = self.width * self.height * 4 + 1;
@@ -275,7 +287,12 @@ impl BitmapStreamEncoder {
         Ok(cursor.pos())
     }
 
-    pub fn encode_bitmap_alpha<F>(&mut self, src: &[u8], dst: &mut [u8], rle: bool) -> Result<usize, BitmapEncodeError>
+    pub fn encode_bitmap_alpha<F>(
+        &mut self,
+        src: &[u8],
+        dst: &mut [u8],
+        rle: bool,
+    ) -> Result<usize, BitmapEncodeError>
     where
         F: PixelFormat + PixelAlpha,
     {

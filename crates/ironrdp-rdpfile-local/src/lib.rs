@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 #![no_std]
 
 extern crate alloc;
@@ -33,9 +35,14 @@ impl fmt::Display for Error {
         match &self.kind {
             ErrorKind::UnknownType { ty } => write!(f, "unknown type at line {line_number} ({ty})"),
             ErrorKind::InvalidValue { ty, value } => {
-                write!(f, "invalid value at line {line_number} for type {ty} ({value})")
+                write!(
+                    f,
+                    "invalid value at line {line_number} for type {ty} ({value})"
+                )
             }
-            ErrorKind::MalformedLine { line } => write!(f, "malformed line at line {line_number} ({line})"),
+            ErrorKind::MalformedLine { line } => {
+                write!(f, "malformed line at line {line_number} ({line})")
+            }
         }
     }
 }
@@ -73,7 +80,9 @@ pub fn load(properties: &mut PropertySet, input: &str) -> Result<(), Vec<Error>>
             }
         } else {
             errors.push(Error {
-                kind: ErrorKind::MalformedLine { line: line.to_owned() },
+                kind: ErrorKind::MalformedLine {
+                    line: line.to_owned(),
+                },
                 line: idx,
             })
         }

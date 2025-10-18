@@ -13,13 +13,17 @@ use ironrdp_displaycontrol::server::{DisplayControlHandler, DisplayControlServer
 use ironrdp_pdu::input::fast_path::{FastPathInput, FastPathInputEvent};
 use ironrdp_pdu::input::InputEventPdu;
 use ironrdp_pdu::mcs::{SendDataIndication, SendDataRequest};
-use ironrdp_pdu::rdp::capability_sets::{BitmapCodecs, CapabilitySet, CmdFlags, CodecProperty, GeneralExtraFlags};
+use ironrdp_pdu::rdp::capability_sets::{
+    BitmapCodecs, CapabilitySet, CmdFlags, CodecProperty, GeneralExtraFlags,
+};
 pub use ironrdp_pdu::rdp::client_info::Credentials;
 use ironrdp_pdu::rdp::headers::{ServerDeactivateAll, ShareControlPdu};
 use ironrdp_pdu::x224::X224;
 use ironrdp_pdu::{decode_err, mcs, nego, rdp, Action, PduResult};
 use ironrdp_svc::{server_encode_svc_messages, StaticChannelId, StaticChannelSet, SvcProcessor};
-use ironrdp_tokio::{split_tokio_framed, unsplit_tokio_framed, FramedRead, FramedWrite, TokioFramed};
+use ironrdp_tokio::{
+    split_tokio_framed, unsplit_tokio_framed, FramedRead, FramedWrite, TokioFramed,
+};
 use rdpsnd::server::{RdpsndServer, RdpsndServerMessage};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -87,7 +91,9 @@ impl RdpServerSecurity {
         match self {
             RdpServerSecurity::None => nego::SecurityProtocol::empty(),
             RdpServerSecurity::Tls(_) => nego::SecurityProtocol::SSL,
-            RdpServerSecurity::Hybrid(_) => nego::SecurityProtocol::HYBRID | nego::SecurityProtocol::HYBRID_EX,
+            RdpServerSecurity::Hybrid(_) => {
+                nego::SecurityProtocol::HYBRID | nego::SecurityProtocol::HYBRID_EX
+            }
         }
     }
 }
@@ -315,7 +321,12 @@ impl RdpServer {
 
         let size = self.display.lock().await.size().await;
         let capabilities = capabilities::capabilities(&self.opts, size);
-        let mut acceptor = Acceptor::new(self.opts.security.flag(), size, capabilities, self.creds.clone());
+        let mut acceptor = Acceptor::new(
+            self.opts.security.flag(),
+            size,
+            capabilities,
+            self.creds.clone(),
+        );
 
         self.attach_channels(&mut acceptor);
 
@@ -524,7 +535,9 @@ impl RdpServer {
                             wave_limit -= 1;
                             rdpsnd.wave(data, ts)
                         }
-                        RdpsndServerMessage::SetVolume { left, right } => rdpsnd.set_volume(left, right),
+                        RdpsndServerMessage::SetVolume { left, right } => {
+                            rdpsnd.set_volume(left, right)
+                        }
                         RdpsndServerMessage::Close => rdpsnd.close(),
                         RdpsndServerMessage::Error(error) => {
                             error!(?error, "Handling rdpsnd event");
@@ -535,7 +548,8 @@ impl RdpServer {
                     let channel_id = self
                         .get_channel_id_by_type::<RdpsndServer>()
                         .ok_or_else(|| anyhow!("SVC channel not found"))?;
-                    let data = server_encode_svc_messages(msgs.into(), channel_id, user_channel_id)?;
+                    let data =
+                        server_encode_svc_messages(msgs.into(), channel_id, user_channel_id)?;
                     writer.write_all(&data).await?;
                 }
                 ServerEvent::Clipboard(c) => {
@@ -544,9 +558,13 @@ impl RdpServer {
                         continue;
                     };
                     let msgs = match c {
-                        ClipboardMessage::SendInitiateCopy(formats) => cliprdr.initiate_copy(&formats),
+                        ClipboardMessage::SendInitiateCopy(formats) => {
+                            cliprdr.initiate_copy(&formats)
+                        }
                         ClipboardMessage::SendFormatData(data) => cliprdr.submit_format_data(data),
-                        ClipboardMessage::SendInitiatePaste(format) => cliprdr.initiate_paste(format),
+                        ClipboardMessage::SendInitiatePaste(format) => {
+                            cliprdr.initiate_paste(format)
+                        }
                         ClipboardMessage::Error(error) => {
                             error!(?error, "Handling clipboard event");
                             continue;
@@ -556,7 +574,8 @@ impl RdpServer {
                     let channel_id = self
                         .get_channel_id_by_type::<CliprdrServer>()
                         .ok_or_else(|| anyhow!("SVC channel not found"))?;
-                    let data = server_encode_svc_messages(msgs.into(), channel_id, user_channel_id)?;
+                    let data =
+                        server_encode_svc_messages(msgs.into(), channel_id, user_channel_id)?;
                     writer.write_all(&data).await?;
                 }
             }
@@ -700,7 +719,8 @@ impl RdpServer {
                     continue;
                 };
                 let svc_responses = channel.start()?;
-                let response = server_encode_svc_messages(svc_responses, channel_id, result.user_channel_id)?;
+                let response =
+                    server_encode_svc_messages(svc_responses, channel_id, result.user_channel_id)?;
                 writer.write_all(&response).await?;
             }
         }
@@ -710,7 +730,9 @@ impl RdpServer {
         for c in result.capabilities {
             match c {
                 CapabilitySet::General(c) => {
-                    let fastpath = c.extra_flags.contains(GeneralExtraFlags::FASTPATH_OUTPUT_SUPPORTED);
+                    let fastpath = c
+                        .extra_flags
+                        .contains(GeneralExtraFlags::FASTPATH_OUTPUT_SUPPORTED);
                     if !fastpath {
                         bail!("Fastpath output not supported!");
                     }
@@ -729,7 +751,9 @@ impl RdpServer {
 
                     // It's problematic when the client didn't resize, as we send bitmap updates that don't fit.
                     // The client will likely drop the connection.
-                    if client_size.width < display_size.width || client_size.height < display_size.height {
+                    if client_size.width < display_size.width
+                        || client_size.height < display_size.height
+                    {
                         // TODO: we may have different behaviour instead, such as clipping or scaling?
                         warn!(
                             "Client size doesn't fit the server size: {:?} < {:?}",
@@ -752,16 +776,16 @@ impl RdpServer {
                             // We should distinguish parameters for both modes,
                             // and somehow choose the "best", instead of picking
                             // the last parsed here.
-                            CodecProperty::RemoteFx(rdp::capability_sets::RemoteFxContainer::ClientContainer(c))
-                                if self.opts.has_remote_fx() =>
-                            {
+                            CodecProperty::RemoteFx(
+                                rdp::capability_sets::RemoteFxContainer::ClientContainer(c),
+                            ) if self.opts.has_remote_fx() => {
                                 for caps in c.caps_data.0 .0 {
                                     update_codecs.set_remotefx(Some((caps.entropy_bits, codec.id)));
                                 }
                             }
-                            CodecProperty::ImageRemoteFx(rdp::capability_sets::RemoteFxContainer::ClientContainer(
-                                c,
-                            )) if self.opts.has_image_remote_fx() => {
+                            CodecProperty::ImageRemoteFx(
+                                rdp::capability_sets::RemoteFxContainer::ClientContainer(c),
+                            ) if self.opts.has_image_remote_fx() => {
                                 for caps in c.caps_data.0 .0 {
                                     update_codecs.set_remotefx(Some((caps.entropy_bits, codec.id)));
                                 }
@@ -788,7 +812,13 @@ impl RdpServer {
             .context("failed to initialize update encoder")?;
 
         let state = self
-            .client_loop(reader, writer, result.io_channel_id, result.user_channel_id, encoder)
+            .client_loop(
+                reader,
+                writer,
+                result.io_channel_id,
+                result.user_channel_id,
+                encoder,
+            )
             .await
             .context("client loop failure")?;
 
@@ -810,7 +840,9 @@ impl RdpServer {
                 }
 
                 Ok(Action::X224) => {
-                    let _ = self.handle_x224(writer, io_channel_id, user_channel_id, &frame).await;
+                    let _ = self
+                        .handle_x224(writer, io_channel_id, user_channel_id, &frame)
+                        .await;
                 }
 
                 // the frame here is always valid, because otherwise it would
@@ -900,10 +932,17 @@ impl RdpServer {
 
                 if let Some(svc) = self.static_channels.get_by_channel_id_mut(data.channel_id) {
                     let response_pdus = svc.process(&data.user_data)?;
-                    let response = server_encode_svc_messages(response_pdus, data.channel_id, user_channel_id)?;
+                    let response = server_encode_svc_messages(
+                        response_pdus,
+                        data.channel_id,
+                        user_channel_id,
+                    )?;
                     writer.write_all(&response).await?;
                 } else {
-                    warn!(channel_id = data.channel_id, "Unexpected channel received: ID",);
+                    warn!(
+                        channel_id = data.channel_id,
+                        "Unexpected channel received: ID",
+                    );
                 }
             }
 
@@ -914,7 +953,10 @@ impl RdpServer {
             }
 
             _ => {
-                warn!(name = ironrdp_core::name(&message), "Unexpected mcs message");
+                warn!(
+                    name = ironrdp_core::name(&message),
+                    "Unexpected mcs message"
+                );
             }
         }
 
@@ -954,7 +996,11 @@ impl RdpServer {
         }
     }
 
-    async fn accept_finalize<S>(&mut self, mut framed: TokioFramed<S>, mut acceptor: Acceptor) -> Result<()>
+    async fn accept_finalize<S>(
+        &mut self,
+        mut framed: TokioFramed<S>,
+        mut acceptor: Acceptor,
+    ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Sync + Send + Unpin,
     {
@@ -965,7 +1011,10 @@ impl RdpServer {
 
             let (mut reader, mut writer) = split_tokio_framed(new_framed);
 
-            match self.client_accepted(&mut reader, &mut writer, result).await? {
+            match self
+                .client_accepted(&mut reader, &mut writer, result)
+                .await?
+            {
                 RunState::Continue => {
                     unreachable!();
                 }

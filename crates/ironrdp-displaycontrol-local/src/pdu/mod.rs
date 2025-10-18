@@ -3,8 +3,8 @@
 //! [1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/d2954508-f487-48bc-8731-39743e0854a9
 
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor,
-    WriteCursor,
+    cast_length, ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode,
+    EncodeResult, ReadCursor, WriteCursor,
 };
 use ironrdp_dvc::DvcEncode;
 use tracing::warn;
@@ -41,7 +41,9 @@ impl Encode for DisplayControlPdu {
 
         let (kind, payload_length) = match self {
             DisplayControlPdu::Caps(caps) => (DISPLAYCONTROL_PDU_TYPE_CAPS, caps.size()),
-            DisplayControlPdu::MonitorLayout(layout) => (DISPLAYCONTROL_PDU_TYPE_MONITOR_LAYOUT, layout.size()),
+            DisplayControlPdu::MonitorLayout(layout) => {
+                (DISPLAYCONTROL_PDU_TYPE_MONITOR_LAYOUT, layout.size())
+            }
         };
 
         // This will never overflow as per invariants.
@@ -89,7 +91,9 @@ impl<'de> Decode<'de> for DisplayControlPdu {
 
         let _payload_length = pdu_length
             .checked_sub(Self::FIXED_PART_SIZE.try_into().expect("always in range"))
-            .ok_or_else(|| invalid_field_err!("Length", "Display control PDU length is too small"))?;
+            .ok_or_else(|| {
+                invalid_field_err!("Length", "Display control PDU length is too small")
+            })?;
 
         match kind {
             DISPLAYCONTROL_PDU_TYPE_CAPS => {
@@ -100,7 +104,10 @@ impl<'de> Decode<'de> for DisplayControlPdu {
                 let layout = DisplayControlMonitorLayout::decode(src)?;
                 Ok(DisplayControlPdu::MonitorLayout(layout))
             }
-            _ => Err(invalid_field_err!("Type", "Unknown display control PDU type")),
+            _ => Err(invalid_field_err!(
+                "Type",
+                "Unknown display control PDU type"
+            )),
         }
     }
 }
@@ -146,8 +153,11 @@ impl DisplayControlCapabilities {
         max_monitor_area_factor_a: u32,
         max_monitor_area_factor_b: u32,
     ) -> DecodeResult<Self> {
-        let max_monitor_area =
-            calculate_monitor_area(max_num_monitors, max_monitor_area_factor_a, max_monitor_area_factor_b)?;
+        let max_monitor_area = calculate_monitor_area(
+            max_num_monitors,
+            max_monitor_area_factor_a,
+            max_monitor_area_factor_b,
+        )?;
 
         Ok(Self {
             max_num_monitors,
@@ -189,8 +199,11 @@ impl<'de> Decode<'de> for DisplayControlCapabilities {
         let max_monitor_area_factor_a = src.read_u32();
         let max_monitor_area_factor_b = src.read_u32();
 
-        let max_monitor_area =
-            calculate_monitor_area(max_num_monitors, max_monitor_area_factor_a, max_monitor_area_factor_b)?;
+        let max_monitor_area = calculate_monitor_area(
+            max_num_monitors,
+            max_monitor_area_factor_a,
+            max_monitor_area_factor_b,
+        )?;
 
         Ok(Self {
             max_num_monitors,
@@ -223,7 +236,10 @@ impl DisplayControlMonitorLayout {
             return Err(invalid_field_err!("NumMonitors", "Too many monitors",));
         }
 
-        let primary_monitors_count = monitors.iter().filter(|monitor| monitor.is_primary()).count();
+        let primary_monitors_count = monitors
+            .iter()
+            .filter(|monitor| monitor.is_primary())
+            .count();
 
         if primary_monitors_count != 1 {
             return Err(invalid_field_err!(
@@ -255,11 +271,12 @@ impl DisplayControlMonitorLayout {
         scale_factor: Option<u32>,
         physical_dims: Option<(u32, u32)>,
     ) -> EncodeResult<Self> {
-        let entry = MonitorLayoutEntry::new_primary(width, height)?.with_orientation(if width > height {
-            MonitorOrientation::Landscape
-        } else {
-            MonitorOrientation::Portrait
-        });
+        let entry =
+            MonitorLayoutEntry::new_primary(width, height)?.with_orientation(if width > height {
+                MonitorOrientation::Landscape
+            } else {
+                MonitorOrientation::Portrait
+            });
 
         let entry = if let Some(scale_factor) = scale_factor {
             entry
@@ -287,7 +304,11 @@ impl Encode for DisplayControlMonitorLayout {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_fixed_part_size!(in: dst);
 
-        dst.write_u32(MonitorLayoutEntry::FIXED_PART_SIZE.try_into().expect("always in range"));
+        dst.write_u32(
+            MonitorLayoutEntry::FIXED_PART_SIZE
+                .try_into()
+                .expect("always in range"),
+        );
 
         let monitors_count: u32 = self
             .monitors
@@ -312,7 +333,12 @@ impl Encode for DisplayControlMonitorLayout {
         // As per invariants: This will never overflow:
         // 0 <= Self::FIXED_PART_SIZE + MAX_SUPPORTED_MONITORS * MonitorLayoutEntry::FIXED_PART_SIZE < u16::MAX
         #[expect(clippy::arithmetic_side_effects)]
-        let size = Self::FIXED_PART_SIZE + self.monitors.iter().map(|monitor| monitor.size()).sum::<usize>();
+        let size = Self::FIXED_PART_SIZE
+            + self
+                .monitors
+                .iter()
+                .map(|monitor| monitor.size())
+                .sum::<usize>();
 
         size
     }
@@ -324,7 +350,11 @@ impl<'de> Decode<'de> for DisplayControlMonitorLayout {
 
         let monitor_layout_size = src.read_u32();
 
-        if monitor_layout_size != MonitorLayoutEntry::FIXED_PART_SIZE.try_into().expect("always in range") {
+        if monitor_layout_size
+            != MonitorLayoutEntry::FIXED_PART_SIZE
+                .try_into()
+                .expect("always in range")
+        {
             return Err(invalid_field_err!(
                 "MonitorLayoutSize",
                 "Monitor layout size is invalid"
@@ -373,7 +403,10 @@ macro_rules! validate_dimensions {
             return Err(invalid_field_err!("Width", "Monitor width cannot be odd"));
         }
         if !(200..=8192).contains(&$height) {
-            return Err(invalid_field_err!("Height", "Monitor height is out of range"));
+            return Err(invalid_field_err!(
+                "Height",
+                "Monitor height is out of range"
+            ));
         }
         Ok(())
     }};
@@ -518,7 +551,11 @@ impl MonitorLayoutEntry {
     /// NOTE: As specified in [MS-RDPEDISP], if the physical dimensions are not in the valid range
     /// (10..=10000 millimeters), the monitor physical dimensions are considered invalid and
     /// should be ignored.
-    pub fn with_physical_dimensions(mut self, physical_width: u32, physical_height: u32) -> EncodeResult<Self> {
+    pub fn with_physical_dimensions(
+        mut self,
+        physical_width: u32,
+        physical_height: u32,
+    ) -> EncodeResult<Self> {
         validate_physical_dimensions(physical_width, physical_height)?;
 
         self.physical_width = physical_width;
@@ -723,10 +760,16 @@ fn validate_desktop_scale_factor(desktop_scale_factor: u32) -> EncodeResult<()> 
 
 fn validate_physical_dimensions(physical_width: u32, physical_height: u32) -> EncodeResult<()> {
     if !(10..=10000).contains(&physical_width) {
-        return Err(invalid_field_err!("PhysicalWidth", "Physical width is out of range"));
+        return Err(invalid_field_err!(
+            "PhysicalWidth",
+            "Physical width is out of range"
+        ));
     }
     if !(10..=10000).contains(&physical_height) {
-        return Err(invalid_field_err!("PhysicalHeight", "Physical height is out of range"));
+        return Err(invalid_field_err!(
+            "PhysicalHeight",
+            "Physical height is out of range"
+        ));
     }
 
     Ok(())
@@ -753,5 +796,7 @@ fn calculate_monitor_area(
     // As per invariants: This multiplication would never overflow.
     // 0 <= MAX_MONITOR_AREA_FACTOR * MAX_MONITOR_AREA_FACTOR * MAX_SUPPORTED_MONITORS <= u64::MAX
     #[expect(clippy::arithmetic_side_effects)]
-    Ok(u64::from(max_monitor_area_factor_a) * u64::from(max_monitor_area_factor_b) * u64::from(max_num_monitors))
+    Ok(u64::from(max_monitor_area_factor_a)
+        * u64::from(max_monitor_area_factor_b)
+        * u64::from(max_num_monitors))
 }

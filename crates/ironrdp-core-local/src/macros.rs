@@ -347,8 +347,9 @@ macro_rules! ensure_fixed_part_size {
 #[macro_export]
 macro_rules! cast_length {
     ($ctx:expr, $field:expr, $len:expr) => {{
-        $len.try_into()
-            .map_err(|e| $crate::invalid_field_err_with_source($ctx, $field, "too many elements", e))
+        $len.try_into().map_err(|e| {
+            $crate::invalid_field_err_with_source($ctx, $field, "too many elements", e)
+        })
     }};
     ($field:expr, $len:expr) => {{
         $crate::cast_length!($crate::function!(), $field, $len)
@@ -384,7 +385,12 @@ macro_rules! cast_length {
 macro_rules! cast_int {
     ($ctx:expr, $field:expr, $len:expr) => {{
         $len.try_into().map_err(|e| {
-            $crate::invalid_field_err_with_source($ctx, $field, "out of range integral type conversion", e)
+            $crate::invalid_field_err_with_source(
+                $ctx,
+                $field,
+                "out of range integral type conversion",
+                e,
+            )
         })
     }};
     ($field:expr, $len:expr) => {{

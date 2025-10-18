@@ -104,7 +104,10 @@ impl Rdpsnd {
             .iter()
             .collect();
         let formats: HashSet<_> = self.handler.get_formats().iter().collect();
-        let formats = formats.intersection(&server_format).map(|&x| x.clone()).collect();
+        let formats = formats
+            .intersection(&server_format)
+            .map(|&x| x.clone())
+            .collect();
 
         let pdu = pdu::ClientAudioFormatPdu {
             version: self.version()?,
@@ -115,20 +118,18 @@ impl Rdpsnd {
             pitch: 0x00010000,
             dgram_port: 0,
         };
-        Ok(RdpsndSvcMessages::new(vec![pdu::ClientAudioOutputPdu::AudioFormat(
-            pdu,
-        )
-        .into()]))
+        Ok(RdpsndSvcMessages::new(vec![
+            pdu::ClientAudioOutputPdu::AudioFormat(pdu).into(),
+        ]))
     }
 
     pub fn quality_mode(&mut self) -> PduResult<RdpsndSvcMessages> {
         let pdu = pdu::QualityModePdu {
             quality_mode: pdu::QualityMode::High,
         };
-        Ok(RdpsndSvcMessages::new(vec![pdu::ClientAudioOutputPdu::QualityMode(
-            pdu,
-        )
-        .into()]))
+        Ok(RdpsndSvcMessages::new(vec![
+            pdu::ClientAudioOutputPdu::QualityMode(pdu).into(),
+        ]))
     }
 
     pub fn training_confirm(&mut self, pdu: &TrainingPdu) -> PduResult<RdpsndSvcMessages> {
@@ -144,11 +145,13 @@ impl Rdpsnd {
     }
 
     pub fn wave_confirm(&mut self, timestamp: u16, block_no: u8) -> PduResult<RdpsndSvcMessages> {
-        let pdu = pdu::WaveConfirmPdu { timestamp, block_no };
-        Ok(RdpsndSvcMessages::new(vec![pdu::ClientAudioOutputPdu::WaveConfirm(
-            pdu,
-        )
-        .into()]))
+        let pdu = pdu::WaveConfirmPdu {
+            timestamp,
+            block_no,
+        };
+        Ok(RdpsndSvcMessages::new(vec![
+            pdu::ClientAudioOutputPdu::WaveConfirm(pdu).into(),
+        ]))
     }
 }
 
@@ -164,7 +167,8 @@ impl SvcProcessor for Rdpsnd {
     }
 
     fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>> {
-        let pdu = pdu::ServerAudioOutputPdu::decode(&mut ReadCursor::new(payload)).map_err(|e| decode_err!(e))?;
+        let pdu = pdu::ServerAudioOutputPdu::decode(&mut ReadCursor::new(payload))
+            .map_err(|e| decode_err!(e))?;
 
         debug!(?pdu, ?self.state);
         let msg = match self.state {
@@ -210,7 +214,9 @@ impl SvcProcessor for Rdpsnd {
                     pdu::ServerAudioOutputPdu::Close => {
                         self.handler.close();
                     }
-                    pdu::ServerAudioOutputPdu::Training(pdu) => return Ok(self.training_confirm(&pdu)?.into()),
+                    pdu::ServerAudioOutputPdu::Training(pdu) => {
+                        return Ok(self.training_confirm(&pdu)?.into())
+                    }
                     _ => {
                         error!("Invalid PDU");
                         self.state = RdpsndState::Stop;

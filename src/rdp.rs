@@ -1604,11 +1604,11 @@ fn encode_multitransport_response_frame(
     };
 
     let mut buf = WriteBuf::new();
-    
+
     // Use message channel ID from server if available (per MS-RDPBCGR spec requirement)
     // Otherwise fall back to the channel from the request
     let channel_id = message_channel_id.unwrap_or(request.channel_id);
-    
+
     if let Some(msg_ch_id) = message_channel_id {
         info!(
             "📨 Sending Multitransport Response on MCS Message Channel 0x{:04x} (from ServerMessageChannelData)",
@@ -1620,13 +1620,8 @@ fn encode_multitransport_response_frame(
             request.channel_id
         );
     }
-    
-    legacy::encode_send_data_request(
-        request.initiator_id,
-        channel_id,
-        &response_pdu,
-        &mut buf,
-    )?;
+
+    legacy::encode_send_data_request(request.initiator_id, channel_id, &response_pdu, &mut buf)?;
 
     Ok(buf.filled().to_vec())
 }
@@ -1865,7 +1860,7 @@ async fn active_session<T: RdpEventSender>(
                         eprintln!("🔍 PDU read error details (Display): {}", err_str);
                         eprintln!("   Error type object: {:?}", e);
                         warn!("⚠️  PDU read error: {} / {}", err_msg, err_str);
-                        
+
                         //  FOR NOW: Accept ANY error during active session and continue
                         // This allows UDP timeout errors and unknown PDU types to not crash the session
                         warn!("⚠️  Accepting error and continuing (UDP may have timed out or unknown PDU received)");

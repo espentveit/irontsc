@@ -42,18 +42,15 @@ bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct MultiTransportFlags: u32 {
         /// 0x01: Client supports and requests Reliable UDP transport (RDP-UDP-R).
-        const TRANSPORT_TYPE_UDP_FECR = 0x01;
-
-        /// 0x02: Server-only flag indicating UDP is preferred.
-        const TRANSPORT_TYPE_UDP_PREFERRED = 0x02;
+        const TRANSPORT_TYPE_UDP_FECR = 0x0000_0001;
 
         /// 0x04: Client supports and requests Lossy UDP transport (RDP-UDP-L).
-        const TRANSPORT_TYPE_UDP_FECL = 0x04;
+        const TRANSPORT_TYPE_UDP_FECL = 0x0000_0004;
 
-        /// 0x100: This PDU is a request from the client to the server.
-        const MULTITRANSPORT_TYPE_FLAGS_REQUEST = 0x0100;
+        /// 0x100: Client prefers tunnelling static virtual channels over UDP.
+        const TRANSPORT_TYPE_UDP_PREFERRED = 0x0000_0100;
 
         /// 0x200: Client supports soft-syncing from TCP to UDP.
-        const SOFT_SYNC_TCP_TO_UDP = 0x0200;
+        const SOFT_SYNC_TCP_TO_UDP = 0x0000_0200;
     }
 }

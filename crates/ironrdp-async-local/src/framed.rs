@@ -2,8 +2,8 @@ use std::io;
 
 use bytes::{Bytes, BytesMut};
 use ironrdp_connector::{ConnectorResult, Sequence, Written};
-use ironrdp_pdu::WriteBuf;
 use ironrdp_pdu::PduHint;
+use ironrdp_pdu::WriteBuf;
 use tracing::{debug, trace};
 
 // TODO: investigate if we could use static async fn / return position impl trait in traits when stabilized:

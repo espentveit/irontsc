@@ -14,22 +14,22 @@ use tokio::sync::mpsc;
 mod config;
 mod gfx;
 mod gfx_channel;
+mod h264_codec_caps;
 mod rdp;
 mod udp_gfx;
 mod udp_gfx_bridge;
 mod udp_transport;
 mod ws;
-mod h264_codec_caps;
 
 // Video Redirection support (MS-RDPEVOR)
 #[cfg(feature = "video-redirection")]
-mod video_redirect;
+mod geometry_channel;
 #[cfg(feature = "video-redirection")]
 mod video_control_channel;
 #[cfg(feature = "video-redirection")]
 mod video_data_channel;
 #[cfg(feature = "video-redirection")]
-mod geometry_channel;
+mod video_redirect;
 
 use crate::config::{ClipboardType, Config, Destination};
 use crate::rdp::{
@@ -218,12 +218,31 @@ fn create_rdp_config(
     let destination = Destination::new(server.to_string()).unwrap();
 
     // Get desktop size from settings (handle fullscreen separately)
-    let (width, height) = if let Some(dims) = rdp_settings.get_resolution().to_dimensions() {
-        dims
-    } else {
-        // Fullscreen - use a reasonable default, will be updated on connection
-        (1920, 1080)
+    let (requested_width, requested_height) =
+        if let Some(dims) = rdp_settings.get_resolution().to_dimensions() {
+            dims
+        } else {
+            // Fullscreen - use a reasonable default, will be updated on connection
+            (1920, 1080)
+        };
+
+    let align4 = |value: u16| -> u16 {
+        let aligned = value & !0x3;
+        if aligned == 0 { 4 } else { aligned }
     };
+
+    let width = align4(requested_width);
+    let height = align4(requested_height);
+
+    if width != requested_width || height != requested_height {
+        tracing::debug!(
+            requested_width,
+            requested_height,
+            aligned_width = width,
+            aligned_height = height,
+            "Adjusted requested resolution to multiples of four"
+        );
+    }
 
     let connector_config = connector::Config {
         credentials: connector::Credentials::UsernamePassword {
@@ -246,8 +265,9 @@ fn create_rdp_config(
         keyboard_type: ironrdp::pdu::gcc::KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_functional_keys_count: 12,
-        client_build: 1,
-        client_dir: "".to_string(),
+        // Match modern mstsc fingerprint so the server enables RDPEGFX paths
+        client_build: 18363,
+        client_dir: "C:\\Windows\\System32\\mstscax.dll".to_string(),
         platform: MajorPlatformType::UNIX,
         keyboard_layout: 0,
         ime_file_name: "".to_string(),
@@ -265,10 +285,13 @@ fn create_rdp_config(
         },
         request_data: None,
         enable_audio_playback: false,
-        performance_flags: PerformanceFlags::default(),
+        performance_flags: PerformanceFlags::DISABLE_WALLPAPER
+            | PerformanceFlags::DISABLE_FULLWINDOWDRAG
+            | PerformanceFlags::DISABLE_MENUANIMATIONS
+            | PerformanceFlags::DISABLE_THEMING,
         license_cache: None,
         timezone_info: crate::config::get_system_timezone_info(),
-        correlation_id: None,  // Will be auto-generated if needed
+        correlation_id: None, // Will be auto-generated if needed
     };
 
     Config {
@@ -2593,7 +2616,9 @@ fn main() -> glib::ExitCode {
     // Connect to "activate" signal of `app`
     app.connect_activate(|app| {
         let autologon = unsafe {
-            app.data::<bool>("autologon").map(|ptr| *ptr.as_ptr()).unwrap_or(false)
+            app.data::<bool>("autologon")
+                .map(|ptr| *ptr.as_ptr())
+                .unwrap_or(false)
         };
         eprintln!("Activate handler: retrieved autologon={}", autologon);
         build_ui(app, autologon);
@@ -2639,11 +2664,17 @@ fn build_ui(app: &Application, autologon: bool) {
     unsafe {
         if let Some(computer) = app.data::<String>("computer") {
             settings_for_ui.server = (*computer.as_ptr()).clone();
-            eprintln!("Overriding server with command line: {}", settings_for_ui.server);
+            eprintln!(
+                "Overriding server with command line: {}",
+                settings_for_ui.server
+            );
         }
         if let Some(username) = app.data::<String>("username") {
             settings_for_ui.username = (*username.as_ptr()).clone();
-            eprintln!("Overriding username with command line: {}", settings_for_ui.username);
+            eprintln!(
+                "Overriding username with command line: {}",
+                settings_for_ui.username
+            );
         }
         if let Some(password) = app.data::<String>("password") {
             settings_for_ui.password = (*password.as_ptr()).clone();
@@ -2652,7 +2683,10 @@ fn build_ui(app: &Application, autologon: bool) {
         }
         if let Some(domain) = app.data::<String>("domain") {
             settings_for_ui.domain = (*domain.as_ptr()).clone();
-            eprintln!("Overriding domain with command line: {}", settings_for_ui.domain);
+            eprintln!(
+                "Overriding domain with command line: {}",
+                settings_for_ui.domain
+            );
         }
     }
 

@@ -172,7 +172,11 @@ fn code_gr(bits: &mut BitStream<'_>, krp: &mut u32, val: u32) {
     }
 }
 
-pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Result<(), RlgrError> {
+pub fn decode(
+    mode: EntropyAlgorithm,
+    tile: &[u8],
+    mut output: &mut [i16],
+) -> Result<(), RlgrError> {
     let mut k: u32 = 1;
     let mut kr: u32 = 1;
     let mut kp: u32 = k << LS_GR;
@@ -188,14 +192,16 @@ pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Re
             CompressionMode::RunLength => {
                 let number_of_zeros = truncate_leading_value(&mut bits, false);
                 try_split_bits!(bits, 1);
-                let run = count_run(number_of_zeros, &mut k, &mut kp) + load_be_u32(try_split_bits!(bits, k as usize));
+                let run = count_run(number_of_zeros, &mut k, &mut kp)
+                    + load_be_u32(try_split_bits!(bits, k as usize));
 
                 let sign_bit = try_split_bits!(bits, 1).load_be::<u8>();
 
                 let number_of_ones = truncate_leading_value(&mut bits, true);
                 try_split_bits!(bits, 1);
 
-                let code_remainder = load_be_u32(try_split_bits!(bits, kr as usize)) + ((number_of_ones as u32) << kr);
+                let code_remainder = load_be_u32(try_split_bits!(bits, kr as usize))
+                    + ((number_of_ones as u32) << kr);
 
                 update_parameters_according_to_number_of_ones(number_of_ones, &mut kr, &mut krp);
                 kp = kp.saturating_sub(DN_GR);
@@ -212,7 +218,8 @@ pub fn decode(mode: EntropyAlgorithm, tile: &[u8], mut output: &mut [i16]) -> Re
                 let number_of_ones = truncate_leading_value(&mut bits, true);
                 try_split_bits!(bits, 1);
 
-                let code_remainder = load_be_u32(try_split_bits!(bits, kr as usize)) + ((number_of_ones as u32) << kr);
+                let code_remainder = load_be_u32(try_split_bits!(bits, kr as usize))
+                    + ((number_of_ones as u32) << kr);
 
                 update_parameters_according_to_number_of_ones(number_of_ones, &mut kr, &mut krp);
 
@@ -334,7 +341,11 @@ fn compute_n_index(code_remainder: u32) -> usize {
     32 - leading_zeros
 }
 
-fn update_parameters_according_to_number_of_ones(number_of_ones: usize, kr: &mut u32, krp: &mut u32) {
+fn update_parameters_according_to_number_of_ones(
+    number_of_ones: usize,
+    kr: &mut u32,
+    krp: &mut u32,
+) {
     if number_of_ones == 0 {
         *krp = (*krp).saturating_sub(2);
         *kr = *krp >> LS_GR;

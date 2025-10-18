@@ -3,8 +3,9 @@
 use ironrdp_core::AsAny;
 
 use crate::pdu::{
-    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest, FileContentsResponse,
-    FormatDataRequest, FormatDataResponse, LockDataId, OwnedFormatDataResponse,
+    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest,
+    FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
+    OwnedFormatDataResponse,
 };
 
 pub trait ClipboardError: core::error::Error + Send + Sync + 'static {}

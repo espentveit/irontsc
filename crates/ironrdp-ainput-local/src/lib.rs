@@ -1,9 +1,12 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
+    ensure_fixed_part_size, invalid_field_err, Decode, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 use ironrdp_dvc::DvcEncode;
 use num_derive::FromPrimitive;
@@ -157,8 +160,8 @@ impl<'de> Decode<'de> for ServerPdu {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
         ensure_fixed_part_size!(in: src);
 
-        let pdu_type =
-            ServerPduType::from_u16(src.read_u16()).ok_or_else(|| invalid_field_err!("pduType", "invalid pdu type"))?;
+        let pdu_type = ServerPduType::from_u16(src.read_u16())
+            .ok_or_else(|| invalid_field_err!("pduType", "invalid pdu type"))?;
 
         let server_pdu = match pdu_type {
             ServerPduType::Version => ServerPdu::Version(VersionPdu::decode(src)?),
@@ -254,8 +257,8 @@ impl<'de> Decode<'de> for ClientPdu {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
         ensure_fixed_part_size!(in: src);
 
-        let pdu_type =
-            ClientPduType::from_u16(src.read_u16()).ok_or_else(|| invalid_field_err!("pduType", "invalid pdu type"))?;
+        let pdu_type = ClientPduType::from_u16(src.read_u16())
+            .ok_or_else(|| invalid_field_err!("pduType", "invalid pdu type"))?;
 
         let client_pdu = match pdu_type {
             ClientPduType::Mouse => ClientPdu::Mouse(MousePdu::decode(src)?),

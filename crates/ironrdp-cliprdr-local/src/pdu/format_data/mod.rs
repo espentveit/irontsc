@@ -10,8 +10,8 @@ pub use self::palette::*;
 use std::borrow::Cow;
 
 use ironrdp_core::{
-    cast_int, ensure_fixed_part_size, ensure_size, Decode, DecodeResult, Encode, EncodeResult, IntoOwned, ReadCursor,
-    WriteCursor,
+    cast_int, ensure_fixed_part_size, ensure_size, Decode, DecodeResult, Encode, EncodeResult,
+    IntoOwned, ReadCursor, WriteCursor,
 };
 use ironrdp_pdu::impl_pdu_borrowing;
 use ironrdp_pdu::utils::{read_string_from_cursor, to_utf16_bytes, CharacterSet};
@@ -199,7 +199,9 @@ impl<'de> Decode<'de> for FormatDataResponse<'de> {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
         let header = PartialHeader::decode(src)?;
 
-        let is_error = header.message_flags.contains(ClipboardPduFlags::RESPONSE_FAIL);
+        let is_error = header
+            .message_flags
+            .contains(ClipboardPduFlags::RESPONSE_FAIL);
 
         ensure_size!(in: src, size: header.data_length());
         let data = src.read_slice(header.data_length());

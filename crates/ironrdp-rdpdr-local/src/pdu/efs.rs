@@ -7,10 +7,13 @@ use core::fmt::{Debug, Display};
 
 use bitflags::bitflags;
 use ironrdp_core::{
-    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err, invalid_field_err_with_source,
-    unsupported_value_err, DecodeError, DecodeResult, EncodeResult, ReadCursor, WriteCursor,
+    cast_length, ensure_fixed_part_size, ensure_size, invalid_field_err,
+    invalid_field_err_with_source, unsupported_value_err, DecodeError, DecodeResult, EncodeResult,
+    ReadCursor, WriteCursor,
 };
-use ironrdp_pdu::utils::{decode_string, encoded_str_len, from_utf16_bytes, write_string_to_cursor, CharacterSet};
+use ironrdp_pdu::utils::{
+    decode_string, encoded_str_len, from_utf16_bytes, write_string_to_cursor, CharacterSet,
+};
 use ironrdp_pdu::{read_padding, write_padding, PduError};
 use tracing::error;
 
@@ -156,7 +159,9 @@ impl ClientNameRequest {
         ensure_size!(in: dst, size: self.size());
         dst.write_u32(self.unicode_flag().into());
         dst.write_u32(0); // // CodePage (4 bytes): it MUST be set to 0
-        dst.write_u32(encoded_str_len(self.computer_name(), self.unicode_flag().into(), true) as u32);
+        dst.write_u32(
+            encoded_str_len(self.computer_name(), self.unicode_flag().into(), true) as u32,
+        );
         write_string_to_cursor(dst, self.computer_name(), self.unicode_flag().into(), true)
     }
 
@@ -165,7 +170,8 @@ impl ClientNameRequest {
     }
 
     pub fn size(&self) -> usize {
-        Self::FIXED_PART_SIZE + encoded_str_len(self.computer_name(), self.unicode_flag().into(), true)
+        Self::FIXED_PART_SIZE
+            + encoded_str_len(self.computer_name(), self.unicode_flag().into(), true)
     }
 }
 
@@ -512,7 +518,11 @@ impl TryFrom<u16> for CapabilityType {
             0x0003 => Ok(CapabilityType::Port),
             0x0004 => Ok(CapabilityType::Drive),
             0x0005 => Ok(CapabilityType::Smartcard),
-            _ => Err(invalid_field_err!("try_from", "CapabilityType", "invalid value")),
+            _ => Err(invalid_field_err!(
+                "try_from",
+                "CapabilityType",
+                "invalid value"
+            )),
         }
     }
 }
@@ -844,7 +854,12 @@ impl Devices {
 
     /// Returns the [`DeviceType`] for the given device ID.
     pub fn for_device_type(&self, device_id: u32) -> DecodeResult<DeviceType> {
-        if let Some(device_type) = self.0.iter().find(|d| d.device_id == device_id).map(|d| d.device_type) {
+        if let Some(device_type) = self
+            .0
+            .iter()
+            .find(|d| d.device_id == device_id)
+            .map(|d| d.device_type)
+        {
             Ok(device_type)
         } else {
             Err(invalid_field_err!(
@@ -966,9 +981,9 @@ impl PreferredDosName {
     fn format(&self) -> String {
         let mut name: &str = &self.0;
         if name.len() > 7 {
-            name = name
-                .get(..7)
-                .expect("index is guaranteed to be on a UTF-8 boundary for a string of ASCII characters");
+            name = name.get(..7).expect(
+                "index is guaranteed to be on a UTF-8 boundary for a string of ASCII characters",
+            );
         }
         format!("{name:\x00<8}")
     }
@@ -1005,7 +1020,11 @@ impl TryFrom<u32> for DeviceType {
             0x0000_0004 => Ok(DeviceType::Print),
             0x0000_0008 => Ok(DeviceType::Filesystem),
             0x0000_0020 => Ok(DeviceType::Smartcard),
-            _ => Err(invalid_field_err!("try_from", "DeviceType", "invalid value")),
+            _ => Err(invalid_field_err!(
+                "try_from",
+                "DeviceType",
+                "invalid value"
+            )),
         }
     }
 }
@@ -1039,7 +1058,10 @@ impl ServerDeviceAnnounceResponse {
         let device_id = src.read_u32();
         let result_code = NtStatus::from(src.read_u32());
 
-        Ok(Self { device_id, result_code })
+        Ok(Self {
+            device_id,
+            result_code,
+        })
     }
 
     pub fn size(&self) -> usize {
@@ -1205,7 +1227,11 @@ impl TryFrom<u32> for MajorFunction {
             0x0000_0006 => Ok(MajorFunction::SetInformation),
             0x0000_000c => Ok(MajorFunction::DirectoryControl),
             0x0000_0011 => Ok(MajorFunction::LockControl),
-            _ => Err(invalid_field_err!("try_from", "MajorFunction", "unsupported value")),
+            _ => Err(invalid_field_err!(
+                "try_from",
+                "MajorFunction",
+                "unsupported value"
+            )),
         }
     }
 }
@@ -1235,7 +1261,9 @@ impl Debug for MinorFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             MinorFunction::IRP_MN_QUERY_DIRECTORY => write!(f, "IRP_MN_QUERY_DIRECTORY"),
-            MinorFunction::IRP_MN_NOTIFY_CHANGE_DIRECTORY => write!(f, "IRP_MN_NOTIFY_CHANGE_DIRECTORY"),
+            MinorFunction::IRP_MN_NOTIFY_CHANGE_DIRECTORY => {
+                write!(f, "IRP_MN_NOTIFY_CHANGE_DIRECTORY")
+            }
             _ => write!(f, "MinorFunction({:#010X})", self.0),
         }
     }
@@ -1285,7 +1313,12 @@ where
         let input_buffer_length = src.read_u32();
         let io_control_code = T::try_from(src.read_u32()).map_err(|e| {
             error!("Failed to parse IoCtlCode");
-            invalid_field_err_with_source("DeviceControlRequest", "IoCtlCode", "invalid IoCtlCode", e)
+            invalid_field_err_with_source(
+                "DeviceControlRequest",
+                "IoCtlCode",
+                "invalid IoCtlCode",
+                e,
+            )
         })?;
 
         // Padding (20 bytes): An array of 20 bytes. Reserved. This field can be set to any value and MUST be ignored.
@@ -1457,7 +1490,9 @@ impl ServerDriveIoRequest {
             MajorFunction::Close => Ok(DeviceCloseRequest::decode(dev_io_req).into()),
             MajorFunction::Read => Ok(DeviceReadRequest::decode(dev_io_req, src)?.into()),
             MajorFunction::Write => Ok(DeviceWriteRequest::decode(dev_io_req, src)?.into()),
-            MajorFunction::DeviceControl => Ok(DeviceControlRequest::<AnyIoCtlCode>::decode(dev_io_req, src)?.into()),
+            MajorFunction::DeviceControl => {
+                Ok(DeviceControlRequest::<AnyIoCtlCode>::decode(dev_io_req, src)?.into())
+            }
             MajorFunction::QueryVolumeInformation => {
                 Ok(ServerDriveQueryVolumeInformationRequest::decode(dev_io_req, src)?.into())
             }
@@ -1466,8 +1501,12 @@ impl ServerDriveIoRequest {
                 "MajorFunction",
                 "SetVolumeInformation".to_owned()
             )), // FreeRDP doesn't implement this
-            MajorFunction::QueryInformation => Ok(ServerDriveQueryInformationRequest::decode(dev_io_req, src)?.into()),
-            MajorFunction::SetInformation => Ok(ServerDriveSetInformationRequest::decode(dev_io_req, src)?.into()),
+            MajorFunction::QueryInformation => {
+                Ok(ServerDriveQueryInformationRequest::decode(dev_io_req, src)?.into())
+            }
+            MajorFunction::SetInformation => {
+                Ok(ServerDriveSetInformationRequest::decode(dev_io_req, src)?.into())
+            }
             MajorFunction::DirectoryControl => match dev_io_req.minor_function {
                 MinorFunction::IRP_MN_QUERY_DIRECTORY => {
                     Ok(ServerDriveQueryDirectoryRequest::decode(dev_io_req, src)?.into())
@@ -1482,7 +1521,9 @@ impl ServerDriveIoRequest {
                     "invalid value"
                 )),
             },
-            MajorFunction::LockControl => Ok(ServerDriveLockControlRequest::decode(dev_io_req, src)?.into()),
+            MajorFunction::LockControl => {
+                Ok(ServerDriveLockControlRequest::decode(dev_io_req, src)?.into())
+            }
         }
     }
 }
@@ -1588,7 +1629,8 @@ impl DeviceCreateRequest {
         let shared_access = SharedAccess::from_bits_retain(src.read_u32());
         let create_disposition = CreateDisposition::from_bits_retain(src.read_u32());
         let create_options = CreateOptions::from_bits_retain(src.read_u32());
-        let path_length: usize = cast_length!("DeviceCreateRequest", "path_length", src.read_u32())?;
+        let path_length: usize =
+            cast_length!("DeviceCreateRequest", "path_length", src.read_u32())?;
 
         ensure_size!(ctx: "DeviceCreateRequest", in: src, size: path_length);
         let path = from_utf16_bytes(src.read_slice(path_length))
@@ -1867,16 +1909,34 @@ impl Display for FileInformationClassLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             FileInformationClassLevel::FILE_BASIC_INFORMATION => write!(f, "FileBasicInformation"),
-            FileInformationClassLevel::FILE_STANDARD_INFORMATION => write!(f, "FileStandardInformation"),
-            FileInformationClassLevel::FILE_ATTRIBUTE_TAG_INFORMATION => write!(f, "FileAttributeTagInformation"),
-            FileInformationClassLevel::FILE_DIRECTORY_INFORMATION => write!(f, "FileDirectoryInformation"),
-            FileInformationClassLevel::FILE_FULL_DIRECTORY_INFORMATION => write!(f, "FileFullDirectoryInformation"),
-            FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION => write!(f, "FileBothDirectoryInformation"),
+            FileInformationClassLevel::FILE_STANDARD_INFORMATION => {
+                write!(f, "FileStandardInformation")
+            }
+            FileInformationClassLevel::FILE_ATTRIBUTE_TAG_INFORMATION => {
+                write!(f, "FileAttributeTagInformation")
+            }
+            FileInformationClassLevel::FILE_DIRECTORY_INFORMATION => {
+                write!(f, "FileDirectoryInformation")
+            }
+            FileInformationClassLevel::FILE_FULL_DIRECTORY_INFORMATION => {
+                write!(f, "FileFullDirectoryInformation")
+            }
+            FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION => {
+                write!(f, "FileBothDirectoryInformation")
+            }
             FileInformationClassLevel::FILE_NAMES_INFORMATION => write!(f, "FileNamesInformation"),
-            FileInformationClassLevel::FILE_END_OF_FILE_INFORMATION => write!(f, "FileEndOfFileInformation"),
-            FileInformationClassLevel::FILE_DISPOSITION_INFORMATION => write!(f, "FileDispositionInformation"),
-            FileInformationClassLevel::FILE_RENAME_INFORMATION => write!(f, "FileRenameInformation"),
-            FileInformationClassLevel::FILE_ALLOCATION_INFORMATION => write!(f, "FileAllocationInformation"),
+            FileInformationClassLevel::FILE_END_OF_FILE_INFORMATION => {
+                write!(f, "FileEndOfFileInformation")
+            }
+            FileInformationClassLevel::FILE_DISPOSITION_INFORMATION => {
+                write!(f, "FileDispositionInformation")
+            }
+            FileInformationClassLevel::FILE_RENAME_INFORMATION => {
+                write!(f, "FileRenameInformation")
+            }
+            FileInformationClassLevel::FILE_ALLOCATION_INFORMATION => {
+                write!(f, "FileAllocationInformation")
+            }
             _ => write!(f, "FileInformationClassLevel({})", self.0),
         }
     }
@@ -1886,11 +1946,21 @@ impl Debug for FileInformationClassLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             FileInformationClassLevel::FILE_BASIC_INFORMATION => write!(f, "FileBasicInformation"),
-            FileInformationClassLevel::FILE_STANDARD_INFORMATION => write!(f, "FileStandardInformation"),
-            FileInformationClassLevel::FILE_ATTRIBUTE_TAG_INFORMATION => write!(f, "FileAttributeTagInformation"),
-            FileInformationClassLevel::FILE_DIRECTORY_INFORMATION => write!(f, "FileDirectoryInformation"),
-            FileInformationClassLevel::FILE_FULL_DIRECTORY_INFORMATION => write!(f, "FileFullDirectoryInformation"),
-            FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION => write!(f, "FileBothDirectoryInformation"),
+            FileInformationClassLevel::FILE_STANDARD_INFORMATION => {
+                write!(f, "FileStandardInformation")
+            }
+            FileInformationClassLevel::FILE_ATTRIBUTE_TAG_INFORMATION => {
+                write!(f, "FileAttributeTagInformation")
+            }
+            FileInformationClassLevel::FILE_DIRECTORY_INFORMATION => {
+                write!(f, "FileDirectoryInformation")
+            }
+            FileInformationClassLevel::FILE_FULL_DIRECTORY_INFORMATION => {
+                write!(f, "FileFullDirectoryInformation")
+            }
+            FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION => {
+                write!(f, "FileBothDirectoryInformation")
+            }
             FileInformationClassLevel::FILE_NAMES_INFORMATION => write!(f, "FileNamesInformation"),
             _ => write!(f, "FileInformationClassLevel({})", self.0),
         }
@@ -1997,14 +2067,18 @@ impl FileInformationClass {
         src: &mut ReadCursor<'_>,
     ) -> DecodeResult<Self> {
         match file_info_class_level {
-            FileInformationClassLevel::FILE_BASIC_INFORMATION => Ok(FileBasicInformation::decode(src)?.into()),
+            FileInformationClassLevel::FILE_BASIC_INFORMATION => {
+                Ok(FileBasicInformation::decode(src)?.into())
+            }
             FileInformationClassLevel::FILE_END_OF_FILE_INFORMATION => {
                 Ok(FileEndOfFileInformation::decode(src)?.into())
             }
             FileInformationClassLevel::FILE_DISPOSITION_INFORMATION => {
                 Ok(FileDispositionInformation::decode(src, length)?.into())
             }
-            FileInformationClassLevel::FILE_RENAME_INFORMATION => Ok(FileRenameInformation::decode(src)?.into()),
+            FileInformationClassLevel::FILE_RENAME_INFORMATION => {
+                Ok(FileRenameInformation::decode(src)?.into())
+            }
             FileInformationClassLevel::FILE_ALLOCATION_INFORMATION => {
                 Ok(FileAllocationInformation::decode(src)?.into())
             }
@@ -2631,7 +2705,11 @@ impl ServerDriveQueryDirectoryRequest {
         }
 
         let initial_query = src.read_u8();
-        let path_length = cast_length!("ServerDriveQueryDirectoryRequest", "path_length", src.read_u32())?;
+        let path_length = cast_length!(
+            "ServerDriveQueryDirectoryRequest",
+            "path_length",
+            src.read_u32()
+        )?;
         // Padding (23 bytes): An array of 23 bytes. This field is unused and MUST be ignored.
         read_padding!(src, 23);
 
@@ -2757,7 +2835,11 @@ impl ServerDriveQueryVolumeInformationRequest {
         // We only need to read the buffer up to the FileInformationClass to get the job done, so the rest of the fields in
         // this structure are discarded. See FreeRDP:
         // https://github.com/FreeRDP/FreeRDP/blob/511444a65e7aa2f537c5e531fa68157a50c1bd4d/channels/drive/client/drive_main.c#L464
-        let length = cast_length!("ServerDriveQueryVolumeInformationRequest", "length", src.read_u32())?; // Length
+        let length = cast_length!(
+            "ServerDriveQueryVolumeInformationRequest",
+            "length",
+            src.read_u32()
+        )?; // Length
         read_padding!(src, 24); // Padding
         ensure_size!(in: src, size: length);
         read_padding!(src, length); // QueryVolumeBuffer
@@ -3172,7 +3254,11 @@ impl DeviceReadResponse {
     pub fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: self.size());
         self.device_io_reply.encode(dst)?;
-        dst.write_u32(cast_length!("DeviceReadResponse", "length", self.read_data.len())?);
+        dst.write_u32(cast_length!(
+            "DeviceReadResponse",
+            "length",
+            self.read_data.len()
+        )?);
         dst.write_slice(&self.read_data);
         Ok(())
     }
@@ -3192,7 +3278,10 @@ impl Debug for DeviceReadResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DeviceReadResponse")
             .field("device_io_reply", &self.device_io_reply)
-            .field("read_data", &format!("Vec<u8> of length {}", self.read_data.len()))
+            .field(
+                "read_data",
+                &format!("Vec<u8> of length {}", self.read_data.len()),
+            )
             .finish()
     }
 }
@@ -3233,7 +3322,10 @@ impl Debug for DeviceWriteRequest {
         f.debug_struct("DeviceWriteRequest")
             .field("device_io_request", &self.device_io_request)
             .field("offset", &self.offset)
-            .field("write_data", &format!("Vec<u8> of length {}", self.write_data.len()))
+            .field(
+                "write_data",
+                &format!("Vec<u8> of length {}", self.write_data.len()),
+            )
             .finish()
     }
 }
@@ -3380,10 +3472,15 @@ impl FileRenameInformation {
         ensure_fixed_part_size!(in: src);
         let replace_if_exists = Boolean::from(src.read_u8());
         let _ = src.read_u8(); // RootDirectory
-        let file_name_length = cast_length!("FileRenameInformation", "file_name_length", src.read_u32())?;
+        let file_name_length =
+            cast_length!("FileRenameInformation", "file_name_length", src.read_u32())?;
 
         ensure_size!(in: src, size: file_name_length);
-        let file_name = decode_string(src.read_slice(file_name_length), CharacterSet::Unicode, true)?;
+        let file_name = decode_string(
+            src.read_slice(file_name_length),
+            CharacterSet::Unicode,
+            true,
+        )?;
 
         Ok(Self {
             replace_if_exists,
@@ -3434,7 +3531,11 @@ impl ClientDriveSetInformationResponse {
     pub fn new(req: &ServerDriveSetInformationRequest, io_status: NtStatus) -> EncodeResult<Self> {
         Ok(Self {
             device_io_reply: DeviceIoResponse::new(req.device_io_request.clone(), io_status),
-            length: cast_length!("ClientDriveSetInformationResponse", "length", req.set_buffer.size())?,
+            length: cast_length!(
+                "ClientDriveSetInformationResponse",
+                "length",
+                req.set_buffer.size()
+            )?,
         })
     }
 

@@ -180,7 +180,10 @@ impl DecodedPointer {
         )
     }
 
-    fn decode_pointer(data: PointerData<'_>, target: PointerBitmapTarget) -> Result<Self, PointerError> {
+    fn decode_pointer(
+        data: PointerData<'_>,
+        target: PointerBitmapTarget,
+    ) -> Result<Self, PointerError> {
         if data.width == 0 || data.height == 0 {
             return Ok(Self::new_invisible());
         }
@@ -219,14 +222,18 @@ impl DecodedPointer {
         for row_idx in 0..data.height {
             // For non-monochrome cursors we read strides from bottom to top
             let (mut xor_stride_cursor, mut and_stride_cursor) = if flip_vertical {
-                let xor_stride_cursor =
-                    ReadCursor::new(&data.xor_mask[usize::from(data.height - row_idx - 1) * xor_stride.length..]);
-                let and_stride_cursor =
-                    ReadCursor::new(&and_mask[usize::from(data.height - row_idx - 1) * and_stride.length..]);
+                let xor_stride_cursor = ReadCursor::new(
+                    &data.xor_mask[usize::from(data.height - row_idx - 1) * xor_stride.length..],
+                );
+                let and_stride_cursor = ReadCursor::new(
+                    &and_mask[usize::from(data.height - row_idx - 1) * and_stride.length..],
+                );
                 (xor_stride_cursor, and_stride_cursor)
             } else {
-                let xor_stride_cursor = ReadCursor::new(&data.xor_mask[usize::from(row_idx) * xor_stride.length..]);
-                let and_stride_cursor = ReadCursor::new(&and_mask[usize::from(row_idx) * and_stride.length..]);
+                let xor_stride_cursor =
+                    ReadCursor::new(&data.xor_mask[usize::from(row_idx) * xor_stride.length..]);
+                let and_stride_cursor =
+                    ReadCursor::new(&and_mask[usize::from(row_idx) * and_stride.length..]);
                 (xor_stride_cursor, and_stride_cursor)
             };
 
@@ -398,7 +405,12 @@ impl ColorStrideReader {
                     32 => {
                         *read_stide_bytes += 4;
                         let color_32bit = cursor.read_array::<4>();
-                        [color_32bit[2], color_32bit[1], color_32bit[0], color_32bit[3]]
+                        [
+                            color_32bit[2],
+                            color_32bit[1],
+                            color_32bit[0],
+                            color_32bit[3],
+                        ]
                     }
                     _ => unreachable!("per the invariant on self.bpp, this path is unreachable"),
                 }

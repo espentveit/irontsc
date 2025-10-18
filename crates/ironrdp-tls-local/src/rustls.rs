@@ -13,7 +13,9 @@ where
     let mut tls_stream = {
         let mut config = rustls::client::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(std::sync::Arc::new(danger::NoCertificateVerification))
+            .with_custom_certificate_verifier(std::sync::Arc::new(
+                danger::NoCertificateVerification,
+            ))
             .with_no_client_auth();
 
         // This adds support for the SSLKEYLOGFILE env variable (https://wiki.wireshark.org/TLS#using-the-pre-master-secret)
@@ -30,7 +32,9 @@ where
 
         let domain = ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?;
 
-        tokio_rustls::TlsConnector::from(config).connect(domain, stream).await?
+        tokio_rustls::TlsConnector::from(config)
+            .connect(domain, stream)
+            .await?
     };
 
     tls_stream.flush().await?;
@@ -49,7 +53,9 @@ where
 }
 
 mod danger {
-    use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use tokio_rustls::rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
     use tokio_rustls::rustls::{pki_types, DigitallySignedStruct, Error, SignatureScheme};
 
     #[derive(Debug)]

@@ -112,7 +112,10 @@ impl Encode for ClientCoreData {
 
         let mut ime_file_name_dst = utils::to_utf16_bytes(self.ime_file_name.as_ref());
         ime_file_name_dst.resize(IME_FILE_NAME_SIZE - 2, 0);
-        eprintln!("   ime_file_name_dst length: {} bytes", ime_file_name_dst.len());
+        eprintln!(
+            "   ime_file_name_dst length: {} bytes",
+            ime_file_name_dst.len()
+        );
 
         let start_pos = dst.pos();
         eprintln!("   Buffer position at start: {}", start_pos);
@@ -126,21 +129,33 @@ impl Encode for ClientCoreData {
         dst.write_u32(self.client_build);
         dst.write_slice(client_name_dst.as_ref());
         dst.write_u16(0); // client name UTF-16 null terminator
-        eprintln!("   After client_name: written {} bytes", dst.pos() - start_pos);
+        eprintln!(
+            "   After client_name: written {} bytes",
+            dst.pos() - start_pos
+        );
 
         dst.write_u32(self.keyboard_type.as_u32());
         dst.write_u32(self.keyboard_subtype);
         dst.write_u32(self.keyboard_functional_keys_count);
         dst.write_slice(ime_file_name_dst.as_ref());
-        eprintln!("   After ime_file_name buffer: written {} bytes", dst.pos() - start_pos);
+        eprintln!(
+            "   After ime_file_name buffer: written {} bytes",
+            dst.pos() - start_pos
+        );
 
         dst.write_u16(0); // ime file name UTF-16 null terminator
-        eprintln!("   After ime_file_name null terminator: written {} bytes (should be {})",
-                  dst.pos() - start_pos, Self::FIXED_PART_SIZE);
+        eprintln!(
+            "   After ime_file_name null terminator: written {} bytes (should be {})",
+            dst.pos() - start_pos,
+            Self::FIXED_PART_SIZE
+        );
 
         eprintln!("   About to encode optional_data...");
         self.optional_data.encode(dst)?;
-        eprintln!("   After optional_data: written {} bytes", dst.pos() - start_pos);
+        eprintln!(
+            "   After optional_data: written {} bytes",
+            dst.pos() - start_pos
+        );
         eprintln!("🔧 ClientCoreData::encode - COMPLETE");
 
         Ok(())
@@ -154,7 +169,10 @@ impl Encode for ClientCoreData {
         let fixed = Self::FIXED_PART_SIZE;
         let optional = self.optional_data.size();
         let total = fixed + optional;
-        eprintln!("🔧 ClientCoreData::size() = {} (fixed={} + optional={})", total, fixed, optional);
+        eprintln!(
+            "🔧 ClientCoreData::size() = {} (fixed={} + optional={})",
+            total, fixed, optional
+        );
         total
     }
 }
@@ -252,11 +270,18 @@ impl Encode for ClientCoreOptionalData {
         ensure_size!(in: dst, size: self.size());
 
         let start_pos = dst.len();
-        eprintln!("   🔧 ClientCoreOptionalData::encode - START at buffer position {}", start_pos);
+        eprintln!(
+            "   🔧 ClientCoreOptionalData::encode - START at buffer position {}",
+            start_pos
+        );
         eprintln!("      Total optional size: {} bytes", self.size());
 
         if let Some(value) = self.post_beta2_color_depth {
-            eprintln!("      Writing post_beta2_color_depth: 0x{:04x} at offset {}", value.as_u16(), dst.len() - start_pos);
+            eprintln!(
+                "      Writing post_beta2_color_depth: 0x{:04x} at offset {}",
+                value.as_u16(),
+                dst.len() - start_pos
+            );
             dst.write_u16(value.as_u16());
         } else {
             eprintln!("      Skipping post_beta2_color_depth (None)");
@@ -408,7 +433,10 @@ impl Encode for ClientCoreOptionalData {
         let mut size = 0;
 
         if self.post_beta2_color_depth.is_some() {
-            eprintln!("      + post_beta2_color_depth: {}", POST_BETA_COLOR_DEPTH_SIZE);
+            eprintln!(
+                "      + post_beta2_color_depth: {}",
+                POST_BETA_COLOR_DEPTH_SIZE
+            );
             size += POST_BETA_COLOR_DEPTH_SIZE;
         }
         if self.client_product_id.is_some() {
@@ -424,11 +452,17 @@ impl Encode for ClientCoreOptionalData {
             size += HIGH_COLOR_DEPTH_SIZE;
         }
         if self.supported_color_depths.is_some() {
-            eprintln!("      + supported_color_depths: {}", SUPPORTED_COLOR_DEPTHS_SIZE);
+            eprintln!(
+                "      + supported_color_depths: {}",
+                SUPPORTED_COLOR_DEPTHS_SIZE
+            );
             size += SUPPORTED_COLOR_DEPTHS_SIZE;
         }
         if self.early_capability_flags.is_some() {
-            eprintln!("      + early_capability_flags: {}", EARLY_CAPABILITY_FLAGS_SIZE);
+            eprintln!(
+                "      + early_capability_flags: {}",
+                EARLY_CAPABILITY_FLAGS_SIZE
+            );
             size += EARLY_CAPABILITY_FLAGS_SIZE;
         }
         if self.dig_product_id.is_some() {
@@ -436,19 +470,31 @@ impl Encode for ClientCoreOptionalData {
             size += DIG_PRODUCT_ID_SIZE;
         }
         if self.connection_type.is_some() {
-            eprintln!("      + connection_type + padding: {}", CONNECTION_TYPE_SIZE + PADDING_SIZE);
+            eprintln!(
+                "      + connection_type + padding: {}",
+                CONNECTION_TYPE_SIZE + PADDING_SIZE
+            );
             size += CONNECTION_TYPE_SIZE + PADDING_SIZE;
         }
         if self.server_selected_protocol.is_some() {
-            eprintln!("      + server_selected_protocol: {}", SERVER_SELECTED_PROTOCOL_SIZE);
+            eprintln!(
+                "      + server_selected_protocol: {}",
+                SERVER_SELECTED_PROTOCOL_SIZE
+            );
             size += SERVER_SELECTED_PROTOCOL_SIZE;
         }
         if self.desktop_physical_width.is_some() {
-            eprintln!("      + desktop_physical_width: {}", DESKTOP_PHYSICAL_WIDTH_SIZE);
+            eprintln!(
+                "      + desktop_physical_width: {}",
+                DESKTOP_PHYSICAL_WIDTH_SIZE
+            );
             size += DESKTOP_PHYSICAL_WIDTH_SIZE;
         }
         if self.desktop_physical_height.is_some() {
-            eprintln!("      + desktop_physical_height: {}", DESKTOP_PHYSICAL_HEIGHT_SIZE);
+            eprintln!(
+                "      + desktop_physical_height: {}",
+                DESKTOP_PHYSICAL_HEIGHT_SIZE
+            );
             size += DESKTOP_PHYSICAL_HEIGHT_SIZE;
         }
         if self.desktop_orientation.is_some() {
@@ -456,7 +502,10 @@ impl Encode for ClientCoreOptionalData {
             size += DESKTOP_ORIENTATION_SIZE;
         }
         if self.desktop_scale_factor.is_some() {
-            eprintln!("      + desktop_scale_factor: {}", DESKTOP_SCALE_FACTOR_SIZE);
+            eprintln!(
+                "      + desktop_scale_factor: {}",
+                DESKTOP_SCALE_FACTOR_SIZE
+            );
             size += DESKTOP_SCALE_FACTOR_SIZE;
         }
         if self.device_scale_factor.is_some() {

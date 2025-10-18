@@ -57,7 +57,10 @@ impl<'a> ReadCursor<'a> {
     /// Create a new `ReadCursor` from a byte slice.
     #[inline]
     pub const fn new(bytes: &'a [u8]) -> Self {
-        Self { inner: bytes, pos: 0 }
+        Self {
+            inner: bytes,
+            pos: 0,
+        }
     }
 
     /// Returns the number of bytes remaining.
@@ -97,7 +100,10 @@ impl<'a> ReadCursor<'a> {
             inner: left,
             pos: self.pos,
         };
-        let right = ReadCursor { inner: right, pos: 0 };
+        let right = ReadCursor {
+            inner: right,
+            pos: 0,
+        };
         (left, right)
     }
 
@@ -356,7 +362,9 @@ impl<'a> ReadCursor<'a> {
     #[inline]
     #[track_caller]
     pub fn peek<const N: usize>(&mut self) -> [u8; N] {
-        self.inner[self.pos..self.pos + N].try_into().expect("N-elements array")
+        self.inner[self.pos..self.pos + N]
+            .try_into()
+            .expect("N-elements array")
     }
 
     /// Peek at the next `N` bytes without consuming them.
@@ -522,7 +530,10 @@ impl<'a> WriteCursor<'a> {
     /// Create a new `WriteCursor` from a mutable slice of bytes.
     #[inline]
     pub fn new(bytes: &'a mut [u8]) -> Self {
-        Self { inner: bytes, pos: 0 }
+        Self {
+            inner: bytes,
+            pos: 0,
+        }
     }
 
     /// Returns the number of bytes remaining.

@@ -7,8 +7,8 @@ use core::fmt;
 #[cfg(feature = "alloc")]
 use crate::WriteBuf;
 use crate::{
-    InvalidFieldErr, NotEnoughBytesErr, OtherErr, UnexpectedMessageTypeErr, UnsupportedValueErr, UnsupportedVersionErr,
-    WriteCursor,
+    InvalidFieldErr, NotEnoughBytesErr, OtherErr, UnexpectedMessageTypeErr, UnsupportedValueErr,
+    UnsupportedVersionErr, WriteCursor,
 };
 
 /// A result type for encoding operations, which can either succeed with a value of type `T`
@@ -103,7 +103,10 @@ impl fmt::Display for EncodeErrorKind {
 
 impl NotEnoughBytesErr for EncodeError {
     fn not_enough_bytes(context: &'static str, received: usize, expected: usize) -> Self {
-        Self::new(context, EncodeErrorKind::NotEnoughBytes { received, expected })
+        Self::new(
+            context,
+            EncodeErrorKind::NotEnoughBytes { received, expected },
+        )
     }
 }
 

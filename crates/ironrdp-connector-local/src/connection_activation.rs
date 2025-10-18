@@ -107,8 +107,11 @@ impl Sequence for ConnectionActivationSequence {
 
                 let send_data_indication_ctx = legacy::decode_send_data_indication(input)?;
 
-                debug!("🔍 CapabilitiesExchange received {} bytes", send_data_indication_ctx.user_data.len());
-                
+                debug!(
+                    "🔍 CapabilitiesExchange received {} bytes",
+                    send_data_indication_ctx.user_data.len()
+                );
+
                 // IMPORTANT: During CapabilitiesExchange, the server sends us:
                 // 1. ServerDemandActive (mandatory, MS-RDPBCGR section 2.2.1.4)
                 //
@@ -119,7 +122,7 @@ impl Sequence for ConnectionActivationSequence {
                 // All data in this state should be interpreted as ShareControlHeaders wrapping ShareData.
                 // Do NOT attempt to parse as licensing PDU or multitransport here - these come in
                 // different connection states or are wrapped differently.
-                
+
                 // Decode as ShareControlHeader (normal capabilities exchange)
                 let share_control_ctx = legacy::decode_share_control(send_data_indication_ctx)?;
 

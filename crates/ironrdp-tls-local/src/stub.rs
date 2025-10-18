@@ -10,21 +10,35 @@ pub struct TlsStream<S> {
 }
 
 impl<S> AsyncRead for TlsStream<S> {
-    fn poll_read(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 }
 
 impl<S> AsyncWrite for TlsStream<S> {
-    fn poll_write(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<Result<usize, io::Error>> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
         Poll::Ready(Ok(0))
     }
 
-    fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
         Poll::Ready(Ok(()))
     }
 }

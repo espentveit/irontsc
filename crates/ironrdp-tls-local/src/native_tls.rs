@@ -30,7 +30,9 @@ where
             .peer_certificate()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "peer certificate is missing"))?;
-        let cert = cert.to_der().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let cert = cert
+            .to_der()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         crate::extract_tls_server_public_key(&cert)?
     };
 

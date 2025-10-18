@@ -16,9 +16,9 @@ use ironrdp::rdpsnd::server::{RdpsndServerHandler, RdpsndServerMessage};
 use ironrdp::server::tokio::sync::mpsc::UnboundedSender;
 use ironrdp::server::tokio::time::{self, sleep, Duration};
 use ironrdp::server::{
-    tokio, BitmapUpdate, CliprdrServerFactory, Credentials, DisplayUpdate, KeyboardEvent, MouseEvent, PixelFormat,
-    RdpServer, RdpServerDisplay, RdpServerDisplayUpdates, RdpServerInputHandler, ServerEvent, ServerEventSender,
-    SoundServerFactory, TlsIdentityCtx,
+    tokio, BitmapUpdate, CliprdrServerFactory, Credentials, DisplayUpdate, KeyboardEvent,
+    MouseEvent, PixelFormat, RdpServer, RdpServerDisplay, RdpServerDisplayUpdates,
+    RdpServerInputHandler, ServerEvent, ServerEventSender, SoundServerFactory, TlsIdentityCtx,
 };
 use ironrdp_cliprdr_native::StubCliprdrBackend;
 use rand::prelude::*;
@@ -76,11 +76,15 @@ fn parse_args() -> anyhow::Result<Action> {
     let action = if args.contains(["-h", "--help"]) {
         Action::ShowHelp
     } else {
-        let bind_addr = args
-            .opt_value_from_str("--bind-addr")?
-            .unwrap_or_else(|| "127.0.0.1:3389".parse().expect("valid hardcoded SocketAddr string"));
+        let bind_addr = args.opt_value_from_str("--bind-addr")?.unwrap_or_else(|| {
+            "127.0.0.1:3389"
+                .parse()
+                .expect("valid hardcoded SocketAddr string")
+        });
 
-        let sec = args.opt_value_from_str("--sec")?.unwrap_or_else(|| "hybrid".to_owned());
+        let sec = args
+            .opt_value_from_str("--sec")?
+            .unwrap_or_else(|| "hybrid".to_owned());
         let hybrid = match sec.as_ref() {
             "tls" => false,
             "hybrid" => true,
@@ -90,8 +94,12 @@ fn parse_args() -> anyhow::Result<Action> {
         let cert = args.opt_value_from_str("--cert")?;
         let key = args.opt_value_from_str("--key")?;
 
-        let user = args.opt_value_from_str("--user")?.unwrap_or_else(|| "user".to_owned());
-        let pass = args.opt_value_from_str("--pass")?.unwrap_or_else(|| "pass".to_owned());
+        let user = args
+            .opt_value_from_str("--user")?
+            .unwrap_or_else(|| "user".to_owned());
+        let pass = args
+            .opt_value_from_str("--pass")?
+            .unwrap_or_else(|| "pass".to_owned());
 
         Action::Run {
             bind_addr,
@@ -309,7 +317,8 @@ impl RdpsndServerHandler for SndHandler {
                 }
             };
 
-            match opus2::Encoder::new(fmt.n_samples_per_sec, n_channels, opus2::Application::Audio) {
+            match opus2::Encoder::new(fmt.n_samples_per_sec, n_channels, opus2::Application::Audio)
+            {
                 Ok(enc) => Some(enc),
                 Err(err) => {
                     warn!("Failed to create OPUS encoder: {}", err);
@@ -338,7 +347,9 @@ impl RdpsndServerHandler for SndHandler {
                         }
                     }
                 } else {
-                    wave.into_iter().flat_map(|value| value.to_le_bytes()).collect()
+                    wave.into_iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect()
                 };
 
                 let inner = inner.lock().expect("poisoned");
@@ -360,7 +371,12 @@ impl RdpsndServerHandler for SndHandler {
     }
 }
 
-fn generate_sine_wave(sample_rate: u32, frequency: f32, duration_ms: u64, phase: &mut f32) -> Vec<i16> {
+fn generate_sine_wave(
+    sample_rate: u32,
+    frequency: f32,
+    duration_ms: u64,
+    phase: &mut f32,
+) -> Vec<i16> {
     use core::f32::consts::PI;
 
     let total_samples = (u64::from(sample_rate) * duration_ms) / 1000;
@@ -402,8 +418,11 @@ async fn run(
     let server_builder = RdpServer::builder().with_addr(bind_addr);
 
     let server_builder = if let Some((cert_path, key_path)) = cert.as_deref().zip(key.as_deref()) {
-        let identity = TlsIdentityCtx::init_from_paths(cert_path, key_path).context("failed to init TLS identity")?;
-        let acceptor = identity.make_acceptor().context("failed to build TLS acceptor")?;
+        let identity = TlsIdentityCtx::init_from_paths(cert_path, key_path)
+            .context("failed to init TLS identity")?;
+        let acceptor = identity
+            .make_acceptor()
+            .context("failed to build TLS acceptor")?;
 
         if hybrid {
             server_builder.with_hybrid(acceptor, identity.pub_key)

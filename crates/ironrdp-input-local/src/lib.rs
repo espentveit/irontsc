@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 
 use std::collections::BTreeSet;
 
@@ -86,8 +88,13 @@ impl Scancode {
 
     pub fn as_idx(self) -> usize {
         if self.extended {
-            #[expect(clippy::missing_panics_doc, reason = "unreachable panic (integer upcast)")]
-            usize::from(self.code).checked_add(256).expect("never overflow")
+            #[expect(
+                clippy::missing_panics_doc,
+                reason = "unreachable panic (integer upcast)"
+            )]
+            usize::from(self.code)
+                .checked_add(256)
+                .expect("never overflow")
         } else {
             usize::from(self.code)
         }
@@ -206,7 +213,10 @@ impl Database {
     /// Apply a transaction (list of operations) and returns a list of RDP input events to send.
     ///
     /// Operations that would cause no state change are ignored.
-    pub fn apply(&mut self, transaction: impl IntoIterator<Item = Operation>) -> SmallVec<[FastPathInputEvent; 2]> {
+    pub fn apply(
+        &mut self,
+        transaction: impl IntoIterator<Item = Operation>,
+    ) -> SmallVec<[FastPathInputEvent; 2]> {
         let mut events = SmallVec::new();
 
         for operation in transaction {
@@ -216,17 +226,21 @@ impl Database {
 
                     if !was_pressed {
                         let event = match MouseButtonFlags::from(button) {
-                            MouseButtonFlags::Button(flags) => FastPathInputEvent::MouseEvent(MousePdu {
-                                flags: PointerFlags::DOWN | flags,
-                                number_of_wheel_rotation_units: 0,
-                                x_position: self.mouse_position.x,
-                                y_position: self.mouse_position.y,
-                            }),
-                            MouseButtonFlags::Pointer(flags) => FastPathInputEvent::MouseEventEx(MouseXPdu {
-                                flags: PointerXFlags::DOWN | flags,
-                                x_position: self.mouse_position.x,
-                                y_position: self.mouse_position.y,
-                            }),
+                            MouseButtonFlags::Button(flags) => {
+                                FastPathInputEvent::MouseEvent(MousePdu {
+                                    flags: PointerFlags::DOWN | flags,
+                                    number_of_wheel_rotation_units: 0,
+                                    x_position: self.mouse_position.x,
+                                    y_position: self.mouse_position.y,
+                                })
+                            }
+                            MouseButtonFlags::Pointer(flags) => {
+                                FastPathInputEvent::MouseEventEx(MouseXPdu {
+                                    flags: PointerXFlags::DOWN | flags,
+                                    x_position: self.mouse_position.x,
+                                    y_position: self.mouse_position.y,
+                                })
+                            }
                         };
 
                         events.push(event)
@@ -237,17 +251,21 @@ impl Database {
 
                     if was_pressed {
                         let event = match MouseButtonFlags::from(button) {
-                            MouseButtonFlags::Button(flags) => FastPathInputEvent::MouseEvent(MousePdu {
-                                flags,
-                                number_of_wheel_rotation_units: 0,
-                                x_position: self.mouse_position.x,
-                                y_position: self.mouse_position.y,
-                            }),
-                            MouseButtonFlags::Pointer(flags) => FastPathInputEvent::MouseEventEx(MouseXPdu {
-                                flags,
-                                x_position: self.mouse_position.x,
-                                y_position: self.mouse_position.y,
-                            }),
+                            MouseButtonFlags::Button(flags) => {
+                                FastPathInputEvent::MouseEvent(MousePdu {
+                                    flags,
+                                    number_of_wheel_rotation_units: 0,
+                                    x_position: self.mouse_position.x,
+                                    y_position: self.mouse_position.y,
+                                })
+                            }
+                            MouseButtonFlags::Pointer(flags) => {
+                                FastPathInputEvent::MouseEventEx(MouseXPdu {
+                                    flags,
+                                    x_position: self.mouse_position.x,
+                                    y_position: self.mouse_position.y,
+                                })
+                            }
                         };
 
                         events.push(event)
@@ -264,16 +282,18 @@ impl Database {
                         }))
                     }
                 }
-                Operation::WheelRotations(rotations) => events.push(FastPathInputEvent::MouseEvent(MousePdu {
-                    flags: if rotations.is_vertical {
-                        PointerFlags::VERTICAL_WHEEL
-                    } else {
-                        PointerFlags::HORIZONTAL_WHEEL
-                    },
-                    number_of_wheel_rotation_units: rotations.rotation_units,
-                    x_position: self.mouse_position.x,
-                    y_position: self.mouse_position.y,
-                })),
+                Operation::WheelRotations(rotations) => {
+                    events.push(FastPathInputEvent::MouseEvent(MousePdu {
+                        flags: if rotations.is_vertical {
+                            PointerFlags::VERTICAL_WHEEL
+                        } else {
+                            PointerFlags::HORIZONTAL_WHEEL
+                        },
+                        number_of_wheel_rotation_units: rotations.rotation_units,
+                        x_position: self.mouse_position.x,
+                        y_position: self.mouse_position.y,
+                    }))
+                }
                 Operation::KeyPressed(scancode) => {
                     let was_pressed = self.keyboard.replace(scancode.as_idx(), true);
 
@@ -313,12 +333,18 @@ impl Database {
 
                     if was_pressed {
                         for code in utf16_code_units.iter() {
-                            events.push(FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, *code));
+                            events.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                                KeyboardFlags::RELEASE,
+                                *code,
+                            ));
                         }
                     }
 
                     for code in utf16_code_units {
-                        events.push(FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::empty(), *code));
+                        events.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                            KeyboardFlags::empty(),
+                            *code,
+                        ));
                     }
                 }
                 Operation::UnicodeKeyReleased(character) => {
@@ -329,7 +355,10 @@ impl Database {
 
                     if was_pressed {
                         for code in utf16_code_units {
-                            events.push(FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, *code));
+                            events.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                                KeyboardFlags::RELEASE,
+                                *code,
+                            ));
                         }
                     }
                 }
@@ -344,7 +373,10 @@ impl Database {
         let mut events = SmallVec::new();
 
         for idx in self.mouse_buttons.iter_ones() {
-            #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer downcast)")]
+            #[expect(
+                clippy::missing_panics_doc,
+                reason = "unreachable panic (checked integer downcast)"
+            )]
             let button = MouseButton::from_idx(idx).expect("in-range index");
 
             let event = match MouseButtonFlags::from(button) {
@@ -367,12 +399,24 @@ impl Database {
         // The keyboard bit array size is 512.
         for idx in self.keyboard.iter_ones() {
             let (scancode, extended) = if idx >= 256 {
-                #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer underflow)")]
+                #[expect(
+                    clippy::missing_panics_doc,
+                    reason = "unreachable panic (checked integer underflow)"
+                )]
                 let extended_code = idx.checked_sub(256).expect("never underflow");
-                #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer downcast)")]
-                (u8::try_from(extended_code).expect("always in the range"), true)
+                #[expect(
+                    clippy::missing_panics_doc,
+                    reason = "unreachable panic (checked integer downcast)"
+                )]
+                (
+                    u8::try_from(extended_code).expect("always in the range"),
+                    true,
+                )
             } else {
-                #[expect(clippy::missing_panics_doc, reason = "unreachable panic (checked integer downcast)")]
+                #[expect(
+                    clippy::missing_panics_doc,
+                    reason = "unreachable panic (checked integer downcast)"
+                )]
                 (u8::try_from(idx).expect("always in the range"), false)
             };
 
@@ -390,7 +434,10 @@ impl Database {
             let utf16_code_units = character.encode_utf16(&mut utf16_buffer);
 
             for code in utf16_code_units {
-                events.push(FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, *code));
+                events.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                    KeyboardFlags::RELEASE,
+                    *code,
+                ));
             }
         }
 
@@ -402,7 +449,12 @@ impl Database {
 }
 
 /// Returns the RDP input event to send in order to synchronize lock keys.
-pub fn synchronize_event(scroll_lock: bool, num_lock: bool, caps_lock: bool, kana_lock: bool) -> FastPathInputEvent {
+pub fn synchronize_event(
+    scroll_lock: bool,
+    num_lock: bool,
+    caps_lock: bool,
+    kana_lock: bool,
+) -> FastPathInputEvent {
     use ironrdp_pdu::input::fast_path::SynchronizeFlags;
 
     let mut flags = SynchronizeFlags::empty();

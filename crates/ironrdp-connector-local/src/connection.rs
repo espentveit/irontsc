@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ironrdp_core::{decode, encode_vec, Encode, WriteBuf};
-use ironrdp_pdu::x224::{X224, X224Data};
+use ironrdp_pdu::x224::{X224Data, X224};
 use ironrdp_pdu::{gcc, mcs, nego, rdp, PduHint};
 use ironrdp_svc::{StaticChannelSet, StaticVirtualChannel, SvcClientProcessor};
 use tracing::{debug, error, info, warn};
@@ -412,8 +412,12 @@ impl Sequence for ClientConnector {
                     .map(ironrdp_svc::make_channel_definition)
                     .collect();
 
-                let client_gcc_blocks =
-                    crate::create_client_data(&self.config, selected_protocol.bits(), static_channel_defs, selected_protocol);
+                let client_gcc_blocks = crate::create_client_data(
+                    &self.config,
+                    selected_protocol.bits(),
+                    static_channel_defs,
+                    selected_protocol,
+                );
 
                 info!(
                     "GCC blocks created: core version={:?}, security={}, network={}, cluster={}, message_channel={}, multi_transport={:?}",
@@ -456,7 +460,7 @@ impl Sequence for ClientConnector {
                 )
             }
             ClientConnectorState::BasicSettingsExchangeWaitResponse { connect_initial } => {
-                                let x224_payload = decode::<X224<X224Data<'_>>>(input)
+                let x224_payload = decode::<X224<X224Data<'_>>>(input)
                     .map_err(ConnectorError::decode)
                     .map(|p| p.0)?;
                 let connect_response = decode::<mcs::ConnectResponse>(x224_payload.data.as_ref())
@@ -478,7 +482,10 @@ impl Sequence for ClientConnector {
 
                 // Extract the MCS message channel ID if available (used for multitransport responses)
                 if let Some(ref message_channel_data) = server_gcc_blocks.message_channel {
-                    info!("📨 Server MCS Message Channel ID: 0x{:04x}", message_channel_data.mcs_message_channel_id);
+                    info!(
+                        "📨 Server MCS Message Channel ID: 0x{:04x}",
+                        message_channel_data.mcs_message_channel_id
+                    );
                     self.message_channel_id = Some(message_channel_data.mcs_message_channel_id);
                 } else {
                     warn!("⚠️  No ServerMessageChannelData GCC block - multitransport responses may not work");
@@ -776,6 +783,18 @@ fn create_gcc_blocks<'a>(
         .map(ironrdp_svc::make_channel_definition)
         .collect::<Vec<_>>();
 
+    let mut early_capability_flags = ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
+        | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU
+        | ClientEarlyCapabilityFlags::STRONG_ASYMMETRIC_KEYS
+        | ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
+        | ClientEarlyCapabilityFlags::SUPPORT_DYN_VC_GFX_PROTOCOL
+        | ClientEarlyCapabilityFlags::SUPPORT_DYNAMIC_TIME_ZONE
+        | ClientEarlyCapabilityFlags::SUPPORT_HEART_BEAT_PDU;
+
+    if max_color_depth == 32 {
+        early_capability_flags |= ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION;
+    }
+
     Ok(ClientGccBlocks {
         core: ClientCoreData {
             // Use Windows 11 24H2 version (17.8) to match modern RDP clients
@@ -798,43 +817,15 @@ fn create_gcc_blocks<'a>(
                 serial_number: Some(0),
                 high_color_depth: Some(HighColorDepth::Bpp24),
                 supported_color_depths: Some(supported_color_depths),
-                early_capability_flags: {
-                    // Match Windows client flags (0x0faf) exactly for maximum compatibility
-                    let mut early_capability_flags =
-                        ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
-                        | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU
-                        | ClientEarlyCapabilityFlags::STRONG_ASYMMETRIC_KEYS
-                        | ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
-                        | ClientEarlyCapabilityFlags::SUPPORT_NET_CHAR_AUTODETECT
-                        | ClientEarlyCapabilityFlags::SUPPORT_DYN_VC_GFX_PROTOCOL  // Critical for GFX/multitransport
-                        | ClientEarlyCapabilityFlags::SUPPORT_DYNAMIC_TIME_ZONE
-                        | ClientEarlyCapabilityFlags::SUPPORT_HEART_BEAT_PDU
-                        | ClientEarlyCapabilityFlags::SUPPORT_SKIP_CHANNELJOIN;
-
-                    if max_color_depth == 32 {
-                        early_capability_flags |= ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION;
-                    }
-
-                    Some(early_capability_flags)
-                },
+                early_capability_flags: Some(early_capability_flags),
                 dig_product_id: Some(config.dig_product_id.clone()),
-                connection_type: Some(ConnectionType::Autodetect), // Match working client (Auto Detect)
+                connection_type: Some(ConnectionType::Autodetect),
                 server_selected_protocol: Some(selected_protocol),
-                desktop_physical_width: Some(0),  // 0 per FreeRDP
-                desktop_physical_height: Some(0), // 0 per FreeRDP
-                desktop_orientation: if config.desktop_size.width > config.desktop_size.height {
-                    Some(MonitorOrientation::Landscape as u16)
-                } else {
-                    Some(MonitorOrientation::Portrait as u16)
-                },
-                desktop_scale_factor: Some(config.desktop_scale_factor),
-                device_scale_factor: if config.desktop_scale_factor >= 100
-                    && config.desktop_scale_factor <= 500
-                {
-                    Some(100)
-                } else {
-                    Some(0)
-                },
+                desktop_physical_width: Some(1000),
+                desktop_physical_height: Some(1000),
+                desktop_orientation: Some(MonitorOrientation::Landscape as u16),
+                desktop_scale_factor: Some(100),
+                device_scale_factor: Some(100),
             },
         },
         security: ClientSecurityData {
@@ -849,25 +840,19 @@ fn create_gcc_blocks<'a>(
         // Enable cluster/redirection support (required for multitransport on some servers)
         // Match Windows 11 client exactly: Version 6, REDIRECTION_SUPPORTED only (not SMARTCARD)
         cluster: Some(gcc::ClientClusterData {
-            flags: gcc::RedirectionFlags::REDIRECTION_SUPPORTED, // Only 0x01, no smartcard
-            redirection_version: gcc::RedirectionVersion::V6,    // Match working client
+            flags: gcc::RedirectionFlags::REDIRECTION_SUPPORTED,
+            redirection_version: gcc::RedirectionVersion::V6,
             redirected_session_id: 0,
         }),
         monitor: None,
         // Client Message Channel Data - required for RDP 10.0+ (Windows 10+)
         // This advertises support for server-initiated messages and autodetect
         message_channel: Some(gcc::ClientMessageChannelData),
-        // Enable multitransport (UDP) support for video streaming
-        // Advertise support for both Reliable (FECR) and Lossy (FECL) UDP transport
-        // Flags value 0x305 matches real Windows RDP client:
-        //   0x01 (FECR): Reliable UDP support
-        //   0x04 (FECL): Lossy UDP support
-        //   0x100 (REQUEST): Client is requesting multitransport
-        //   0x200 (SOFT_SYNC): Client supports soft-syncing TCP to UDP
+        // Enable multitransport (UDP) support with the same flag set mstsc uses.
         multi_transport_channel: Some(ironrdp_pdu::gcc::MultiTransportChannelData {
             flags: ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
                 | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
-                | ironrdp_pdu::gcc::MultiTransportFlags::MULTITRANSPORT_TYPE_FLAGS_REQUEST
+                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
                 | ironrdp_pdu::gcc::MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
         }),
         monitor_extended: None,
@@ -916,7 +901,7 @@ fn create_client_info_pdu(config: &Config, client_addr: &SocketAddr) -> rdp::Cli
             password: config.credentials.secret().to_owned(),
         },
         code_page: 1033, // Windows CP_WINUNICODE / en-US (was 0, but actual clients send proper code page)
-        flags,
+        flags: flags | ClientInfoFlags::COMPRESSION,
         compression_type: CompressionType::K8, // ignored if ClientInfoFlags::COMPRESSION is not set
         alternate_shell: String::new(),
         work_dir: String::new(),

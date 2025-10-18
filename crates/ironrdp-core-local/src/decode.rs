@@ -3,8 +3,8 @@ use alloc::string::String;
 use core::fmt;
 
 use crate::{
-    InvalidFieldErr, NotEnoughBytesErr, OtherErr, ReadCursor, UnexpectedMessageTypeErr, UnsupportedValueErr,
-    UnsupportedVersionErr,
+    InvalidFieldErr, NotEnoughBytesErr, OtherErr, ReadCursor, UnexpectedMessageTypeErr,
+    UnsupportedValueErr, UnsupportedVersionErr,
 };
 
 /// A result type for decoding operations, which can either succeed with a value of type `T`
@@ -99,7 +99,10 @@ impl fmt::Display for DecodeErrorKind {
 
 impl NotEnoughBytesErr for DecodeError {
     fn not_enough_bytes(context: &'static str, received: usize, expected: usize) -> Self {
-        Self::new(context, DecodeErrorKind::NotEnoughBytes { received, expected })
+        Self::new(
+            context,
+            DecodeErrorKind::NotEnoughBytes { received, expected },
+        )
     }
 }
 

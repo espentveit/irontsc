@@ -55,9 +55,16 @@ impl Decompressor {
         }
     }
 
-    fn handle_segment(&mut self, segment: &BulkEncodedData<'_>, output: &mut Vec<u8>) -> Result<usize, ZgfxError> {
+    fn handle_segment(
+        &mut self,
+        segment: &BulkEncodedData<'_>,
+        output: &mut Vec<u8>,
+    ) -> Result<usize, ZgfxError> {
         if !segment.data.is_empty() {
-            if segment.compression_flags.contains(CompressionFlags::COMPRESSED) {
+            if segment
+                .compression_flags
+                .contains(CompressionFlags::COMPRESSED)
+            {
                 self.decompress_segment(segment.data, output)
             } else {
                 self.history.write_all(segment.data)?;
@@ -70,7 +77,11 @@ impl Decompressor {
         }
     }
 
-    fn decompress_segment(&mut self, encoded_data: &[u8], output: &mut Vec<u8>) -> Result<usize, ZgfxError> {
+    fn decompress_segment(
+        &mut self,
+        encoded_data: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<usize, ZgfxError> {
         if encoded_data.is_empty() {
             return Ok(0);
         }
@@ -78,8 +89,8 @@ impl Decompressor {
         let mut bits = BitSlice::from_slice(encoded_data);
 
         // The value of the last byte indicates the number of unused bits in the final byte
-        bits =
-            &bits[..8 * (encoded_data.len() - 1) - *encoded_data.last().expect("encoded_data is not empty") as usize];
+        bits = &bits[..8 * (encoded_data.len() - 1)
+            - *encoded_data.last().expect("encoded_data is not empty") as usize];
         let mut bits = Bits::new(bits);
         let mut bytes_written = 0;
 
@@ -111,8 +122,13 @@ impl Decompressor {
                     distance_value_size,
                     distance_base,
                 } => {
-                    let written =
-                        handle_match(&mut bits, distance_value_size, distance_base, &mut self.history, output)?;
+                    let written = handle_match(
+                        &mut bits,
+                        distance_value_size,
+                        distance_base,
+                        &mut self.history,
+                        output,
+                    )?;
                     bytes_written += written;
                 }
             }
@@ -505,11 +521,15 @@ mod tests {
             .copied()
             .zip(DECODED_ZGFX_SINGLE.iter().copied());
         let mut zgfx = Decompressor::new();
-        let mut decompressed = Vec::with_capacity(pairs.clone().map(|(_, d)| d.len()).max().unwrap());
+        let mut decompressed =
+            Vec::with_capacity(pairs.clone().map(|(_, d)| d.len()).max().unwrap());
         for (i, (encode, decode)) in pairs.enumerate() {
             let bytes_written = zgfx.decompress(encode.as_ref(), &mut decompressed).unwrap();
             assert_eq!(decode.len(), bytes_written);
-            assert_eq!(decompressed, *decode, "Failed to decompress encoded PDU #{i}");
+            assert_eq!(
+                decompressed, *decode,
+                "Failed to decompress encoded PDU #{i}"
+            );
             decompressed.clear();
         }
     }
@@ -521,7 +541,8 @@ mod tests {
 
         let mut zgfx = Decompressor::new();
         let mut decompressed = Vec::with_capacity(expected.len());
-        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed).unwrap();
+        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed)
+            .unwrap();
         assert_eq!(decompressed, expected);
     }
 
@@ -532,7 +553,8 @@ mod tests {
 
         let mut zgfx = Decompressor::new();
         let mut decompressed = Vec::with_capacity(expected.len());
-        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed).unwrap();
+        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed)
+            .unwrap();
         assert_eq!(decompressed, expected);
     }
 
@@ -543,7 +565,8 @@ mod tests {
 
         let mut zgfx = Decompressor::new();
         let mut decompressed = Vec::with_capacity(expected.len());
-        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed).unwrap();
+        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed)
+            .unwrap();
         assert_eq!(decompressed, expected);
     }
 
@@ -554,7 +577,8 @@ mod tests {
 
         let mut zgfx = Decompressor::new();
         let mut decompressed = Vec::with_capacity(expected.len());
-        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed).unwrap();
+        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed)
+            .unwrap();
         assert_eq!(decompressed, expected);
     }
 
@@ -574,7 +598,8 @@ mod tests {
 
         let mut zgfx = Decompressor::new();
         let mut decompressed = Vec::with_capacity(expected.len());
-        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed).unwrap();
+        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed)
+            .unwrap();
         assert_eq!(decompressed, expected);
     }
 
@@ -587,7 +612,8 @@ mod tests {
 
         let mut zgfx = Decompressor::new();
         let mut decompressed = Vec::with_capacity(expected.len());
-        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed).unwrap();
+        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed)
+            .unwrap();
         assert_eq!(decompressed, expected);
     }
 
@@ -599,14 +625,16 @@ mod tests {
             0x2B, 0x00, 0x00, 0x00, // 0x0000002B total bytes uncompressed
             0x11, 0x00, 0x00, 0x00, // first segment is the next 17 bytes:
             0x04, // type 4, not PACKET_COMPRESSED
-            0x54, 0x68, 0x65, 0x20, 0x71, 0x75, 0x69, 0x63, 0x6B, 0x20, 0x62, 0x72, 0x6F, 0x77, 0x6E,
-            0x20, // "The quick brown "
+            0x54, 0x68, 0x65, 0x20, 0x71, 0x75, 0x69, 0x63, 0x6B, 0x20, 0x62, 0x72, 0x6F, 0x77,
+            0x6E, 0x20, // "The quick brown "
             0x0E, 0x00, 0x00, 0x00, // second segment is the next 14 bytes:
             0x04, // type 4, not PACKET_COMPRESSED
-            0x66, 0x6F, 0x78, 0x20, 0x6A, 0x75, 0x6D, 0x70, 0x73, 0x20, 0x6F, 0x76, 0x65, // "fox jumps ove"
+            0x66, 0x6F, 0x78, 0x20, 0x6A, 0x75, 0x6D, 0x70, 0x73, 0x20, 0x6F, 0x76,
+            0x65, // "fox jumps ove"
             0x10, 0x00, 0x00, 0x00, // third segment is the next 16 bytes
             0x24, // type 4 + PACKET_COMPRESSED
-            0x39, 0x08, 0x0E, 0x91, 0xF8, 0xD8, 0x61, 0x3D, 0x1E, 0x44, 0x06, 0x43, 0x79, 0x9C, // encoded:
+            0x39, 0x08, 0x0E, 0x91, 0xF8, 0xD8, 0x61, 0x3D, 0x1E, 0x44, 0x06, 0x43, 0x79,
+            0x9C, // encoded:
             // 0 01110010 = literal 0x72 = "r"
             // 0 00100000 = literal 0x20 = " "
             // 0 01110100 = literal 0x74 = "t"
@@ -629,18 +657,21 @@ mod tests {
         let mut decompressed = Vec::with_capacity(expected.len());
         let bytes_written = zgfx.decompress(buffer.as_ref(), &mut decompressed).unwrap();
         assert_eq!(expected.len(), bytes_written);
-        assert_eq!(decompressed, expected, "\n{decompressed:x?} != \n{expected:x?}");
+        assert_eq!(
+            decompressed, expected,
+            "\n{decompressed:x?} != \n{expected:x?}"
+        );
     }
 
     #[test]
     fn zgfx_decompresses_single_match_unencoded_block() {
         let buffer = [
-            0xe0, 0x04, 0x13, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x01, 0x06, 0x0a, 0x00, 0x04, 0x00, 0x00, 0x00,
-            0x20, 0x00, 0x00, 0x00,
+            0xe0, 0x04, 0x13, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x01, 0x06, 0x0a, 0x00,
+            0x04, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
         ];
         let expected = vec![
-            0x13, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x01, 0x06, 0x0a, 0x00, 0x04, 0x00, 0x00, 0x00, 0x20, 0x00,
-            0x00, 0x00,
+            0x13, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x01, 0x06, 0x0a, 0x00, 0x04, 0x00,
+            0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
         ];
 
         let mut zgfx = Decompressor::new();
@@ -652,12 +683,20 @@ mod tests {
 
     #[test]
     fn zgfx_decompresses_unencoded_block_without_padding() {
-        let buffer = [0b1110_0101, 0b0001_0000, 0b0000_0000, 0b00000001, 0b1111_0000, 0x0];
+        let buffer = [
+            0b1110_0101,
+            0b0001_0000,
+            0b0000_0000,
+            0b00000001,
+            0b1111_0000,
+            0x0,
+        ];
         let expected = vec![0x08, 0xf0];
 
         let mut zgfx = Decompressor::new();
         let mut decompressed = Vec::with_capacity(expected.len());
-        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed).unwrap();
+        zgfx.decompress_segment(buffer.as_ref(), &mut decompressed)
+            .unwrap();
         assert_eq!(decompressed, expected);
     }
 }

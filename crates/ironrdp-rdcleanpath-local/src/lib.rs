@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 
 use core::fmt;
 
@@ -264,7 +266,10 @@ impl RDCleanPathPdu {
             return DetectionResult::Failed;
         };
 
-        match der::asn1::ContextSpecific::<u64>::decode_explicit(&mut slice_reader, der::TagNumber::N0) {
+        match der::asn1::ContextSpecific::<u64>::decode_explicit(
+            &mut slice_reader,
+            der::TagNumber::N0,
+        ) {
             Ok(Some(version)) if version.value == VERSION_1 => DetectionResult::Detected {
                 version: VERSION_1,
                 total_length,
@@ -447,7 +452,9 @@ impl TryFrom<RDCleanPathPdu> for RDCleanPath {
         let rdcleanpath = if let Some(destination) = pdu.destination {
             Self::Request {
                 destination,
-                proxy_auth: pdu.proxy_auth.ok_or(MissingRDCleanPathField("proxy_auth"))?,
+                proxy_auth: pdu
+                    .proxy_auth
+                    .ok_or(MissingRDCleanPathField("proxy_auth"))?,
                 server_auth: pdu.server_auth,
                 preconnection_blob: pdu.preconnection_blob,
                 x224_connection_request: pdu

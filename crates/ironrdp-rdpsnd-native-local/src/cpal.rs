@@ -155,13 +155,18 @@ impl DecodeStream {
                         let nb_samples = match dec.get_nb_samples(&pkt) {
                             Ok(nb_samples) => nb_samples,
                             Err(error) => {
-                                error!(?error, "Failed to get the number of samples of an Opus packet");
+                                error!(
+                                    ?error,
+                                    "Failed to get the number of samples of an Opus packet"
+                                );
                                 continue;
                             }
                         };
 
                         let mut pcm = vec![0u8; nb_samples * chan as usize * size_of::<i16>()];
-                        if let Err(error) = dec.decode(&pkt, bytemuck::cast_slice_mut(pcm.as_mut_slice()), false) {
+                        if let Err(error) =
+                            dec.decode(&pkt, bytemuck::cast_slice_mut(pcm.as_mut_slice()), false)
+                        {
                             error!(?error, "Failed to decode an Opus packet");
                             continue;
                         }
@@ -189,7 +194,9 @@ impl DecodeStream {
         };
 
         let host = cpal::default_host();
-        let device = host.default_output_device().context("no default output device")?;
+        let device = host
+            .default_output_device()
+            .context("no default output device")?;
         let _supported_configs_range = device
             .supported_output_configs()
             .context("no supported output config")?;

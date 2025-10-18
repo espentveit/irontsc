@@ -20,15 +20,15 @@ use core::fmt;
 use std::sync::Arc;
 
 use ironrdp_core::{encode_buf, encode_vec, Encode, WriteBuf};
-use ironrdp_pdu::nego::NegoRequestData;
-use ironrdp_pdu::rdp::capability_sets::{self, BitmapCodecs};
-use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use ironrdp_pdu::x224::{X224, X224Data};
-use ironrdp_pdu::PduHint;
 use ironrdp_pdu::gcc::{
     self, ClientClusterData, ClientMessageChannelData, MonitorOrientation,
     MultiTransportChannelData, MultiTransportFlags, RedirectionFlags, RedirectionVersion,
 };
+use ironrdp_pdu::nego::NegoRequestData;
+use ironrdp_pdu::rdp::capability_sets::{self, BitmapCodecs};
+use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp_pdu::x224::{X224Data, X224};
+use ironrdp_pdu::PduHint;
 pub use sspi;
 
 pub use self::channel_connection::{ChannelConnectionSequence, ChannelConnectionState};
@@ -479,30 +479,46 @@ pub fn create_client_data(
         keyboard_subtype: config.keyboard_subtype,
         keyboard_functional_keys_count: config.keyboard_functional_keys_count,
         ime_file_name: config.ime_file_name.clone(),
-        optional_data: ClientCoreOptionalData {
-            post_beta2_color_depth: Some(ColorDepth::Bpp8),
-            client_product_id: Some(1),
-            serial_number: Some(0),
-            high_color_depth: Some(HighColorDepth::Bpp24),
-            supported_color_depths: Some(
-                SupportedColorDepths::BPP24 | SupportedColorDepths::BPP32,
-            ),
-            early_capability_flags: Some(
-                ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
-                    | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU,
-            ),
-            connection_type: Some(ConnectionType::Autodetect),
-            server_selected_protocol: Some(selected_protocol),
-            desktop_scale_factor: Some(config.desktop_scale_factor),
-            device_scale_factor: None,
-            dig_product_id: Some(config.dig_product_id.clone()),
-            desktop_physical_width: Some(0),
-            desktop_physical_height: Some(0),
-            desktop_orientation: if config.desktop_size.width > config.desktop_size.height {
-                Some(MonitorOrientation::Landscape as u16)
-            } else {
-                Some(MonitorOrientation::Portrait as u16)
-            },
+        optional_data: {
+            let mut early_capability_flags = ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU
+                | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU
+                | ClientEarlyCapabilityFlags::STRONG_ASYMMETRIC_KEYS
+                | ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
+                | ClientEarlyCapabilityFlags::SUPPORT_DYN_VC_GFX_PROTOCOL
+                | ClientEarlyCapabilityFlags::SUPPORT_DYNAMIC_TIME_ZONE
+                | ClientEarlyCapabilityFlags::SUPPORT_HEART_BEAT_PDU;
+
+            let max_color_depth = config
+                .bitmap
+                .as_ref()
+                .map(|bitmap| bitmap.color_depth)
+                .unwrap_or(32);
+
+            if max_color_depth == 32 {
+                early_capability_flags |= ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION;
+            }
+
+            ClientCoreOptionalData {
+                post_beta2_color_depth: Some(ColorDepth::Bpp8),
+                client_product_id: Some(1),
+                serial_number: Some(0),
+                high_color_depth: Some(HighColorDepth::Bpp24),
+                supported_color_depths: Some(
+                    SupportedColorDepths::BPP24
+                        | SupportedColorDepths::BPP16
+                        | SupportedColorDepths::BPP15
+                        | SupportedColorDepths::BPP32,
+                ),
+                early_capability_flags: Some(early_capability_flags),
+                dig_product_id: Some(config.dig_product_id.clone()),
+                connection_type: Some(ConnectionType::Autodetect),
+                server_selected_protocol: Some(selected_protocol),
+                desktop_physical_width: Some(1000),
+                desktop_physical_height: Some(1000),
+                desktop_orientation: Some(MonitorOrientation::Landscape as u16),
+                desktop_scale_factor: Some(100),
+                device_scale_factor: Some(100),
+            }
         },
     };
 
@@ -525,7 +541,8 @@ pub fn create_client_data(
         multi_transport_channel: Some(MultiTransportChannelData {
             flags: MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
                 | MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
-                | MultiTransportFlags::MULTITRANSPORT_TYPE_FLAGS_REQUEST,
+                | MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
+                | MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
         }),
         monitor_extended: None,
     };

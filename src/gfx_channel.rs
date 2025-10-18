@@ -54,6 +54,21 @@ impl GfxDvcProcessor {
             channel_id: None,
         }
     }
+
+    /// Wrap raw RDPEGFX payload in a zGFX segmented packet
+    fn wrap_zgfx_packet(payload: &[u8]) -> Vec<u8> {
+        const DESCRIPTOR_SINGLE: u8 = 0xE0; // ZGFX_SEGMENTED_SINGLE
+        // FreedRDP sets the packet header to ZGFX_PACKET_COMPR_TYPE_RDP8 (0x04)
+        // even when the payload is left uncompressed. Mirror that behaviour so
+        // the server recognizes the stream as RDPEGFX/RDP8 encoded data.
+        const HEADER_RDP8: u8 = 0x04;
+
+        let mut packet = Vec::with_capacity(payload.len() + 2);
+        packet.push(DESCRIPTOR_SINGLE);
+        packet.push(HEADER_RDP8);
+        packet.extend_from_slice(payload);
+        packet
+    }
 }
 
 impl AsAny for GfxDvcProcessor {
@@ -90,7 +105,10 @@ impl DvcProcessor for GfxDvcProcessor {
         );
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| {
+                let packet = Self::wrap_zgfx_packet(&data);
+                Box::new(GfxDvcMessage { data: packet }) as DvcMessage
+            })
             .collect())
     }
 
@@ -131,7 +149,10 @@ impl DvcProcessor for GfxDvcProcessor {
         }
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| {
+                let packet = Self::wrap_zgfx_packet(&data);
+                Box::new(GfxDvcMessage { data: packet }) as DvcMessage
+            })
             .collect())
     }
 

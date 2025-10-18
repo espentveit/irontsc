@@ -30,55 +30,109 @@ pub mod cap_flags {
 pub struct CapabilitySet {
     pub version: u32,
     pub flags: u32,
+    pub extra_data: Vec<u8>,
 }
 
 impl CapabilitySet {
     pub fn new(version: u32, flags: u32) -> Self {
-        Self { version, flags }
+        Self {
+            version,
+            flags,
+            extra_data: Vec::new(),
+        }
     }
 
-    /// Get default capability sets to advertise
-    pub fn default_sets(small_cache: bool, avc420_enabled: bool) -> Vec<Self> {
-        let mut base_flags = 0u32;
-        if small_cache {
-            base_flags |= cap_flags::SMALL_CACHE;
+    pub fn with_extra(version: u32, flags: u32, extra_data: Vec<u8>) -> Self {
+        Self {
+            version,
+            flags,
+            extra_data,
         }
+    }
+
+    /// Get default capability sets to advertise. Mirrors FreeRDP ordering/flags so
+    /// Windows enables mixed-mode or full H.264 rendering when supported.
+    pub fn default_sets(small_cache: bool, avc420_enabled: bool) -> Vec<Self> {
+        let thin_client = false;
+        let avc444_enabled = true;
+        let scaling_supported = false;
 
         let mut caps = Vec::new();
 
         // RDP 8.0 (no H.264 support)
-        caps.push(Self::new(cap_version::V8, base_flags));
+        let mut flags_v8 = 0u32;
+        if thin_client {
+            flags_v8 |= cap_flags::THINCLIENT;
+        }
+        if small_cache && !thin_client {
+            flags_v8 |= cap_flags::SMALL_CACHE;
+        }
+        caps.push(Self::new(cap_version::V8, flags_v8));
 
         // RDP 8.1 with AVC420 support (software encoding)
-        let mut flags_81 = base_flags;
+        let mut flags_81 = 0u32;
+        if thin_client {
+            flags_81 |= cap_flags::THINCLIENT;
+        }
+        if small_cache {
+            flags_81 |= cap_flags::SMALL_CACHE;
+        }
         if avc420_enabled {
             flags_81 |= cap_flags::AVC420_ENABLED;
         }
         caps.push(Self::new(cap_version::V81, flags_81));
 
-        // RDP 10.0+ with AVC444 support (hardware encoding)
-        // By NOT setting AVC_DISABLED, we advertise AVC444 capability
-        // This enables hardware-accelerated H.264 encoding on the server
-        let flags_10 = base_flags;
+        // RDP 10.x capability sets. We only advertise them when the server can
+        // actually make use of AVC (same condition FreeRDP applies).
+        if !avc420_enabled || avc444_enabled {
+            let mut caps10_flags = 0u32;
+            if small_cache {
+                caps10_flags |= cap_flags::SMALL_CACHE;
+            }
+            if !avc444_enabled {
+                caps10_flags |= cap_flags::AVC_DISABLED;
+            }
+            if thin_client && (caps10_flags & cap_flags::AVC_DISABLED == 0) {
+                caps10_flags |= cap_flags::AVC_THINCLIENT;
+            }
 
-        caps.push(Self::new(cap_version::V10, flags_10));
-        caps.push(Self::new(cap_version::V101, flags_10));
-        caps.push(Self::new(cap_version::V102, flags_10));
-        caps.push(Self::new(cap_version::V103, flags_10));
-        caps.push(Self::new(cap_version::V104, flags_10));
-        caps.push(Self::new(cap_version::V105, flags_10));
-        caps.push(Self::new(cap_version::V106, flags_10));
-        caps.push(Self::new(cap_version::V107, flags_10));
+            caps.push(Self::new(cap_version::V10, caps10_flags));
+
+            // Version 10.1 requires a 16-byte payload. FreeRDP fills the extra
+            // bytes with zeros, so we do the same.
+            caps.push(Self::with_extra(cap_version::V101, 0, vec![0; 12]));
+
+            caps.push(Self::new(cap_version::V102, caps10_flags));
+
+            let flags_103 = caps10_flags & !cap_flags::SMALL_CACHE;
+            caps.push(Self::new(cap_version::V103, flags_103));
+
+            caps.push(Self::new(cap_version::V104, caps10_flags));
+
+            if scaling_supported {
+                caps.push(Self::new(cap_version::V105, caps10_flags));
+                caps.push(Self::new(cap_version::V106, caps10_flags));
+                caps.push(Self::new(cap_version::V106_ERR, caps10_flags));
+            }
+
+            let mut flags_107 = caps10_flags;
+            if !scaling_supported {
+                flags_107 |= cap_flags::SCALEDMAP_DISABLE;
+            }
+            caps.push(Self::new(cap_version::V107, flags_107));
+        }
 
         caps
     }
 
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(12);
+        let length = 4 + self.extra_data.len();
+        let mut buf = Vec::with_capacity(8 + length);
         buf.extend_from_slice(&self.version.to_le_bytes());
-        buf.extend_from_slice(&4u32.to_le_bytes()); // length = 4
+        buf.extend_from_slice(&(length as u32).to_le_bytes());
         buf.extend_from_slice(&self.flags.to_le_bytes());
+        buf.extend_from_slice(&self.extra_data);
         buf
     }
 
@@ -89,15 +143,24 @@ impl CapabilitySet {
         }
 
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let length = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let length = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
 
-        if length != 4 {
+        if length < 4 {
             anyhow::bail!("Invalid capability length: {}", length);
         }
 
-        let flags = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        if data.len() < 8 + length {
+            anyhow::bail!("CapabilitySet payload truncated");
+        }
 
-        Ok(Self { version, flags })
+        let flags = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let extra = data[12..8 + length].to_vec();
+
+        Ok(Self {
+            version,
+            flags,
+            extra_data: extra,
+        })
     }
 }
 

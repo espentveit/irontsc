@@ -1,5 +1,7 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
-#![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+#![doc(
+    html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg"
+)]
 #![allow(clippy::arithmetic_side_effects)] // FIXME: remove
 #![allow(clippy::cast_lossless)] // FIXME: remove
 #![allow(clippy::cast_possible_truncation)] // FIXME: remove
@@ -11,9 +13,10 @@ use ironrdp_pdu::gcc::ChannelName;
 use ironrdp_pdu::{decode_err, pdu_other_err, PduResult};
 use ironrdp_svc::{CompressionCondition, SvcClientProcessor, SvcMessage, SvcProcessor};
 use pdu::efs::{
-    Capabilities, ClientDeviceListAnnounce, ClientDeviceListRemove, ClientNameRequest, ClientNameRequestUnicodeFlag,
-    CoreCapability, CoreCapabilityKind, DeviceControlRequest, DeviceIoRequest, DeviceType, Devices,
-    ServerDeviceAnnounceResponse, VersionAndIdPdu, VersionAndIdPduKind,
+    Capabilities, ClientDeviceListAnnounce, ClientDeviceListRemove, ClientNameRequest,
+    ClientNameRequestUnicodeFlag, CoreCapability, CoreCapabilityKind, DeviceControlRequest,
+    DeviceIoRequest, DeviceType, Devices, ServerDeviceAnnounceResponse, VersionAndIdPdu,
+    VersionAndIdPduKind,
 };
 use pdu::esc::{ScardCall, ScardIoCtlCode};
 use pdu::RdpdrPdu;
@@ -109,8 +112,9 @@ impl Rdpdr {
     }
 
     fn handle_server_announce(&mut self, req: VersionAndIdPdu) -> PduResult<Vec<SvcMessage>> {
-        let client_announce_reply =
-            RdpdrPdu::VersionAndIdPdu(VersionAndIdPdu::new_client_announce_reply(req).map_err(|e| decode_err!(e))?);
+        let client_announce_reply = RdpdrPdu::VersionAndIdPdu(
+            VersionAndIdPdu::new_client_announce_reply(req).map_err(|e| decode_err!(e))?,
+        );
         trace!("sending {:?}", client_announce_reply);
 
         let client_name_request = RdpdrPdu::ClientNameRequest(ClientNameRequest::new(
@@ -126,7 +130,9 @@ impl Rdpdr {
     }
 
     fn handle_server_capability(&mut self, _req: CoreCapability) -> PduResult<Vec<SvcMessage>> {
-        let res = RdpdrPdu::CoreCapability(CoreCapability::new_response(self.capabilities.clone_inner()));
+        let res = RdpdrPdu::CoreCapability(CoreCapability::new_response(
+            self.capabilities.clone_inner(),
+        ));
         trace!("sending {:?}", res);
         Ok(vec![SvcMessage::from(res)])
     }
@@ -158,9 +164,10 @@ impl Rdpdr {
             .map_err(|e| decode_err!(e))?
         {
             DeviceType::Smartcard => {
-                let req =
-                    DeviceControlRequest::<ScardIoCtlCode>::decode(dev_io_req, src).map_err(|e| decode_err!(e))?;
-                let call = ScardCall::decode(req.io_control_code, src).map_err(|e| decode_err!(e))?;
+                let req = DeviceControlRequest::<ScardIoCtlCode>::decode(dev_io_req, src)
+                    .map_err(|e| decode_err!(e))?;
+                let call =
+                    ScardCall::decode(req.io_control_code, src).map_err(|e| decode_err!(e))?;
 
                 debug!(?req);
                 debug!(?req.io_control_code, ?call);
@@ -170,7 +177,8 @@ impl Rdpdr {
                 Ok(Vec::new())
             }
             DeviceType::Filesystem => {
-                let req = ServerDriveIoRequest::decode(dev_io_req, src).map_err(|e| decode_err!(e))?;
+                let req =
+                    ServerDriveIoRequest::decode(dev_io_req, src).map_err(|e| decode_err!(e))?;
 
                 debug!(?req);
 
@@ -200,16 +208,24 @@ impl SvcProcessor for Rdpdr {
         debug!("Received {:?}", pdu);
 
         match pdu {
-            RdpdrPdu::VersionAndIdPdu(pdu) if pdu.kind == VersionAndIdPduKind::ServerAnnounceRequest => {
+            RdpdrPdu::VersionAndIdPdu(pdu)
+                if pdu.kind == VersionAndIdPduKind::ServerAnnounceRequest =>
+            {
                 self.handle_server_announce(pdu)
             }
-            RdpdrPdu::CoreCapability(pdu) if pdu.kind == CoreCapabilityKind::ServerCoreCapabilityRequest => {
+            RdpdrPdu::CoreCapability(pdu)
+                if pdu.kind == CoreCapabilityKind::ServerCoreCapabilityRequest =>
+            {
                 self.handle_server_capability(pdu)
             }
-            RdpdrPdu::VersionAndIdPdu(pdu) if pdu.kind == VersionAndIdPduKind::ServerClientIdConfirm => {
+            RdpdrPdu::VersionAndIdPdu(pdu)
+                if pdu.kind == VersionAndIdPduKind::ServerClientIdConfirm =>
+            {
                 self.handle_client_id_confirm()
             }
-            RdpdrPdu::ServerDeviceAnnounceResponse(pdu) => self.handle_server_device_announce_response(pdu),
+            RdpdrPdu::ServerDeviceAnnounceResponse(pdu) => {
+                self.handle_server_device_announce_response(pdu)
+            }
             RdpdrPdu::DeviceIoRequest(pdu) => self.handle_device_io_request(pdu, &mut src),
             RdpdrPdu::UserLoggedon => Ok(vec![]),
             // TODO: This can eventually become a `_ => {}` block, but being explicit for now
