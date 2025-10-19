@@ -1,6 +1,6 @@
 //! PDU structures and parsing for RDPEGFX
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use bytes::{Buf, BufMut};
 
 /// PDU command identifiers
@@ -339,6 +339,26 @@ impl WireToSurface2 {
     }
 }
 
+/// DELETE_ENCODING_CONTEXT PDU
+#[derive(Debug, Clone)]
+pub struct DeleteEncodingContext {
+    pub surface_id: u16,
+    pub codec_context_id: u32,
+}
+
+impl DeleteEncodingContext {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 6 {
+            bail!("Not enough data for DeleteEncodingContext");
+        }
+
+        Ok(Self {
+            surface_id: data.get_u16_le(),
+            codec_context_id: data.get_u32_le(),
+        })
+    }
+}
+
 /// SOLID_FILL PDU
 #[derive(Debug, Clone)]
 pub struct SolidFill {
@@ -460,5 +480,190 @@ impl QoeFrameAcknowledge {
         buf.put_u16_le(self.time_diff_edr);
 
         buf
+    }
+}
+
+/// MONITOR_DEF structure used by RESET_GRAPHICS
+#[derive(Debug, Clone)]
+pub struct MonitorDefinition {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub flags: u32,
+}
+
+impl MonitorDefinition {
+    fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 20 {
+            bail!("Not enough data for MonitorDefinition");
+        }
+
+        Ok(Self {
+            left: data.get_i32_le(),
+            top: data.get_i32_le(),
+            right: data.get_i32_le(),
+            bottom: data.get_i32_le(),
+            flags: data.get_u32_le(),
+        })
+    }
+}
+
+/// RESET_GRAPHICS PDU
+#[derive(Debug, Clone)]
+pub struct ResetGraphics {
+    pub width: u32,
+    pub height: u32,
+    pub monitors: Vec<MonitorDefinition>,
+}
+
+impl ResetGraphics {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 12 {
+            bail!("Not enough data for ResetGraphics");
+        }
+
+        let original_len = data.len();
+
+        let width = data.get_u32_le();
+        let height = data.get_u32_le();
+        let monitor_count = data.get_u32_le() as usize;
+
+        if data.len() < monitor_count.saturating_mul(20) {
+            bail!("Not enough data for monitor definitions");
+        }
+
+        let mut monitors = Vec::with_capacity(monitor_count);
+        for _ in 0..monitor_count {
+            monitors.push(MonitorDefinition::parse(data)?);
+        }
+
+        // Skip padding (RESET_GRAPHICS body is always 332 bytes)
+        let consumed = original_len - data.len();
+        if consumed > original_len {
+            bail!("RESET_GRAPHICS consumed more bytes than available");
+        }
+        let remaining = original_len - consumed;
+        if remaining > 0 {
+            data.advance(remaining);
+        }
+
+        Ok(Self {
+            width,
+            height,
+            monitors,
+        })
+    }
+}
+
+/// MAP_SURFACE_TO_OUTPUT PDU
+#[derive(Debug, Clone)]
+pub struct MapSurfaceToOutput {
+    pub surface_id: u16,
+    pub output_origin_x: u32,
+    pub output_origin_y: u32,
+}
+
+impl MapSurfaceToOutput {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 12 {
+            bail!("Not enough data for MapSurfaceToOutput");
+        }
+
+        let surface_id = data.get_u16_le();
+        let _reserved = data.get_u16_le();
+        let output_origin_x = data.get_u32_le();
+        let output_origin_y = data.get_u32_le();
+
+        Ok(Self {
+            surface_id,
+            output_origin_x,
+            output_origin_y,
+        })
+    }
+}
+
+/// MAP_SURFACE_TO_SCALED_OUTPUT PDU
+#[derive(Debug, Clone)]
+pub struct MapSurfaceToScaledOutput {
+    pub surface_id: u16,
+    pub output_origin_x: u32,
+    pub output_origin_y: u32,
+    pub target_width: u32,
+    pub target_height: u32,
+}
+
+impl MapSurfaceToScaledOutput {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 20 {
+            bail!("Not enough data for MapSurfaceToScaledOutput");
+        }
+
+        let surface_id = data.get_u16_le();
+        let _reserved = data.get_u16_le();
+        let output_origin_x = data.get_u32_le();
+        let output_origin_y = data.get_u32_le();
+        let target_width = data.get_u32_le();
+        let target_height = data.get_u32_le();
+
+        Ok(Self {
+            surface_id,
+            output_origin_x,
+            output_origin_y,
+            target_width,
+            target_height,
+        })
+    }
+}
+
+/// MAP_SURFACE_TO_WINDOW PDU
+#[derive(Debug, Clone)]
+pub struct MapSurfaceToWindow {
+    pub surface_id: u16,
+    pub window_id: u64,
+    pub mapped_width: u32,
+    pub mapped_height: u32,
+}
+
+impl MapSurfaceToWindow {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 18 {
+            bail!("Not enough data for MapSurfaceToWindow");
+        }
+
+        Ok(Self {
+            surface_id: data.get_u16_le(),
+            window_id: data.get_u64_le(),
+            mapped_width: data.get_u32_le(),
+            mapped_height: data.get_u32_le(),
+        })
+    }
+}
+
+/// MAP_SURFACE_TO_SCALED_WINDOW PDU
+#[derive(Debug, Clone)]
+pub struct MapSurfaceToScaledWindow {
+    pub surface_id: u16,
+    pub window_id: u64,
+    pub mapped_width: u32,
+    pub mapped_height: u32,
+    pub target_width: u32,
+    pub target_height: u32,
+}
+
+impl MapSurfaceToScaledWindow {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 26 {
+            bail!("Not enough data for MapSurfaceToScaledWindow");
+        }
+
+        Ok(Self {
+            surface_id: data.get_u16_le(),
+            window_id: data.get_u64_le(),
+            mapped_width: data.get_u32_le(),
+            mapped_height: data.get_u32_le(),
+            target_width: data.get_u32_le(),
+            target_height: data.get_u32_le(),
+        })
     }
 }

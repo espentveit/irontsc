@@ -58,6 +58,55 @@ pub trait GfxContext {
         fill_pixel: Color32,
         fill_rects: &[Rectangle],
     ) -> Result<()>;
+
+    /// Called when the server deletes a progressive codec context
+    fn on_delete_encoding_context(&mut self, surface_id: u16, codec_context_id: u32) -> Result<()>;
+
+    /// Called when the server resets the graphics output buffer
+    fn on_reset_graphics(
+        &mut self,
+        width: u32,
+        height: u32,
+        monitors: &[MonitorDefinition],
+    ) -> Result<()>;
+
+    /// Called when a surface is mapped to the graphics output buffer
+    fn on_map_surface_to_output(
+        &mut self,
+        surface_id: u16,
+        output_origin_x: u32,
+        output_origin_y: u32,
+    ) -> Result<()>;
+
+    /// Called when a surface is mapped to a scaled region of the graphics output buffer
+    fn on_map_surface_to_scaled_output(
+        &mut self,
+        surface_id: u16,
+        output_origin_x: u32,
+        output_origin_y: u32,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<()>;
+
+    /// Called when a surface is mapped to a window
+    fn on_map_surface_to_window(
+        &mut self,
+        surface_id: u16,
+        window_id: u64,
+        mapped_width: u32,
+        mapped_height: u32,
+    ) -> Result<()>;
+
+    /// Called when a surface is mapped to a scaled window
+    fn on_map_surface_to_scaled_window(
+        &mut self,
+        surface_id: u16,
+        window_id: u64,
+        mapped_width: u32,
+        mapped_height: u32,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<()>;
 }
 
 /// Frame tracking state
@@ -114,9 +163,19 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
     /// Build and send CAPS_ADVERTISE message
     pub fn send_caps_advertise(&mut self) -> Result<()> {
         let caps = default_capability_sets(self.small_cache);
+        trace!("RDPEGFX CapsAdvertise count={}", caps.len());
+        for cap in &caps {
+            trace!(
+                "  - version=0x{:08X} flags=0x{:08X} extra_len={}",
+                cap.version,
+                cap.flags,
+                cap.extra_data.len()
+            );
+        }
 
         let caps_payload_len: usize = caps.iter().map(CapabilitySet::serialized_len).sum();
         let pdu_length = Header::SIZE + 2 + caps_payload_len; // header + count + capsets
+        trace!("RDPEGFX CapsAdvertise PDU length={} bytes", pdu_length);
         let mut buf = Vec::with_capacity(pdu_length);
 
         // Header
@@ -177,6 +236,18 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
                 CmdId::WireToSurface1 => self.handle_wire_to_surface_1(&mut body_stream)?,
                 CmdId::WireToSurface2 => self.handle_wire_to_surface_2(&mut body_stream)?,
                 CmdId::SolidFill => self.handle_solid_fill(&mut body_stream)?,
+                CmdId::DeleteEncodingContext => {
+                    self.handle_delete_encoding_context(&mut body_stream)?
+                }
+                CmdId::ResetGraphics => self.handle_reset_graphics(&mut body_stream)?,
+                CmdId::MapSurfaceToOutput => self.handle_map_surface_to_output(&mut body_stream)?,
+                CmdId::MapSurfaceToScaledOutput => {
+                    self.handle_map_surface_to_scaled_output(&mut body_stream)?
+                }
+                CmdId::MapSurfaceToWindow => self.handle_map_surface_to_window(&mut body_stream)?,
+                CmdId::MapSurfaceToScaledWindow => {
+                    self.handle_map_surface_to_scaled_window(&mut body_stream)?
+                }
                 _ => {
                     warn!("Unhandled RDPEGFX command: {:?}", header.cmd_id);
                 }
@@ -367,6 +438,110 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         self.ctx
             .on_solid_fill(cmd.surface_id, cmd.fill_pixel, &cmd.fill_rects)
+    }
+
+    fn handle_delete_encoding_context(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = DeleteEncodingContext::parse(data)?;
+
+        trace!(
+            "DELETE_ENCODING_CONTEXT: surface={}, context={}",
+            cmd.surface_id,
+            cmd.codec_context_id
+        );
+
+        self.ctx
+            .on_delete_encoding_context(cmd.surface_id, cmd.codec_context_id)
+    }
+
+    fn handle_reset_graphics(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = ResetGraphics::parse(data)?;
+
+        trace!(
+            "RESET_GRAPHICS: width={} height={} monitors={}",
+            cmd.width,
+            cmd.height,
+            cmd.monitors.len()
+        );
+
+        self.ctx
+            .on_reset_graphics(cmd.width, cmd.height, &cmd.monitors)
+    }
+
+    fn handle_map_surface_to_output(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = MapSurfaceToOutput::parse(data)?;
+
+        trace!(
+            "MAP_SURFACE_TO_OUTPUT: surface={} origin=({}, {})",
+            cmd.surface_id,
+            cmd.output_origin_x,
+            cmd.output_origin_y
+        );
+
+        self.ctx
+            .on_map_surface_to_output(cmd.surface_id, cmd.output_origin_x, cmd.output_origin_y)
+    }
+
+    fn handle_map_surface_to_scaled_output(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = MapSurfaceToScaledOutput::parse(data)?;
+
+        trace!(
+            "MAP_SURFACE_TO_SCALED_OUTPUT: surface={} origin=({}, {}) target={}x{}",
+            cmd.surface_id,
+            cmd.output_origin_x,
+            cmd.output_origin_y,
+            cmd.target_width,
+            cmd.target_height
+        );
+
+        self.ctx.on_map_surface_to_scaled_output(
+            cmd.surface_id,
+            cmd.output_origin_x,
+            cmd.output_origin_y,
+            cmd.target_width,
+            cmd.target_height,
+        )
+    }
+
+    fn handle_map_surface_to_window(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = MapSurfaceToWindow::parse(data)?;
+
+        trace!(
+            "MAP_SURFACE_TO_WINDOW: surface={} window=0x{:016X} mapped={}x{}",
+            cmd.surface_id,
+            cmd.window_id,
+            cmd.mapped_width,
+            cmd.mapped_height
+        );
+
+        self.ctx.on_map_surface_to_window(
+            cmd.surface_id,
+            cmd.window_id,
+            cmd.mapped_width,
+            cmd.mapped_height,
+        )
+    }
+
+    fn handle_map_surface_to_scaled_window(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = MapSurfaceToScaledWindow::parse(data)?;
+
+        trace!(
+            "MAP_SURFACE_TO_SCALED_WINDOW: surface={} window=0x{:016X} mapped={}x{} target={}x{}",
+            cmd.surface_id,
+            cmd.window_id,
+            cmd.mapped_width,
+            cmd.mapped_height,
+            cmd.target_width,
+            cmd.target_height
+        );
+
+        self.ctx.on_map_surface_to_scaled_window(
+            cmd.surface_id,
+            cmd.window_id,
+            cmd.mapped_width,
+            cmd.mapped_height,
+            cmd.target_width,
+            cmd.target_height,
+        )
     }
 
     fn send_frame_acknowledge(&mut self, frame_id: u32) -> Result<()> {

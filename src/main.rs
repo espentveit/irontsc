@@ -274,13 +274,21 @@ fn create_rdp_config(
         dig_product_id: "".to_string(),
         hardware_id: None,
         bitmap: {
-            // Inject H.264/AVC444 codec support for RDPEGFX hardware encoding
-            match crate::h264_codec_caps::create_bitmap_config_with_h264(false, 32) {
-                Ok(config) => Some(config),
-                Err(e) => {
-                    tracing::warn!("Failed to create H.264 bitmap config: {}", e);
-                    None
+            #[cfg(feature = "h264")]
+            {
+                // Inject H.264/AVC444 codec support for RDPEGFX hardware encoding
+                match crate::h264_codec_caps::create_bitmap_config_with_h264(false, 32) {
+                    Ok(config) => Some(config),
+                    Err(e) => {
+                        tracing::warn!("Failed to create H.264 bitmap config: {}", e);
+                        None
+                    }
                 }
+            }
+            #[cfg(not(feature = "h264"))]
+            {
+                // Without H.264, use default bitmap config (RemoteFX Progressive only)
+                None
             }
         },
         request_data: None,
