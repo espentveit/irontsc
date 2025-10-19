@@ -113,12 +113,13 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
     /// Build and send CAPS_ADVERTISE message
     pub fn send_caps_advertise(&mut self) -> Result<()> {
-        let caps = CapabilitySet::default_sets(self.small_cache, true);
+        let caps = default_capability_sets(self.small_cache);
 
-        let mut buf = Vec::new();
+        let caps_payload_len: usize = caps.iter().map(CapabilitySet::serialized_len).sum();
+        let pdu_length = Header::SIZE + 2 + caps_payload_len; // header + count + capsets
+        let mut buf = Vec::with_capacity(pdu_length);
 
         // Header
-        let pdu_length = 8 + 2 + (caps.len() * 12); // header + count + capsets
         let header = Header {
             cmd_id: CmdId::CapsAdvertise,
             flags: 0,
@@ -419,4 +420,14 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         self.ctx.send(&qoe.to_bytes())
     }
+}
+
+#[cfg(feature = "h264")]
+fn default_capability_sets(small_cache: bool) -> Vec<CapabilitySet> {
+    CapabilitySet::default_sets(small_cache, true, true)
+}
+
+#[cfg(not(feature = "h264"))]
+fn default_capability_sets(small_cache: bool) -> Vec<CapabilitySet> {
+    CapabilitySet::default_sets(small_cache, false, false)
 }

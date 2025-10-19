@@ -279,17 +279,23 @@ impl UdpTransportManager {
 
         // Try to process as source packet (data)
         match self.connection.process_source_packet(packet) {
-            Ok(Some(data)) => {
-                trace!("Received data packet ({} bytes payload)", data.len());
-                let _ = self.event_tx.send(UdpTransportEvent::DataReceived(data));
+            Ok(datas) if !datas.is_empty() => {
+                for data in datas {
+                    trace!("Received data packet ({} bytes payload)", data.len());
+                    let _ = self.event_tx.send(UdpTransportEvent::DataReceived(data));
+                }
             }
-            Ok(None) => {
-                // Packet received but not the expected sequence, buffered
+            Ok(_) => {
+                // Packet received but not yet deliverable (out of order)
                 trace!("Packet buffered (out of sequence)");
             }
             Err(e) => {
-                // Might be an ACK packet or other control packet
-                trace!("Not a source packet: {}", e);
+                // Maybe an ACK; try to process
+                if let Err(err) = self.connection.process_ack_packet(packet) {
+                    trace!("Failed to decode UDP packet: {}; ack error: {}", e, err);
+                } else {
+                    trace!("Processed UDP ACK packet");
+                }
             }
         }
 

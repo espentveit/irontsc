@@ -52,9 +52,12 @@ impl CapabilitySet {
 
     /// Get default capability sets to advertise. Mirrors FreeRDP ordering/flags so
     /// Windows enables mixed-mode or full H.264 rendering when supported.
-    pub fn default_sets(small_cache: bool, avc420_enabled: bool) -> Vec<Self> {
+    pub fn default_sets(
+        small_cache: bool,
+        avc420_enabled: bool,
+        avc444_enabled: bool,
+    ) -> Vec<Self> {
         let thin_client = false;
-        let avc444_enabled = true;
         let scaling_supported = false;
 
         let mut caps = Vec::new();
@@ -128,12 +131,18 @@ impl CapabilitySet {
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let length = 4 + self.extra_data.len();
-        let mut buf = Vec::with_capacity(8 + length);
+        let mut buf = Vec::with_capacity(self.serialized_len());
         buf.extend_from_slice(&self.version.to_le_bytes());
         buf.extend_from_slice(&(length as u32).to_le_bytes());
         buf.extend_from_slice(&self.flags.to_le_bytes());
         buf.extend_from_slice(&self.extra_data);
         buf
+    }
+
+    /// Total number of bytes this capability set occupies when serialized.
+    pub fn serialized_len(&self) -> usize {
+        // version (4) + length (4) + flags (4) + extra payload
+        12 + self.extra_data.len()
     }
 
     /// Parse from bytes

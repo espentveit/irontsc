@@ -1,15 +1,15 @@
 /// UDP connection state machine and transport implementation
 /// Based on MS-RDPEUDP spec sections 3.1.5
-use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ack::{AckOfAckVectorHeader, AckVectorElement, AckVectorHeader, VectorElementState};
 use crate::correlation::CorrelationId;
 use crate::error::{UdpError, UdpErrorExt as _, UdpResult};
 use crate::fec::FecCodec;
 use crate::handshake::{SynAckPacket, SynPacket};
-use crate::packet::{AckPacket, FecPacket, SourcePacket};
-use crate::payload::FecPayloadHeader;
+use crate::header::FecHeader;
+use crate::packet::{AckPacket, SourcePacket};
 use crate::syndata::SynData;
 use crate::syndataex::{SynDataEx, SynDataExFlags, UdpProtocolVersion};
 
@@ -107,6 +107,8 @@ pub struct UdpConnection {
 
     // Received packets buffer
     receive_buffer: HashMap<u32, Vec<u8>>,
+    /// Tracking state for ACK vector generation (per outstanding sequence)
+    ack_states: VecDeque<VectorElementState>,
 
     // FEC state
     fec_codec: FecCodec,
@@ -133,6 +135,7 @@ impl UdpConnection {
             correlation_id: None,
             pending_packets: HashMap::new(),
             receive_buffer: HashMap::new(),
+            ack_states: VecDeque::new(),
             fec_codec: FecCodec::new(),
             source_packets_in_block: Vec::new(),
             last_keepalive: Instant::now(),
@@ -208,6 +211,7 @@ impl UdpConnection {
         self.next_receive_sequence = inner.syn_data.initial_sequence_number;
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
+        self.reset_receive_state(inner.syn_data.initial_sequence_number);
 
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
@@ -276,6 +280,7 @@ impl UdpConnection {
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
         self.last_ack_received = inner.header.sn_source_ack;
+        self.reset_receive_state(inner.syn_data.initial_sequence_number);
 
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
@@ -300,12 +305,14 @@ impl UdpConnection {
         let sequence_number = self.next_send_sequence;
         self.next_send_sequence = self.next_send_sequence.wrapping_add(1);
 
+        let ack_vector = self.build_ack_vector()?;
+
         let packet = SourcePacket::new(
             sequence_number,
             self.last_ack_received,
             self.config.receive_window_size,
             data.clone(),
-            None,
+            ack_vector.clone(),
             None,
         )?;
 
@@ -335,35 +342,60 @@ impl UdpConnection {
     }
 
     /// Process received source packet
-    pub fn process_source_packet(&mut self, bytes: &[u8]) -> UdpResult<Option<Vec<u8>>> {
+    pub fn process_source_packet(&mut self, bytes: &[u8]) -> UdpResult<Vec<Vec<u8>>> {
         let packet = SourcePacket::decode(bytes)?;
 
-        // Update ACK state
-        self.last_ack_received = packet.header.sn_source_ack;
-
-        // Remove acknowledged packets from pending
-        self.pending_packets
-            .retain(|seq, _| *seq > self.last_ack_received);
+        self.handle_ack_headers(
+            &packet.header,
+            packet.ack_vector.as_ref(),
+            packet.ack_of_ack.as_ref(),
+        );
 
         let seq = packet.sequence_number();
 
-        // Check if this is the expected packet
-        if seq == self.next_receive_sequence {
-            self.next_receive_sequence = self.next_receive_sequence.wrapping_add(1);
-            Ok(Some(packet.data))
-        } else {
-            // Store for later processing
-            self.receive_buffer.insert(seq, packet.data);
-            Ok(None)
+        if seq < self.next_receive_sequence {
+            // Already received/acknowledged packet, ignore but update keepalive
+            self.last_keepalive = Instant::now();
+            return Ok(Vec::new());
         }
+
+        let distance = seq.wrapping_sub(self.next_receive_sequence);
+        if distance as u16 > self.remote_window_size {
+            return Err(UdpError::invalid_state(
+                "process_source_packet",
+                "Sequence number outside of receive window",
+            ));
+        }
+
+        self.ensure_ack_capacity(distance as usize);
+
+        let idx = distance as usize;
+        if self.ack_states.len() == idx {
+            self.ack_states
+                .push_back(VectorElementState::DatagramReceived);
+        } else {
+            self.ack_states[idx] = VectorElementState::DatagramReceived;
+        }
+
+        match self.receive_buffer.entry(seq) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(v) => {
+                v.insert(packet.data);
+            }
+        }
+
+        self.last_keepalive = Instant::now();
+
+        Ok(self.flush_receive_buffer())
     }
 
     /// Create an ACK packet
     pub fn create_ack(&mut self) -> UdpResult<Vec<u8>> {
+        let ack_vector = self.build_ack_vector()?;
         let packet = AckPacket::new(
             self.next_receive_sequence.wrapping_sub(1),
             self.config.receive_window_size,
-            None,
+            ack_vector,
             None,
         );
 
@@ -408,6 +440,169 @@ impl UdpConnection {
         self.state = ConnectionState::Terminated;
         self.pending_packets.clear();
         self.receive_buffer.clear();
+        self.ack_states.clear();
+    }
+
+    /// Process ACK packet from peer
+    pub fn process_ack_packet(&mut self, bytes: &[u8]) -> UdpResult<()> {
+        let packet = AckPacket::decode(bytes)?;
+        self.handle_ack_headers(
+            &packet.header,
+            packet.ack_vector.as_ref(),
+            packet.ack_of_ack.as_ref(),
+        );
+        Ok(())
+    }
+
+    fn reset_receive_state(&mut self, initial_sequence: u32) {
+        self.next_receive_sequence = initial_sequence;
+        self.receive_buffer.clear();
+        self.ack_states.clear();
+    }
+
+    fn ensure_ack_capacity(&mut self, offset: usize) {
+        while self.ack_states.len() < offset {
+            self.ack_states
+                .push_back(VectorElementState::DatagramNotYetReceived);
+        }
+    }
+
+    fn flush_receive_buffer(&mut self) -> Vec<Vec<u8>> {
+        let mut delivered = Vec::new();
+
+        loop {
+            match self.ack_states.front() {
+                Some(VectorElementState::DatagramReceived) => {
+                    let seq = self.next_receive_sequence;
+                    self.next_receive_sequence = self.next_receive_sequence.wrapping_add(1);
+                    self.ack_states.pop_front();
+                    if let Some(data) = self.receive_buffer.remove(&seq) {
+                        delivered.push(data);
+                    }
+                }
+                Some(VectorElementState::DatagramNotYetReceived)
+                | Some(VectorElementState::DatagramReserved1)
+                | Some(VectorElementState::DatagramReserved2) => {
+                    break;
+                }
+                None => break,
+            }
+        }
+
+        delivered
+    }
+
+    fn build_ack_vector(&self) -> UdpResult<Option<AckVectorHeader>> {
+        if self.ack_states.is_empty() {
+            return Ok(None);
+        }
+
+        let states: Vec<VectorElementState> = self.ack_states.iter().copied().collect();
+        let mut vectors = Vec::new();
+
+        let mut idx = 0;
+        while idx < states.len() {
+            let current_state = states[idx];
+            let mut run = 1usize;
+
+            while idx + run < states.len() && states[idx + run] == current_state {
+                run += 1;
+                if run == 64 {
+                    break;
+                }
+            }
+
+            vectors.push(AckVectorElement::new(current_state, run as u8)?);
+
+            idx += run;
+        }
+
+        let base_sequence_number = self.next_receive_sequence.wrapping_sub(1);
+        let ack_timestamp = current_timestamp_ms();
+
+        Ok(Some(AckVectorHeader::new(
+            base_sequence_number,
+            ack_timestamp,
+            vectors,
+        )?))
+    }
+
+    fn handle_ack_headers(
+        &mut self,
+        header: &FecHeader,
+        ack_vector: Option<&AckVectorHeader>,
+        _ack_of_ack: Option<&AckOfAckVectorHeader>,
+    ) {
+        self.remove_acked_upto(header.sn_source_ack);
+        if let Some(vector) = ack_vector {
+            self.apply_ack_vector(vector);
+        }
+        self.last_ack_received = header.sn_source_ack;
+        self.last_keepalive = Instant::now();
+    }
+
+    fn remove_acked_upto(&mut self, sequence: u32) {
+        let keys: Vec<u32> = self
+            .pending_packets
+            .keys()
+            .copied()
+            .filter(|seq| sequence_leq(*seq, sequence))
+            .collect();
+
+        for key in keys {
+            self.pending_packets.remove(&key);
+        }
+    }
+
+    fn apply_ack_vector(&mut self, vector: &AckVectorHeader) {
+        let mut sequence = vector.base_sequence_number;
+        let timeout = Duration::from_millis(self.config.retransmit_timeout_ms);
+        let now = Instant::now();
+
+        for element in &vector.ack_vectors {
+            let count = element.count() as u32;
+            match element.state {
+                VectorElementState::DatagramReceived => {
+                    for offset in 0..count {
+                        let seq = sequence.wrapping_add(offset);
+                        self.pending_packets.remove(&seq);
+                    }
+                }
+                VectorElementState::DatagramNotYetReceived => {
+                    for offset in 0..count {
+                        let seq = sequence.wrapping_add(offset);
+                        if let Some(pending) = self.pending_packets.get_mut(&seq) {
+                            // Mark as ready for immediate retransmission
+                            if let Some(adjusted) = now.checked_sub(timeout) {
+                                pending.last_sent = adjusted;
+                            } else {
+                                pending.last_sent = now;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            sequence = sequence.wrapping_add(count);
+        }
+    }
+}
+
+fn current_timestamp_ms() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|dur| dur.as_millis() as u64)
+        .unwrap_or(0) as u32
+}
+
+fn sequence_leq(a: u32, b: u32) -> bool {
+    // For now assume no wrap-around over 2^31 window.
+    if a == b {
+        true
+    } else {
+        let diff = b.wrapping_sub(a);
+        diff < (1u32 << 31)
     }
 }
 
@@ -465,6 +660,29 @@ mod tests {
 
         // Receive data
         let received = receiver.process_source_packet(&packet_bytes).unwrap();
-        assert_eq!(received, Some(data));
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0], data);
+    }
+
+    #[test]
+    fn test_out_of_order_reassembly() {
+        let config = UdpConfig::default();
+        let mut receiver = UdpConnection::new(config.clone());
+        receiver.state = ConnectionState::Connected;
+        receiver.reset_receive_state(0);
+
+        // Simulate receiving sequence 1 before sequence 0
+        let packet1 = SourcePacket::new(1, 0, 256, b"two".to_vec(), None, None).unwrap();
+        let encoded1 = packet1.encode();
+        let buffered = receiver.process_source_packet(&encoded1).unwrap();
+        assert!(buffered.is_empty());
+
+        // Now receive sequence 0, which should flush both
+        let packet0 = SourcePacket::new(0, 0, 256, b"one".to_vec(), None, None).unwrap();
+        let encoded0 = packet0.encode();
+        let delivered = receiver.process_source_packet(&encoded0).unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0], b"one".to_vec());
+        assert_eq!(delivered[1], b"two".to_vec());
     }
 }

@@ -32,7 +32,7 @@
 //!     // ... implement other callbacks
 //! }
 //!
-//! let mut gfx = GfxClient::new(MyContext { /* ... */ });
+//! let mut gfx = GfxClient::new(MyContext { /* ... */ }, false, false);
 //! gfx.send_caps_advertise()?;
 //!
 //! // Process incoming data

@@ -2,7 +2,7 @@
 //!
 //! This module bridges IronRDP's DVC system with our RDPEGFX implementation.
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use ironrdp_core::AsAny;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
 use ironrdp_gfx::GfxClient;

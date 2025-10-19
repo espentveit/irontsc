@@ -264,13 +264,16 @@ async fn connect(
     let mut drdynvc = ironrdp::dvc::DrdynvcClient::new()
         .with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new())));
 
-    // Add RDPEGFX channel if H.264 feature is enabled
-    #[cfg(feature = "h264")]
+    // Add RDPEGFX channel (falls back to progressive mode when H.264 is absent)
     {
         use crate::gfx::GfxState;
         use crate::gfx_channel::GfxDvcProcessor;
 
-        info!("Initializing RDPEGFX (H.264) support...");
+        if cfg!(feature = "h264") {
+            info!("Initializing RDPEGFX (H.264) support...");
+        } else {
+            info!("Initializing RDPEGFX (progressive-only, H.264 disabled)...");
+        }
 
         // Create a simple event sender for GFX (sends to nowhere during init)
         struct DummyEventSender;
@@ -285,12 +288,12 @@ async fn connect(
         let gfx_processor = GfxDvcProcessor::new(gfx_state);
 
         drdynvc = drdynvc.with_dynamic_channel(gfx_processor);
-        info!("RDPEGFX channel registered with DRDYNVC (H.264 decoder ready)");
-    }
 
-    #[cfg(not(feature = "h264"))]
-    {
-        info!("RDPEGFX support disabled (rebuild with --features h264 to enable)");
+        if cfg!(feature = "h264") {
+            info!("RDPEGFX channel registered with DRDYNVC (H.264 decoder ready)");
+        } else {
+            info!("RDPEGFX channel registered with DRDYNVC (progressive mode only)");
+        }
     }
 
     // Add Video Redirection channels if feature is enabled
