@@ -454,7 +454,9 @@ async fn try_establish_rdpudp(
     client_addr: SocketAddr,
     correlation_id: Option<[u8; 16]>,
 ) {
-    if let Err(err) = establish_rdpudp(destination, client_addr, correlation_id, None).await {
+    // Use reliable mode (false) as default when protocol type not specified
+    if let Err(err) = establish_rdpudp(destination, client_addr, correlation_id, None, false).await
+    {
         debug!("RDP-UDP handshake failed: {err:?}");
     }
 }
@@ -464,6 +466,7 @@ async fn establish_rdpudp(
     client_addr: SocketAddr,
     correlation_id: Option<[u8; 16]>,
     cookie_hash: Option<[u8; 32]>,
+    use_lossy_mode: bool,
 ) -> anyhow::Result<UdpSocket> {
     info!("🔌 Starting UDP handshake for {}", destination.name());
 
@@ -548,8 +551,8 @@ async fn establish_rdpudp(
     );
 
     let syn_packet = SynPacket::new(
-        64,    // receive window size (64 bytes - matching working captures)
-        false, // syn_lossy (false = reliable mode)
+        256,            // receive window size (256 packets is the standard per MS-RDPEUDP spec)
+        use_lossy_mode, // syn_lossy flag from server's requested protocol type
         syn_data,
         Some(CorrelationId::new(correlation_bytes)),
         // Try UDP v3 with authentication to match working packet captures
@@ -1796,6 +1799,8 @@ async fn active_session<T: RdpEventSender>(
                             let dest_clone = destination.clone();
                             let addr_clone = client_addr;
                             let req_id = request_id;
+                            let protocol = request_info.protocol;
+                            let use_lossy = matches!(protocol, MultitransportProtocol::UdpFecLossy);
                             tokio::spawn(async move {
                                 // Wait 2ms to allow TCP ACK to be sent
                                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
@@ -1804,7 +1809,8 @@ async fn active_session<T: RdpEventSender>(
                                     "🚀 Sending UDP SYN for request_id={} with v3 authentication (2ms after TCP ACK)...",
                                     req_id
                                 );
-                                match establish_rdpudp(dest_clone, addr_clone, Some(corr_id), Some(cookie_hash)).await {
+                                info!("   Protocol: {:?}, Lossy mode: {}", protocol, use_lossy);
+                                match establish_rdpudp(dest_clone, addr_clone, Some(corr_id), Some(cookie_hash), use_lossy).await {
                                     Ok(_udp_socket) => {
                                         info!(
                                             "✅ UDP multitransport established successfully for request_id={}!",
