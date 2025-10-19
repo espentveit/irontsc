@@ -623,6 +623,103 @@ mod tests {
     }
 
     #[test]
+    fn test_syn_packet_format() {
+        let config = UdpConfig {
+            mtu: 1232,
+            initial_sequence_number: 0x00000042,
+            receive_window_size: 0x0100,
+            mode: TransportMode::Lossy,
+            protocol_version: UdpProtocolVersion::V2,
+            enable_fec: true,
+            fec_block_size: 8,
+            retransmit_timeout_ms: 300,
+            max_retransmits: 0,
+            keepalive_interval_ms: 5000,
+        };
+
+        let mut conn = UdpConnection::new(config);
+
+        // Set correlation ID
+        let corr_id = CorrelationId::new([
+            0xd2, 0x35, 0xac, 0x43, 0x89, 0x41, 0x42, 0xda, 0xb1, 0x0e, 0xdd, 0x68, 0x87, 0xf7,
+            0xf9, 0xfb,
+        ]);
+        conn.set_correlation_id(corr_id);
+
+        let syn_bytes = conn.create_syn().unwrap();
+
+        println!("\n=== SYN Packet Analysis ===");
+        println!("Total length: {} bytes", syn_bytes.len());
+        println!("Expected minimum: 1132 bytes (as per spec)");
+        println!("Target MTU: 1232 bytes");
+
+        // Header (8 bytes)
+        println!("\nFEC Header (8 bytes):");
+        println!(
+            "  snSourceAck: {:02x} {:02x} {:02x} {:02x} (should be ff ff ff ff)",
+            syn_bytes[0], syn_bytes[1], syn_bytes[2], syn_bytes[3]
+        );
+        println!(
+            "  uReceiveWindowSize: {:02x} {:02x}",
+            syn_bytes[4], syn_bytes[5]
+        );
+        println!("  uFlags: {:02x} {:02x}", syn_bytes[6], syn_bytes[7]);
+
+        // SynData (8 bytes)
+        println!("\nSYNDATA (8 bytes at offset 8):");
+        println!(
+            "  snInitialSequenceNumber: {:02x} {:02x} {:02x} {:02x}",
+            syn_bytes[8], syn_bytes[9], syn_bytes[10], syn_bytes[11]
+        );
+        println!(
+            "  uUpStreamMtu: {:02x} {:02x}",
+            syn_bytes[12], syn_bytes[13]
+        );
+        println!(
+            "  uDownStreamMtu: {:02x} {:02x}",
+            syn_bytes[14], syn_bytes[15]
+        );
+
+        // Correlation ID (32 bytes at offset 16)
+        println!("\nCorrelation ID (32 bytes at offset 16):");
+        println!("  Value (16 bytes): {:02x?}", &syn_bytes[16..32]);
+        println!("  Reserved (16 bytes): {:02x?}", &syn_bytes[32..48]);
+
+        // SynDataEx (4+ bytes at offset 48)
+        println!("\nSYNDATAEX (at offset 48):");
+        println!("  uSynExFlags: {:02x} {:02x}", syn_bytes[48], syn_bytes[49]);
+        println!("  uUdpVer: {:02x} {:02x}", syn_bytes[50], syn_bytes[51]);
+
+        // Verify spec requirements
+        assert_eq!(
+            syn_bytes[0..4],
+            [0xff, 0xff, 0xff, 0xff],
+            "snSourceAck must be -1"
+        );
+        assert_eq!(
+            syn_bytes[8..12],
+            [0x00, 0x00, 0x00, 0x42],
+            "ISN should be 0x42"
+        );
+        assert!(
+            syn_bytes.len() >= 1132,
+            "Packet must be at least 1132 bytes"
+        );
+        assert!(syn_bytes.len() <= 1232, "Packet must not exceed 1232 bytes");
+
+        // Check flags
+        let flags = u16::from_be_bytes([syn_bytes[6], syn_bytes[7]]);
+        assert_ne!(flags & 0x0001, 0, "SYN flag must be set");
+        assert_ne!(
+            flags & 0x0200,
+            0,
+            "SYNLOSSY flag must be set for lossy mode"
+        );
+        assert_ne!(flags & 0x0800, 0, "CORRELATION_ID flag must be set");
+        assert_ne!(flags & 0x1000, 0, "SYNEX flag must be set");
+    }
+
+    #[test]
     fn test_connection_initialization_server() {
         let config = UdpConfig::default();
         let mut server = UdpConnection::new(config.clone());

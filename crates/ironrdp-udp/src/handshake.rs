@@ -200,10 +200,10 @@ impl HandshakePacket {
         header.encode_into(&mut buffer);
         self.syn_data.encode_into(&mut buffer);
         if let Some(ref correlation) = self.correlation_id {
-            correlation.encode_into(&mut buffer); // Now 24 bytes: 16 value + 8 reserved
+            correlation.encode_into(&mut buffer); // Now 32 bytes: 16 value + 16 reserved
         }
         if let Some(ref syn_data_ex) = self.syn_data_ex {
-            syn_data_ex.encode_into(&mut buffer); // Starts immediately after correlation at byte 48
+            syn_data_ex.encode_into(&mut buffer); // Starts immediately after correlation at byte 56
         }
 
         if pad_to_mtu {
