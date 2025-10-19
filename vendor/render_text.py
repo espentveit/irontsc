@@ -28,6 +28,8 @@ NS = {
 
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
+_MARKDOWN_FILES_LOGGED: Set[Path] = set()
+
 
 def resolve_target(base_dir: Path, target: str, spec_root: Path) -> str:
     if not target or ":" in target.split("/", 1)[0]:
@@ -66,6 +68,7 @@ def parse_relationships(rels_path: Path, spec_root: Path) -> Dict[str, Tuple[str
 def parse_notes(
     notes_path: Path,
     relationships: Dict[str, Tuple[str, str]],
+    spec_dir: Path,
     resource_dir: Optional[str],
     resource_collector: Optional[Set[str]],
 ) -> Dict[str, str]:
@@ -83,6 +86,7 @@ def parse_notes(
             paragraph_text = paragraph_to_text(
                 para,
                 relationships,
+                spec_dir,
                 resource_dir,
                 None,
                 resource_collector,
@@ -100,6 +104,7 @@ def local_name(tag: str) -> str:
 def paragraph_to_text(
     paragraph: ET.Element,
     relationships: Dict[str, Tuple[str, str]],
+    spec_dir: Path,
     resource_dir: Optional[str],
     footnote_refs: Optional[OrderedDict[str, None]],
     resource_collector: Optional[Set[str]],
@@ -127,6 +132,7 @@ def paragraph_to_text(
                 placeholder = render_drawing(
                     child,
                     relationships,
+                    spec_dir,
                     resource_dir,
                     resource_collector,
                 )
@@ -136,6 +142,7 @@ def paragraph_to_text(
                 placeholder = render_vml_image(
                     child,
                     relationships,
+                    spec_dir,
                     resource_dir,
                     resource_collector,
                 )
@@ -147,6 +154,7 @@ def paragraph_to_text(
 def render_drawing(
     drawing: ET.Element,
     relationships: Dict[str, Tuple[str, str]],
+    spec_dir: Path,
     resource_dir: Optional[str],
     resource_collector: Optional[Set[str]],
 ) -> Optional[str]:
@@ -163,7 +171,7 @@ def render_drawing(
             if "chart" in rel_type:
                 return format_chart_reference(target, described)
             if register_resource(target, resource_collector):
-                return format_image_reference(target, described, resource_dir)
+                return format_image_reference(target, described, resource_dir, spec_dir)
             return None
 
     chart = drawing.find(".//c:chart", NS)
@@ -173,12 +181,13 @@ def render_drawing(
             target = relationships[chart_id][0]
             return format_chart_reference(target, described)
 
-    return described and format_image_reference("", described, resource_dir)
+    return described and format_image_reference("", described, resource_dir, spec_dir)
 
 
 def render_vml_image(
     pict: ET.Element,
     relationships: Dict[str, Tuple[str, str]],
+    spec_dir: Path,
     resource_dir: Optional[str],
     resource_collector: Optional[Set[str]],
 ) -> Optional[str]:
@@ -190,9 +199,9 @@ def render_vml_image(
     if embed_id and embed_id in relationships:
         target = relationships[embed_id][0]
         if register_resource(target, resource_collector):
-            return format_image_reference(target, title, resource_dir)
+            return format_image_reference(target, title, resource_dir, spec_dir)
         return None
-    return title and format_image_reference("", title, resource_dir)
+    return title and format_image_reference("", title, resource_dir, spec_dir)
 
 
 def register_resource(target: str, collector: Optional[Set[str]]) -> bool:
@@ -204,12 +213,49 @@ def register_resource(target: str, collector: Optional[Set[str]]) -> bool:
     return True
 
 
-def format_image_reference(reference: str, description: Optional[str], resource_dir: Optional[str]) -> str:
+def load_markdown_text(spec_dir: Path, reference: str) -> Optional[str]:
+    if not reference or ":" in reference.split("/", 1)[0]:
+        return None
+
+    spec_root = spec_dir.resolve()
+    candidate = (spec_root / Path(reference)).resolve()
+    try:
+        candidate.relative_to(spec_root)
+    except ValueError:
+        return None
+
+    markdown_path = candidate.with_suffix(candidate.suffix + ".markdown.md")
+    if not markdown_path.exists():
+        return None
+
+    content = markdown_path.read_text(encoding="utf-8").strip()
+    if content and markdown_path not in _MARKDOWN_FILES_LOGGED:
+        print(f"Loaded Markdown from {markdown_path}:", flush=True)
+        print(content, flush=True)
+        _MARKDOWN_FILES_LOGGED.add(markdown_path)
+    return content or None
+
+
+def format_image_reference(
+    reference: str,
+    description: Optional[str],
+    resource_dir: Optional[str],
+    spec_dir: Path,
+) -> str:
     alt_text = description or Path(reference).name or "Image"
+    markdown_text = load_markdown_text(spec_dir, reference)
+
     if not reference:
+        if markdown_text:
+            return markdown_text
         return f"![{alt_text}]()"
+
     filename = Path(reference).name
     rel_path = f"{resource_dir}/{filename}" if resource_dir else reference
+
+    if markdown_text:
+        return f"{markdown_text}\n\n![{alt_text}]({rel_path})"
+
     return f"![{alt_text}]({rel_path})"
 
 
@@ -245,6 +291,7 @@ def is_bullet(paragraph: ET.Element) -> bool:
 def table_to_markdown(
     table: ET.Element,
     relationships: Dict[str, Tuple[str, str]],
+    spec_dir: Path,
     resource_dir: Optional[str],
     footnote_refs: Optional[OrderedDict[str, None]],
     resource_collector: Optional[Set[str]],
@@ -259,6 +306,7 @@ def table_to_markdown(
                 text = paragraph_to_text(
                     para,
                     relationships,
+                    spec_dir,
                     resource_dir,
                     footnote_refs,
                     resource_collector,
@@ -296,6 +344,7 @@ def render_spec(
     footnotes = parse_notes(
         spec_dir / "word" / "footnotes.xml",
         footnote_relationships,
+        spec_dir,
         resource_dir,
         resources_used,
     )
@@ -314,6 +363,7 @@ def render_spec(
             text = paragraph_to_text(
                 child,
                 doc_relationships,
+                spec_dir,
                 resource_dir,
                 footnote_refs,
                 resources_used,
@@ -333,6 +383,7 @@ def render_spec(
                 table_to_markdown(
                     child,
                     doc_relationships,
+                    spec_dir,
                     resource_dir,
                     footnote_refs,
                     resources_used,

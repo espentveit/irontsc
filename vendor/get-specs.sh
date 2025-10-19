@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Where to store things
-ROOT_DIR="rdp-specs"
+ROOT_DIR="rdp-specs-source"
 mkdir -p "$ROOT_DIR"
 
 # Spec name => verified DOCX URL (Published Version)
