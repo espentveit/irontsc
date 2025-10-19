@@ -13,7 +13,7 @@
 //! - `caps`: Capability negotiation
 //!
 //! # Example
-//! ```no_run
+//! ```ignore
 //! use ironrdp_gfx::{GfxClient, GfxContext};
 //!
 //! struct MyContext { /* ... */ }
@@ -24,12 +24,18 @@
 //!         Ok(())
 //!     }
 //!
-//!     fn on_create_surface(&mut self, surface_id: u16, width: u16, height: u16) -> anyhow::Result<()> {
+//!     fn on_create_surface(
+//!         &mut self,
+//!         surface_id: u16,
+//!         width: u16,
+//!         height: u16,
+//!         pixel_format: u8,
+//!     ) -> anyhow::Result<()> {
 //!         // Create rendering surface
 //!         Ok(())
 //!     }
 //!
-//!     // ... implement other callbacks
+//!     // ... implement the remaining required callbacks
 //! }
 //!
 //! let mut gfx = GfxClient::new(MyContext { /* ... */ }, false, false);

@@ -57,6 +57,12 @@ impl CapabilitySet {
         avc420_enabled: bool,
         avc444_enabled: bool,
     ) -> Vec<Self> {
+        use tracing::info;
+        info!(
+            "🔧 Building capability sets: small_cache={}, avc420={}, avc444={}",
+            small_cache, avc420_enabled, avc444_enabled
+        );
+
         let thin_client = false;
         let scaling_supported = false;
 
@@ -81,49 +87,49 @@ impl CapabilitySet {
             flags_81 |= cap_flags::SMALL_CACHE;
         }
         if avc420_enabled {
+            // AVC_DISABLED is only valid for 10.x capability sets; Windows drops the channel
+            // if we advertise it in the 8.1 block, so only set the positive capability here.
             flags_81 |= cap_flags::AVC420_ENABLED;
         }
         caps.push(Self::new(cap_version::V81, flags_81));
 
-        // RDP 10.x capability sets. We only advertise them when the server can
-        // actually make use of AVC (same condition FreeRDP applies).
-        if !avc420_enabled || avc444_enabled {
-            let mut caps10_flags = 0u32;
-            if small_cache {
-                caps10_flags |= cap_flags::SMALL_CACHE;
-            }
-            if !avc444_enabled {
-                caps10_flags |= cap_flags::AVC_DISABLED;
-            }
-            if thin_client && (caps10_flags & cap_flags::AVC_DISABLED == 0) {
-                caps10_flags |= cap_flags::AVC_THINCLIENT;
-            }
-
-            caps.push(Self::new(cap_version::V10, caps10_flags));
-
-            // Version 10.1 requires a 16-byte payload. FreeRDP fills the extra
-            // bytes with zeros, so we do the same.
-            caps.push(Self::with_extra(cap_version::V101, 0, vec![0; 12]));
-
-            caps.push(Self::new(cap_version::V102, caps10_flags));
-
-            let flags_103 = caps10_flags & !cap_flags::SMALL_CACHE;
-            caps.push(Self::new(cap_version::V103, flags_103));
-
-            caps.push(Self::new(cap_version::V104, caps10_flags));
-
-            if scaling_supported {
-                caps.push(Self::new(cap_version::V105, caps10_flags));
-                caps.push(Self::new(cap_version::V106, caps10_flags));
-                caps.push(Self::new(cap_version::V106_ERR, caps10_flags));
-            }
-
-            let mut flags_107 = caps10_flags;
-            if !scaling_supported {
-                flags_107 |= cap_flags::SCALEDMAP_DISABLE;
-            }
-            caps.push(Self::new(cap_version::V107, flags_107));
+        // RDP 10.x capability sets mirror the behavior of Windows and FreeRDP clients.
+        let mut caps10_flags = 0u32;
+        if small_cache {
+            caps10_flags |= cap_flags::SMALL_CACHE;
         }
+        if !avc444_enabled {
+            caps10_flags |= cap_flags::AVC_DISABLED;
+        }
+        if thin_client && (caps10_flags & cap_flags::AVC_DISABLED == 0) {
+            caps10_flags |= cap_flags::AVC_THINCLIENT;
+        }
+
+        caps.push(Self::new(cap_version::V10, caps10_flags));
+
+        // Version 10.1 requires a 16-byte payload (length 0x10) with 12 bytes of zeros.
+        caps.push(Self::with_extra(cap_version::V101, 0, vec![0; 12]));
+
+        caps.push(Self::new(cap_version::V102, caps10_flags));
+
+        let flags_103 = caps10_flags & !cap_flags::SMALL_CACHE;
+        caps.push(Self::new(cap_version::V103, flags_103));
+
+        caps.push(Self::new(cap_version::V104, caps10_flags));
+
+        if scaling_supported {
+            caps.push(Self::new(cap_version::V105, caps10_flags));
+            caps.push(Self::new(cap_version::V106, caps10_flags));
+            caps.push(Self::new(cap_version::V106_ERR, caps10_flags));
+        }
+
+        let mut flags_107 = caps10_flags;
+        if !scaling_supported {
+            flags_107 |= cap_flags::SCALEDMAP_DISABLE;
+        }
+        caps.push(Self::new(cap_version::V107, flags_107));
+
+        info!("✅ Advertising {} capability sets", caps.len());
 
         caps
     }
@@ -187,5 +193,20 @@ pub fn version_string(version: u32) -> String {
         cap_version::V106 | cap_version::V106_ERR => "10.6".to_string(),
         cap_version::V107 => "10.7".to_string(),
         _ => format!("Unknown(0x{:08X})", version),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rdp81_caps_do_not_disable_avc() {
+        let caps = CapabilitySet::default_sets(false, false, false);
+        let v81 = caps
+            .iter()
+            .find(|cap| cap.version == cap_version::V81)
+            .expect("V8.1 capability set missing");
+        assert_eq!(v81.flags & cap_flags::AVC_DISABLED, 0);
     }
 }
