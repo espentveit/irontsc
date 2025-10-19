@@ -144,11 +144,84 @@ The RDP-UDP2 transport extension has the following goals:
 - Share network resources fairly with other competing network flows.
 To achieve these goals, the protocol shares some of the essential elements from both the RDP-UDP and the RDP-TCP protocols, but with improved flow control and loss-delay management. The RDP-UDP2 transport is composed of a terminal client and terminal server which are treated as peers and operates with the same protocol throughout the life time of the entire session. The connection between the two endpoints is bidirectional; data and acknowledgments can be transmitted in both directions independently and simultaneously. Logically, each single RDP-UDP2 transport connection can be viewed as two unidirectional connections. Both of these unidirectional connections are symmetrical and each endpoint has both a Sender and a Receiver entity. In the following figure, the Sender from the Endpoint A and the Receiver from the Endpoint B form one connection, whereas the Sender from the Endpoint B and the Receiver from the Endpoint A form the other connection. This is similar to the RDP-UDP protocol.
 In this specification, the initiating endpoint A is referred to as the terminal client (2) and endpoint B is referred to as the terminal server. The maximum transmission unit (MTU) size in RDP-UDP2 transport layer is set to 1232 bytes. Also, throughout this document unless specified explicitly, the terminology Sender and Receiver are used generally to refer to the sending entity and receiving entity of a logical connection in the context of the following figure.
+# Communication Diagram: Endpoint A and Endpoint B
+
+This diagram illustrates a communication model between two endpoints, Endpoint A and Endpoint B, showing the flow of data and acknowledgments between them.
+
+## Endpoints
+
+The diagram contains two main logical groupings:
+
+- **Endpoint A**: Contains a Sender and a Receiver.
+- **Endpoint B**: Contains a Sender and a Receiver.
+
+Each endpoint is represented as a rounded rectangle, indicating a distinct logical unit.
+
+## Communication Channels
+
+There are two distinct communication paths shown, each with a data flow and an acknowledgment flow.
+
+### Path 1: Endpoint A Sender ↔ Endpoint B Receiver
+
+- **Data Flow**: Solid arrow from Endpoint A's Sender to Endpoint B's Receiver, labeled "Data".
+- **Acknowledgment Flow**: Dashed arrow from Endpoint B's Receiver back to Endpoint A's Sender, labeled "Acknowledgments".
+
+### Path 2: Endpoint A Receiver ↔ Endpoint B Sender
+
+- **Data Flow**: Solid arrow from Endpoint A's Receiver to Endpoint B's Sender, labeled "Data".
+- **Acknowledgment Flow**: Dashed arrow from Endpoint B's Sender back to Endpoint A's Receiver, labeled "Acknowledgments".
+
+## Summary Table
+
+| Component       | Endpoint A | Endpoint B |
+|-----------------|------------|------------|
+| Sender          | Present    | Present    |
+| Receiver        | Present    | Present    |
+| Data Direction  | → (to B)   | ← (from A) |
+| Acknowledgment Direction | ← (from B) | → (to A) |
+
+This structure suggests a bidirectional communication model where each endpoint can act as both a sender and a receiver, and acknowledgments are sent back along the same logical path as the data.
+
 ![MS-RDPEUDP2-240423_image1.png](images/MS-RDPEUDP2-240423_image1.png)
 Figure 1: The RDP-UDP2 bidirectional endpoints connection
 Unlike the RDP-UDP protocol however, the RDP-UDP2 transport only supports "Reliable" UDP mode. In this mode, the endpoint retransmits datagrams that have been lost by the underlying network fabric. Because RDP-UDP2 transport does not support "Best-Efforts" mode or RDP-UDP-L, it does not include a forward error correction (FEC) mechanism.
 ### RDP-UDP to RDP-UDP2 Transition
 The Remote Desktop UDP Transport Extension v2 protocol has two distinct phases of operation. The initial phase, UDP Connection Initialization, occurs when a UDP connection is initialized between the terminal client (2) and the terminal server. Data pertaining to the connection is exchanged and the UDP connection is setup as described in [MS-RDPEUDP]. After this phase is completed successfully and an RDPUDP_PROTOCOL_VERSION is negotiated, this value is used to determine which version of the UDP transport extension will be used for the Data Transfer phase. If the negotiated RDPUDP_PROTOCOL_VERSION is RDPUDP_PROTOCOL_VERSION_2 or earlier, the protocol enters the RDP-UDP Data Transfer phase, where Coded Packets are exchanged according to the protocol described in the [MS-RDPEUDP] document. If the negotiated RDPUDP_PROTOCOL_VERSION value is greater than RDPUDP_PROTOCOL_VERSION_2, the protocol enters the v2 Data Transfer phase, where Coded Packets are exchanged according to the protocol described in the current document.
+# RDP UDP Connection Flowchart
+
+This flowchart illustrates the sequence of phases in an RDP (Remote Desktop Protocol) UDP connection, detailing the initialization and data transfer stages based on protocol version negotiation.
+
+## Flow Overview
+
+The process begins with the establishment of a UDP connection and proceeds through initialization, protocol version negotiation, and then into one of two data transfer phases.
+
+## Key Phases and Decision Points
+
+### 1. Initial Connection
+- **Start**: `UDP connection established`
+
+### 2. Connection Initialization
+- **Phase**: `Connection initialization phase (MS-RDPEUDP)`
+  - This phase follows the initial UDP connection setup.
+
+### 3. Protocol Version Negotiation
+- **Decision Point**: `Negotiated RDPUDP_PROTOCOL_VERSION > RDPUDP_PROTOCOL_VERSION_2`
+  - This decision determines which data transfer phase will be used.
+
+#### Branches Based on Negotiation Result
+
+| Condition | Outcome | Next Phase |
+|-----------|---------|------------|
+| **Yes** (Negotiated version > RDPUDP_PROTOCOL_VERSION_2) | Protocol version is greater than version 2 | `RDP UDP Data Transfer Phase v2 (MS-RDPEUDP2)` |
+| **No** (Negotiated version ≤ RDPUDP_PROTOCOL_VERSION_2) | Protocol version is not greater than version 2 | `RDP UDP Data Transfer Phase (MS-RDPEUDP)` |
+
+## Summary of Data Transfer Phases
+
+- **RDP UDP Data Transfer Phase v2 (MS-RDPEUDP2)**: Used when the negotiated protocol version exceeds version 2.
+- **RDP UDP Data Transfer Phase (MS-RDPEUDP)**: Used when the negotiated protocol version is version 2 or lower.
+
+This flowchart shows a clear, conditional progression from connection establishment to data transfer, with the protocol version acting as the key decision factor.
+
 ![MS-RDPEUDP2-240423_image2.png](images/MS-RDPEUDP2-240423_image2.png)
 Figure 2: Relationship between RDP-UDP to RDP-UDP2
 ### RDP-UDP2 Data Transfer Phase
@@ -363,6 +436,53 @@ An RDP-UDP2 stack can be implemented using these key components:
 - A Receiver Window buffer for managing packet information for a list of active packets that are not sequentially received.
 - A Loss Detection component for detecting packet loss events.
 - A Reliability Controller responsible for resending lost packets to achieve the transport reliability.
+# RDP-UDP2 Implementation Architecture
+
+This diagram illustrates the layered structure of the RDP-UDP2 implementation, showing how higher layers of the RDP stack interact with the reliability mechanisms and the underlying UDP transport.
+
+## Overview
+
+The architecture is organized into a hierarchical stack, with the RDP-UDP2 implementation at the core, interfacing with higher RDP layers above and the UDP transport layer below.
+
+## Key Components
+
+### RDP-UDP2 Implementation (Main Module)
+This is the central component that encapsulates the reliability mechanisms.
+
+- **Reliability Controller**: Manages the overall reliability protocol.
+- **Sender Window Buffer**: Buffers outgoing data for transmission.
+- **Receiver Window Buffer**: Buffers incoming data for processing.
+- **Loss Detection**: Monitors for missing or corrupted packets.
+
+### Higher Layers of RDP Stack
+- Located above the RDP-UDP2 implementation.
+- Interact with it via a downward arrow, indicating data flow from higher layers into the implementation.
+
+### UDP Transport
+- Located at the bottom of the stack.
+- Serves as the underlying transport layer for RDP-UDP2.
+- Communicates with the RDP-UDP2 implementation via a downward arrow.
+
+## Data Flow and Relationships
+
+The following arrows indicate the direction of data or control flow:
+
+- **From Higher Layers to RDP-UDP2**: A downward arrow shows that data from higher RDP layers is passed down to the RDP-UDP2 implementation.
+- **From RDP-UDP2 to UDP Transport**: A downward arrow indicates that the RDP-UDP2 implementation sends data to the UDP transport for transmission.
+- **Within RDP-UDP2 Implementation**: 
+  - Arrows connect the **Sender Window Buffer** and **Receiver Window Buffer** to the **UDP transport**.
+  - This suggests that these buffers interact with the transport layer for sending and receiving data.
+
+## Summary Table
+
+| Component                 | Description                                      | Direction of Interaction                     |
+|--------------------------|--------------------------------------------------|----------------------------------------------|
+| Higher Layers of RDP Stack | Application and protocol layers above RDP-UDP2   | Downward to RDP-UDP2 implementation          |
+| RDP-UDP2 Implementation   | Core module containing reliability mechanisms    | Interfaces with higher layers and UDP transport |
+| Reliability Controller    | Manages reliability protocol                     | Internal to RDP-UDP2 implementation          |
+| Sender Window Buffer      | Buffers outgoing data                            | Interacts with UDP transport                 |
+| Receiver Window Buffer    |
+
 ![Conceptual composition of an RDP-UDP2 implementation stack](images/MS-RDPEUDP2-240423_image3.png)
 Figure 3: Conceptual composition of an RDP-UDP2 implementation stack
 ##### Sender Window Buffer

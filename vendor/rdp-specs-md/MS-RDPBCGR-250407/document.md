@@ -839,6 +839,62 @@ The following subsections present overviews of the protocol operation as well as
 ### Message Flows
 #### Connection Sequence
 The goal of the RDP Connection Sequence is to exchange client and server settings and to specify common settings to use for the duration of the connection so that input, graphics, and other data can be exchanged and processed between client and server. The RDP Connection Sequence is described in following figure. All of the message exchanges in this diagram are strictly sequential, except where noted in the text that follows.
+# RDP Connection Sequence Diagram
+
+This sequence diagram illustrates the communication protocol between a Client and a Server during a Remote Desktop Protocol (RDP) connection. The process is divided into several phases, each marked with a bracketed label on the right side.
+
+## Participants
+
+- **Client**: Initiates the connection and exchanges information with the server.
+- **Server**: Responds to the client's requests and manages the connection setup.
+
+## Connection Phases
+
+### 1. Connection Initiation
+- **Client → Server**: X.224 Connection Request PDU
+- **Server → Client**: X.224 Connection Confirm PDU
+
+### 2. Basic Settings Exchange
+- **Client → Server**: MCS Connect Initial PDU with GCC Conference Create Request
+- **Server → Client**: MCS Connect Response PDU with GCC Conference Create Response
+
+### 3. Channel Connection
+- **Client → Server**: MCS Erect Domain Request PDU
+- **Client → Server**: MCS Attach User Request PDU
+- **Server → Client**: MCS Attach User Confirm PDU
+- **Client → Server**: MCS Channel Join Request PDU(s)
+- **Server → Client**: MCS Channel Join Confirm PDU(s)
+
+### 4. RDP Security Commencement
+- **Client → Server**: Security Exchange PDU
+
+### 5. Secure Settings Exchange
+- **Client → Server**: Client Info PDU
+
+### 6. Optional Connect-Time Auto-Detection
+- **Client → Server**: Auto-Detect Request PDU(s)
+- **Server → Client**: Auto-Detect Response PDU(s)
+
+### 7. Licensing
+- **Server → Client**: License Error PDU – Valid Client
+
+### 8. Optional Multitransport Bootstrapping
+- **Client → Server**: Initiate Multitransport Request PDU
+- **Server → Client**: Initiate Multitransport Response PDU
+
+### 9. Capabilities Exchange
+- **Server → Client**: Demand Active PDU
+- **Server → Client**: Monitor Layout PDU
+- **Client → Server**: Confirm Active PDU
+
+### 10. Connection Finalization
+- **Client → Server**: Synchronize PDU
+- **Client → Server**: Control PDU - Cooperate
+- **Client → Server**: Control PDU – Request Control
+- **Client → Server**: Persistent Key List PDU(s)
+- **Client → Server**: Font List PDU
+- **Server → Client**: Synchronize P
+
 ![Remote Desktop Protocol (RDP) connection sequence](images/MS-RDPBCGR-250407_image1.png)
 Figure 1: Remote Desktop Protocol (RDP) connection sequence
 The connection sequence can be broken up into ten distinct phases:
@@ -846,8 +902,88 @@ The connection sequence can be broken up into ten distinct phases:
 From this point, all subsequent data sent between client and server is wrapped in an X.224 Data Protocol Data Unit (PDU) (1).
 - Basic Settings Exchange: Basic settings are exchanged between the client and server by using the MCS Connect Initial PDU (section 2.2.1.3) and MCS Connect Response PDU (section 2.2.1.4). The Connect Initial PDU contains a Generic Conference Control (GCC) Conference Create Request, while the Connect Response PDU contains a GCC Conference Create Response.
 These two GCC packets contain concatenated blocks of settings data (such as core data, security data, and network data) which are read by client and server.
+# GCC Conference Create Request Structure
+
+This diagram illustrates the structure of a GCC Conference Create Request, showing its hierarchical components and data groupings.
+
+## Overall Request Structure
+
+The entire request is labeled as **GCC Conference Create Request** and is composed of several distinct sections:
+
+- **Connect Initial Fields**: A group of dotted lines at the top, indicating initial connection fields.
+- **Conference Create Request Fields**: A group of dotted lines within the main request body, representing the core fields for creating a conference.
+- **Connect Initial User Data**: A large section encompassing the user data blocks, indicating initial user-related information.
+
+## Conference Create Request Fields
+
+This section contains the core fields required to create a conference. It is represented by dotted lines and is grouped under the label "Conference Create Request Fields".
+
+## Conference Create Request User Data
+
+This is a nested section within the main request, containing multiple client data blocks:
+
+- **Client Data Block 1**
+- **Client Data Block 2**
+- **...** (ellipsis indicating additional blocks)
+- **Client Data Block N**
+
+These blocks are grouped under the label "Conference Create Request User Data", suggesting they represent user-specific data blocks that can be multiple in number.
+
+## Relationships and Groupings
+
+- The **Connect Initial Fields** are positioned above the main request body.
+- The **Conference Create Request Fields** are located within the main request body, above the user data blocks.
+- The **Connect Initial User Data** encompasses all the client data blocks, indicating that these blocks constitute the user data portion of the request.
+
+The diagram uses curly braces to visually group related components, clearly delineating the structure of the GCC Conference Create Request.
+
 ![MCS Connect Initial PDU](images/MS-RDPBCGR-250407_image2.png)
 Figure 2: MCS Connect Initial PDU
+# GCC Conference Create Response Structure
+
+This diagram illustrates the hierarchical structure of a "GCC Conference Create Response" message, which is part of a larger "Connect Response" message.
+
+## Overall Structure
+
+The entire message is labeled as **GCC Conference Create Response** and is contained within the broader **Connect Response** message.
+
+## Components of the GCC Conference Create Response
+
+The GCC Conference Create Response contains two main sections:
+
+### 1. Conference Create Response Fields
+- A set of fields that constitute the core response data.
+- Represented by dotted lines and grouped with a brace.
+- These fields are part of the inner structure of the GCC Conference Create Response.
+
+### 2. Conference Create Response User Data
+- This section contains a sequence of server data blocks.
+- It is enclosed within a gray box and labeled as "Conference Create Response User Data".
+- The user data consists of multiple server data blocks, indicated as:
+  - Server Data Block 1
+  - Server Data Block 2
+  - ...
+  - Server Data Block N
+
+## Relationship to Connect Response
+
+The GCC Conference Create Response is nested within the larger Connect Response structure. It contributes to two parts of the Connect Response:
+
+- **Connect Response Fields**: These are the top-level fields of the Connect Response, shown above the GCC Conference Create Response.
+- **Connect Response User Data**: This section encompasses the entire GCC Conference Create Response, including both its fields and user data.
+
+## Summary Table
+
+| Component                        | Description                                                                 |
+|---------------------------------|-----------------------------------------------------------------------------|
+| GCC Conference Create Response  | Main container for the conference creation response.                        |
+| Conference Create Response Fields | Core fields within the GCC Conference Create Response.                     |
+| Conference Create Response User Data | Sequence of Server Data Blocks (1 to N) contained within the response.    |
+| Connect Response Fields         | Top-level fields of the overall Connect Response message.                  |
+| Connect Response User Data      | Contains the entire GCC Conference Create Response (fields + user data).   |
+
+This structure suggests a layered protocol response where a specific operation (Conference Create) is embedded within a general connection response framework.
+
 ![MCS Connect Response PDU](images/MS-RDPBCGR-250407_image3.png)
 Figure 3: MCS Connect Response PDU
 - Channel Connection: The client sends an MCS Erect Domain Request PDU (section 2.2.1.5), followed by an MCS Attach User Request PDU (section 2.2.1.6) to attach the primary user identity to the MCS domain. The server responds with an MCS Attach User Confirm PDU (section 2.2.1.7) containing the User Channel ID. The client then proceeds to join the user channel, the input/output (I/O) channel, and all of the static virtual channels (the I/O and static virtual channel IDs are obtained from the data embedded in the GCC packets) by using multiple MCS Channel Join Request PDUs (section 2.2.1.8). The server confirms each channel with an MCS Channel Join Confirm PDU (section 2.2.1.9). (RDP 4.0, 5.0, 5.1, 5.2, 6.0, 6.1, 7.0, 7.1, 8.0, 10.2, 10.3, 10.4, and 10.5 clients send a Channel Join Request to the server only after the Channel Join Confirm for a previously sent request has been received. RDP 8.1, 10.0, and 10.1 clients send all of the Channel Join Requests to the server in a single batch to minimize the overall connection sequence time.)
@@ -929,6 +1065,48 @@ Other basic output which a server sends to a connected client includes the Play 
 A client connected to a server and displaying graphics data might need to request that the server resend the graphics data for a collection of rectangular regions of the session screen area, or stop sending graphics data for a period of time (perhaps when the client is minimized). These two tasks are accomplished by having the client send the Refresh Rect PDU and Suppress Output PDUs, respectively.
 ### Server Redirection
 A client connection can be redirected to a specific session on another server by using the Server Redirection PDU (section 2.2.13). This enables basic load-balancing scenarios, as shown in the following figure.
+# System Architecture Diagram
+
+This diagram illustrates a client-server architecture with a connection broker, showing the flow of interactions between components.
+
+## Components
+
+The diagram contains the following entities, each represented by a circle:
+
+- **Client C**: The client application or device initiating requests.
+- **User A**: The end user interacting with the Client C.
+- **Server S1**: One of the backend servers in the system.
+- **Server S2**: Another backend server, likely acting as a primary server for Client C.
+- **Connection Broker**: A central component that manages and routes connections.
+
+## Relationships and Data Flow
+
+The interactions between components are shown with arrows, some labeled with numbers indicating sequence or type of communication:
+
+### Direct Client Interactions
+
+- **User A ↔ Client C**: A bidirectional relationship, indicating that User A interacts with Client C.
+- **Client C → Server S2**: Labeled "1", indicating the client initiates a connection or request to Server S2.
+- **Server S2 → Client C**: Labeled "3", indicating a response or communication back to the client from Server S2.
+
+### Broker and Server Interactions
+
+- **Server S2 ↔ Connection Broker**: Labeled "2", indicating bidirectional communication between Server S2 and the Connection Broker.
+- **Server S1 → Connection Broker**: A dashed arrow pointing from Server S1 to the Connection Broker, suggesting a less direct or possibly asynchronous relationship (e.g., a notification or status update).
+- **Client C → Server S1**: Labeled "4", indicating the client can also communicate directly with Server S1.
+
+## Summary Table
+
+| Component         | Description                          | Relationships                                |
+|-------------------|--------------------------------------|----------------------------------------------|
+| Client C          | Client application                   | ↔ User A; → Server S2 (1); ← Server S2 (3); → Server S1 (4) |
+| User A            | End user                             | ↔ Client C                                   |
+| Server S1         | Backend server                       | ← Client C (4); → Connection Broker (dashed) |
+| Server S2         | Backend server                       | ← Client C (1); → Client C (3); ↔ Connection Broker (2) |
+| Connection Broker | Central connection management entity | ↔ Server S2 (2); ← Server S1 (dashed)        |
+
+This architecture suggests a distributed system where the client can communicate with multiple servers, and a connection broker may be used to manage or route connections, particularly between Server S2
+
 ![Basic server redirection](images/MS-RDPBCGR-250407_image4.png)
 Figure 4: Basic server redirection
 Assume that User A has an existing session on Server S1 (Session #3). Both Server S1 and Server S2 are able to communicate with a Connection Broker.
@@ -1026,6 +1204,51 @@ This protocol is applicable in scenarios where interactions with a session or ap
 In scenarios in which more specialized communication between client and server components is needed, Virtual Channels (section 1.3.3) provide an extensible transport mechanism. Examples of more specialized communication include redirection of client-side devices (for example, printers, drives, smart card readers, or Plug and Play devices) and synchronization of the local and remote clipboards.
 ## Versioning and Capability Negotiation
 Capability negotiation for RDP is essentially the same as for T.128. The server advertises its capabilities in a Demand Active PDU sent to the client, and the client advertises its capabilities in the follow-up Confirm Active PDU (see the Capability Exchange phase in section 1.3.1.1). Capability sets are packaged in a combined capability set structure. This structure contains a count of the number of capability sets, followed by the contents of the individual capability sets.
+# Diagram Description: Capability Sets
+
+This diagram illustrates a sequence of capability sets, with a total count specified.
+
+## Structure
+
+The diagram consists of a single horizontal row of rectangular boxes, all contained within a larger grey boundary box.
+
+## Components
+
+The following boxes are arranged from left to right:
+
+- **Number of capability sets which follow = N**
+  - This box is positioned at the far left and indicates the total count of subsequent capability sets.
+
+- **Capability Set 1**
+  - The first capability set in the sequence.
+
+- **Capability Set 2**
+  - The second capability set in the sequence.
+
+- **...**
+  - An ellipsis indicating that the sequence continues.
+
+- **Capability Set N**
+  - The final capability set in the sequence, corresponding to the count specified in the first box.
+
+## Relationships
+
+- The diagram shows a linear, ordered sequence of capability sets.
+- The label "Number of capability sets which follow = N" establishes that there are N capability sets in total, starting from Capability Set 1 up to Capability Set N.
+- The ellipsis (...) signifies that the sequence includes intermediate capability sets not explicitly labeled (i.e., Capability Set 3, Capability Set 4, ..., Capability Set N-1).
+
+## Summary Table
+
+| Position        | Label                      | Description                               |
+|-----------------|----------------------------|-------------------------------------------|
+| Leftmost        | Number of capability sets which follow = N | Specifies the total count of capability sets (N) |
+| 1st             | Capability Set 1           | First capability set in the sequence      |
+| 2nd             | Capability Set 2           | Second capability set in the sequence     |
+| ...             | ...                        | Placeholder for intermediate sets         |
+| Last            | Capability Set N           | Nth and final capability set in the sequence |
+
+This structure is commonly used to represent a set of related capabilities or features that are grouped and numbered sequentially.
+
 ![Combined Capability Set structure](images/MS-RDPBCGR-250407_image5.png)
 Figure 5: Combined Capability Set structure
 Information exchanged in the capability sets includes data such as supported PDUs and drawing orders, desktop dimensions, and allowed color depths, input device support, cache structures and feature support. The client and server do not violate any peer capabilities when sending data on the wire. This ensures that all RDP traffic on the wire is consistent with expectations and can be processed by each party.
@@ -6126,6 +6349,50 @@ The constructs that follow are used throughout the flowchart.
 - HistoryOffset: The current offset into the history buffer as described in section 3.1.8.1.
 - HistoryPtr: A pointer to the current byte in the history buffer which is being encoded.
 - OutputBuffer: The output buffer that will contain the encoded bytes.
+# Data Compression Algorithm Flowchart
+
+This flowchart outlines a data compression algorithm that processes source data (`SrcData`) by searching for matches in a history buffer and encoding either matches (as copy-tuples) or literals. The algorithm manages flags and output buffers to efficiently compress data.
+
+## Algorithm Overview
+
+The algorithm begins by initializing flags and then iteratively processes the source data by:
+1. Attempting to fit the source data into a history buffer.
+2. Searching for matches in the history buffer.
+3. Encoding matches as copy-tuples or literals.
+4. Managing output buffer space and flushing when necessary.
+5. Repeating until all source data is processed.
+
+## Key Components
+
+- **Start/End Points**: `Start Compress Data` and `Finished Compress Data`.
+- **Flags**: A variable that accumulates compression flags (`PACKET_COMPR_TYPE`, `PACKET_AT_FRONT`, `PACKET_FLUSHED`).
+- **History Buffer**: A buffer that stores previously processed data for match searching.
+- **Output Buffer**: A buffer that accumulates encoded data before sending.
+
+## Flowchart Structure
+
+### Initialization
+- **Start Compress Data**
+  - Set `Flags = PACKET_COMPR_TYPE`
+  - Check if `SrcData fits into HistoryBuffer?`
+    - **N (No)**: Set `HistoryOffset = 0` and add `PACKET_AT_FRONT` to `Flags`.
+    - **Y (Yes)**: Copy `SrcData` to `HistoryBuffer` at `HistoryOffset`, advance `HistoryOffset` by size of `SrcData`.
+
+### Main Compression Loop
+
+1. **Check History Pointer**
+   - Check if `HistoryPtr < HistoryOffset?`
+     - **N (No)**: Advance `HistoryPtr` by size of match and continue.
+     - **Y (Yes)**: Search for a match of at least 3 bytes from the start of `HistoryBuffer` to `(HistoryPtr - 1)` for data immediately following `HistoryPtr`.
+
+2. **Match Found?**
+   - Check if `Match found in HistoryBuffer?`
+     - **Y (Yes)**: Create an encoded copy-tuple describing the match.
+       - Check if `Encoded copy-tuple fits into OutputBuffer?`
+         - **Y (Yes)**: Add encoded copy-tuple to `OutputBuffer`.
+         - **N (No)**: Add `PACKET_FLUSHED` to `Flags`, send `SrcData`, and loop back.
+     - **N (No)**
+
 ![Operation of the bulk compressor](images/MS-RDPBCGR-250407_image6.png)
 Figure 6: Operation of the bulk compressor
 ##### Data Compression Example
@@ -7572,6 +7839,51 @@ Valid fragment sequences can be summarized as:
 Any deviation from the set of valid fragment sequences SHOULD trigger a disconnect.
 As fragments are received from the server, the client SHOULD copy the contents into a reassembly buffer. When the FASTPATH_FRAGMENT_LAST fragment has been received, the reassembly buffer will contain an update that SHOULD be processed. The type of the update is determined by the updateCode subfield in the updateHeader field (all updates MUST have the same updateCode and compression subfield values).
 An overview of the reassembly process is presented in the figure titled "Reassembly of a fragmented update".
+# Multifragment Reassembly Buffer Diagram
+
+This diagram illustrates the process of reassembling fragmented data into a single buffer, showing three sequential Fast-Path Updates that contribute to the final buffer.
+
+## Overall Structure
+
+- **Multifragment Reassembly Buffer**: A large buffer that accumulates data from multiple fragments.
+  - Total size: **46,650 bytes**
+  - Divided into three distinct sections, each corresponding to a Fast-Path Update.
+
+## Fast-Path Updates
+
+Three Fast-Path Updates are shown, each adding a portion of the data to the buffer:
+
+1. **First Fragment Update (Position 1)**
+   - **Label**: "Fast-Path Update containing FIRST fragment"
+   - **Size**: 15,492 bytes
+   - **Contents**: 
+     - Header
+     - Update Data
+
+2. **Next Fragment Update (Position 2)**
+   - **Label**: "Fast-Path Update containing NEXT fragment"
+   - **Size**: 15,492 bytes
+   - **Contents**: 
+     - Header
+     - Update Data
+
+3. **Last Fragment Update (Position 3)**
+   - **Label**: "Fast-Path Update containing LAST fragment"
+   - **Size**: 9,180 bytes
+   - **Contents**: 
+     - Header
+     - Update Data
+
+## Buffer Composition
+
+The final Multifragment Reassembly Buffer is composed of the data from the three Fast-Path Updates, arranged sequentially:
+
+- **Section 1**: Data from the FIRST fragment (15,492 bytes)
+- **Section 2**: Data from the NEXT fragment (15,492 bytes)
+- **Section 3**: Data from the LAST fragment (9,180 bytes)
+
+The diagram visually represents the buffer as a single continuous block, with the three updates contributing to its total size of 46,650 bytes. Each update is shown with its own header and update data portion, indicating a structured format for each fragment.
+
 ![Reassembly of a fragmented update](images/MS-RDPBCGR-250407_image7.png)
 Figure 7: Reassembly of a fragmented update
 ##### Sound
@@ -12330,6 +12642,41 @@ Standard RDP Security (section 5.3) supports four levels of encryption: Low, Cli
 - FIPS: All data sent between the client and server is protected using Federal Information Processing Standard 140-1 validated encryption methods.
 ### Negotiating the Cryptographic Configuration
 Clients advertise their cryptographic support (for use with Standard RDP Security mechanisms, as described in sections 5.3.3 to 5.3.8) in the Client Security Data (section 2.2.1.3.3), sent to the server as part of the Basic Settings Exchange phase of the RDP Connection Sequence (section 1.3.1.1). Upon receiving the client data the server will determine the cryptographic configuration to use for the session based on its configured Encryption Level and then send this selection to the client in the Server Security Data (section 2.2.1.4.3), as part of the Basic Settings Exchange phase. The client will use this information to configure its cryptographic modules.
+# Sequence Diagram: Client-Server Security Negotiation
+
+This diagram illustrates the exchange of security data between a Client and a Server during an initial handshake or negotiation phase, specifically focusing on encryption method selection.
+
+## Diagram Structure
+
+The diagram is a sequence diagram with two participants:
+
+- **Client** (on the left)
+- **Server** (on the right)
+
+Each participant has a vertical dashed line representing their timeline. Horizontal arrows indicate messages exchanged between them.
+
+## Message Flow
+
+The sequence of messages is as follows:
+
+1.  **Client → Server**: Client Security Data: Supported Encryption Methods
+    - The Client sends a message to the Server listing the encryption methods it supports.
+    - This is an outbound message from the Client to the Server.
+
+2.  **Server → Client**: Server Security Data: Selected Encryption Method and Encryption Level
+    - The Server responds by sending a message back to the Client.
+    - This message contains the encryption method and level that the Server has selected from the Client's list.
+    - This is an outbound message from the Server to the Client.
+
+## Summary Table
+
+| Message Direction | Sender     | Receiver | Message Content                                   |
+|-------------------|------------|----------|---------------------------------------------------|
+| Client → Server   | Client     | Server   | Client Security Data: Supported Encryption Methods |
+| Server → Client   | Server     | Client   | Server Security Data: Selected Encryption Method and Encryption Level |
+
+This exchange is a fundamental part of establishing a secure communication channel, ensuring both parties agree on the encryption parameters before any encrypted data is transmitted.
+
 ![Determining the cryptographic configuration for a session](images/MS-RDPBCGR-250407_image8.png)
 Figure 8: Determining the cryptographic configuration for a session
 The Encryption Method and Encryption Level (section 5.3.1) are closely related. If the Encryption Level is zero, then the Encryption Method is zero (the converse is also true). This means that if no encryption is being used for the session (an Encryption Level of zero), there is no Encryption Method being applied to the data. If the Encryption Level is greater than zero (encryption is in force for at least client-to-server traffic) then the Encryption Method is greater than zero (the converse is also true). This means that if encryption is in force for the session, then an Encryption Method is defined which specifies how to encrypt the data. Furthermore, if the Encryption Level is set to FIPS, then the Encryption Method selects only FIPS-compatible methods.
@@ -12449,6 +12796,39 @@ Servers send the X.509 Certificate Chain to clients in the Server Security Data 
 The client and server both generate a 32-byte random value using a cryptographically-safe pseudorandom number generator.
 The server sends the random value that it generated (along with its public key embedded in a certificate) to the client in the Server Security Data (section 2.2.1.4.3) during the Basic Settings Exchange phase of the RDP Connection Sequence (section 1.3.1.1).
 If RDP Standard Security mechanisms (section 5.3) are being used, the client sends its random value to the server (encrypted with the server's public key) in the Security Exchange PDU (section 2.2.1.10) as part of the RDP Security Commencement phase of the RDP Connection Sequence (section 1.3.1.1).
+# Sequence Diagram: Client-Server Security Exchange
+
+This sequence diagram illustrates the initial phase of a secure communication protocol between a Client and a Server, focusing on the exchange of security data.
+
+## Participants
+
+- **Client**: Initiates the security exchange.
+- **Server**: Responds with security data and receives the Client's random value.
+
+## Message Flow
+
+The diagram depicts two sequential messages exchanged between the Client and Server:
+
+### Message 1: Server to Client
+- **Direction**: From Server → Client
+- **Content**: `Server Security Data: Server Random and Certificate`
+- **Description**: The Server sends its random value and its digital certificate to the Client. This establishes the Server's identity and provides the public key needed for encryption.
+
+### Message 2: Client to Server
+- **Direction**: From Client → Server
+- **Content**: `Security Exchange PDU: Client Random (Encrypted with Server's Public Key)`
+- **Description**: The Client sends its own random value, encrypted using the Server's public key (obtained from the certificate in the first message). This ensures that only the Server can decrypt and read the Client's random value.
+
+## Diagram Structure
+
+The diagram uses standard sequence diagram notation:
+- Rectangular boxes represent the participants (`Client`, `Server`).
+- Vertical dashed lines represent the lifelines of each participant.
+- Arrows represent messages exchanged between participants.
+- Labels on arrows describe the content and direction of each message.
+
+This exchange is a foundational step in establishing a secure channel, typically used in protocols like TLS/SSL to set up shared secrets for subsequent symmetric encryption.
+
 ![Client and server random value exchange](images/MS-RDPBCGR-250407_image9.png)
 Figure 9: Client and server random value exchange
 The two random values are used by the client and server to generate session keys to secure the connection.
@@ -12633,13 +13013,85 @@ Finally, the new 40-bit or 56-bit encryption key (NewEncryptKey40 or NewEncryptK
 No session key updates take place for the duration of a connection if Standard RDP Security mechanisms (section 5.3) are being used with a FIPS Encryption Level.
 ### Packet Layout in the I/O Data Stream
 The usage of Standard RDP Security mechanisms (section 5.3) results in a security header being present in all packets following the Security Exchange PDU (section 2.2.1.10) when encryption is in force. Connection sequence PDUs following the RDP Security Commencement phase of the RDP Connection Sequence (section 1.3.1.1) and slow-path packets have the same general wire format.
+| Component           | Description                             | Encryption Status |
+|---------------------|-----------------------------------------|-------------------|
+| TPKT Header         | Transport Protocol Control Protocol     | Unencrypted       |
+| X.224 Data Header   | X.224 Data Header                       | Unencrypted       |
+| MCS Header          | Send Data Request or Send Data Indication | Unencrypted       |
+| Security Header     | Security Header                         | Unencrypted       |
+| Data                | Payload data                            | Encrypted         |
+
 ![Slow-path packet layout](images/MS-RDPBCGR-250407_image10.png)
 Figure 10: Slow-path packet layout
 The Security Header essentially contains flags and a MAC signature taken over the encrypted data (section 5.3.6 for details on the MAC generation). In FIPS scenarios, the header also includes the number of padding bytes appended to the data.
 Fast-path packets are more compact and formatted differently, but the essential contents of the Security Header are still present. For non-FIPS scenarios, the packet layout is as follows.
+# Packet Header Structure
+
+The image displays a diagram of a packet header structure, with different fields and a legend indicating which parts are encrypted or unencrypted.
+
+## Header Fields
+
+The header is divided into four labeled sections:
+
+- Fast-Path Header
+- Length
+- MAC Signature
+- Data
+
+## Legend
+
+The legend indicates the encryption status of different parts of the packet:
+
+- **White box** = Unencrypted Data
+- **Gray box** = Encrypted Data
+
+## Encryption Status
+
+Based on the diagram:
+
+- The "Fast-Path Header", "Length", and "MAC Signature" fields are shown as white boxes, indicating they are **unencrypted**.
+- The "Data" field is shown as a gray box, indicating it is **encrypted**.
+
+This structure suggests that while the control information (header, length, MAC) is transmitted in plaintext, the actual payload (Data) is encrypted for security.
+
 ![Non-FIPS fast-path packet layout](images/MS-RDPBCGR-250407_image11.png)
 Figure 11: Non-FIPS fast-path packet layout
 And in FIPS fast-path scenarios the packet layout is as follows.
+# Data Packet Structure Diagram
+
+This diagram illustrates the structure of a data packet, showing the different fields and their encryption status.
+
+## Packet Fields
+
+The packet is divided into five labeled sections:
+
+- Fast-Path Header
+- Length
+- FIPS Information
+- MAC Signature
+- Data
+
+## Encryption Status Legend
+
+The legend indicates the encryption status of the data segments:
+
+- **Unencrypted Data**: Represented by a white square (`□`)
+- **Encrypted Data**: Represented by a gray square (`■`)
+
+## Visual Representation
+
+The diagram visually represents the packet structure with the following encryption status:
+
+| Field              | Encryption Status |
+|--------------------|-------------------|
+| Fast-Path Header   | Unencrypted Data  |
+| Length             | Unencrypted Data  |
+| FIPS Information   | Unencrypted Data  |
+| MAC Signature      | Unencrypted Data  |
+| Data               | Encrypted Data    |
+
+Note: The "Data" field is shaded gray, indicating it is encrypted, while all other fields are unencrypted.
+
 ![FIPS fast-path packet layout](images/MS-RDPBCGR-250407_image12.png)
 Figure 12: FIPS fast-path packet layout
 If no encryption is in effect, the Selected Encryption Method and Encryption Level (section 5.3.1) returned to the client is zero. The Security Header will not be included with any data sent on the wire, except for the Client Info (section 2.2.1.11) and licensing PDUs (for an example of a licensing PDU section 2.2.1.12), which always contain the Security Header.
@@ -12667,6 +13119,61 @@ When Enhanced RDP Security (section 5.4) is being used, the connection sequence 
 The client advertises the security protocols which it supports by appending an RDP Negotiation Request (section 2.2.1.1.1) structure to the X.224 Connection Request PDU (section 2.2.1.1).
 Upon receipt of the RDP Negotiation Request, the server examines the client request and selects the protocol to use. The server indicates its response to the client by appending an RDP Negotiation Response (section 2.2.1.2.1) structure to the X.224 Connection Confirm PDU (section 2.2.1.2). If the server does not support any of the protocols requested by the client, or if there was an error setting up the External Cryptographic Protocol Provider, then the server appends an RDP Negotiation Failure (section 2.2.1.2.2) structure to the X.224 Connection Confirm PDU.
 If the server selects an External Security Protocol via the RDP Negotiation Response and the client accepts the server's choice, then the security protocol is instantiated by the client by calling into an External Cryptographic Protocol Provider. Once the External Security Protocol (section 5.4.5) handshake has successfully run to completion, the RDP messages resume, continuing with (a) the MCS Connect Initial PDU (section 2.2.1.3); or (b) the Early User Authorization Result PDU (section 2.2.10.2) followed by the MCS Connect Initial PDU. From this point all RDP traffic is encrypted using the External Security Protocol.
+# RDP Connection Sequence Diagram
+
+This diagram illustrates the sequence of messages exchanged between a Client and a Server during an RDP (Remote Desktop Protocol) connection establishment, including security handshake and user authorization phases.
+
+## Key Components
+
+- **Client**: Initiates the connection and receives responses from the Server.
+- **Server**: Responds to the Client's requests and manages the connection lifecycle.
+
+## Sequence Phases
+
+### 1. Connection Initiation
+
+- **Client → Server**: `X.224 Connection Request PDU`
+- **Server → Client**: `X.224 Connection Confirm PDU`
+
+> *This phase establishes the initial communication channel.*
+
+### 2. External Security Protocol Handshake
+
+- A series of dashed arrows indicate multiple messages exchanged between Client and Server.
+- This phase is labeled as **External Security Protocol Handshake**.
+
+> *This phase typically involves negotiation and setup of security parameters, such as encryption keys.*
+
+### 3. Optional User Authorization Result
+
+- **Server → Client**: `Early User Authorization Result PDU`
+- This phase is labeled as **Optional User Authorization Result**.
+
+> *This message may be sent before the full RDP session is established, providing early authorization feedback.*
+
+### 4. RDP Session Setup (Post-Connection Initiation)
+
+- **Client → Server**: `MCS Connect Initial PDU with GCC Conference Create Request`
+- **Server → Client**: `MCS Connect Response PDU with GCC Conference Create Response`
+- **Client → Server**: `MCS Erect Domain Request PDU`
+
+> *These messages establish the MCS (Microsoft Connection Service) and GCC (Gateway Conference Control) components of the RDP session.*
+
+### 5. Post-“Connection Initiation” RDP Traffic Encryption
+
+- A note indicates that **Post-"Connection Initiation" RDP Traffic** is:
+  - Encrypted
+  - Wrapped by the **External Security Protocol**
+
+> *This ensures that all subsequent RDP traffic is protected by the security protocol established during the handshake phase.*
+
+## Message Flow Summary
+
+| Phase                         | Client Action                                      | Server Action                                     | Notes                                 |
+|------------------------------|----------------------------------------------------|---------------------------------------------------|---------------------------------------|
+| Connection Initiation        | Sends `X.224 Connection Request PDU`               | Sends `X.224 Connection Confirm PDU`              | Establishes initial channel           |
+| External Security Handshake  | Exchanges multiple messages (dashed arrows)        | Exchanges multiple messages (dashed arrows)
+
 ![Negotiation-based security-enhanced connection sequence](images/MS-RDPBCGR-250407_image13.png)
 Figure 13: Negotiation-based security-enhanced connection sequence
 Because both the RDP Negotiation Request and RDP Negotiation Response are initially exchanged in the clear, they are re-exchanged in the reverse direction after the External Security Protocol handshake as part of the Basic Settings Exchange phase of the RDP Connection Sequence (section 1.3.1.1). This step ensures that no tampering has taken place. The client replays the server's protocol choice in the Client Core Data (section 2.2.1.3.2), while the server replays the client's requested protocols in the Server Core Data (section 2.2.1.4.2).
@@ -12674,6 +13181,57 @@ Because both the RDP Negotiation Request and RDP Negotiation Response are initia
 The Negotiation-Based Approach (specified in section 5.4.2.1) aims to have the client and server agree on a security protocol to use for the connection. The fact that the X.224 messages are unencrypted helps to ensure backward compatibility with prior versions of RDP servers, as the packets can always be read. However, the fact that the X.224 PDUs are unencrypted is also a threat because an attacker can seek to compromise or take down the server by sending malformed X.224 PDUs. Hence the goal of the Direct Approach is to ensure that all RDP traffic is protected.
 When using the Direct Approach, no negotiation of the security protocol takes place. The client and server are hard-coded to use the Credential Security Support Provider (CredSSP) Protocol (section 5.4.5) when a connection is initiated. The Early User Authorization Result PDU (section 2.2.10.2) is not supported in the Direct Approach. Once the security protocol handshake has completed successfully, the RDP Connection Sequence begins, starting with the X.224 messages which form the Connection Initiation phase (section 1.3.1.1). From this point all RDP traffic is encrypted using the CredSSP External Security Protocol.
 The RDP Negotiation Request (section 2.2.1.1.1) MUST be appended to the X.224 Connection Request PDU (section 2.2.1.1) and the requested protocol list MUST contain the PROTOCOL_HYBRID (0x00000002) flag identifying the CredSSP protocol (section 2.2.1.1.1). If this is not the case, the server will append an RDP Negotiation Failure (section 2.2.1.2.2) to the X.224 Connection Confirm PDU (section 2.2.1.2) with a failure code of INCONSISTENT_FLAGS (0x04). Similarly, the server MUST indicate that CredSSP is the selected protocol in the RDP Negotiation Response (section 2.2.1.2.1) which is appended to the X.224 Connection Confirm PDU.
+# RDP Connection Establishment Sequence Diagram
+
+This diagram illustrates the sequence of messages exchanged between a Client and a Server during the establishment of a Remote Desktop Protocol (RDP) connection, including the security handshake and subsequent communication.
+
+## Overview
+
+The diagram is a sequence diagram with two main participants:
+- **Client** (left side)
+- **Server** (right side)
+
+The interaction is divided into two main phases:
+1. **CredSSP External Security Protocol Handshake** (top section)
+2. **RDP Traffic Exchange** (bottom section)
+
+## Phase 1: CredSSP External Security Protocol Handshake
+
+This phase occurs before the RDP session begins and establishes secure authentication.
+
+- The handshake is represented by two dashed lines between the Client and Server, indicating a secure negotiation process.
+- The diagram labels this section as: **CredSSP External Security Protocol Handshake**
+
+## Phase 2: RDP Traffic Exchange
+
+This phase begins after the security handshake is complete and involves the exchange of RDP control messages.
+
+### Message Flow
+
+The following messages are exchanged between the Client and Server:
+
+| Message Direction | Message Description | Notes |
+|-------------------|---------------------|-------|
+| Client → Server | X.224 Connection Request PDU | Initiates the connection request |
+| Server → Client | X.224 Connection Confirm PDU | Confirms the connection request |
+| Client → Server | MCS Connect Initial PDU with GCC Conference Create Request | Initiates the MCS (Microsoft Connection Service) conference |
+| Server → Client | MCS Connect Response PDU with GCC Conference Create Response | Responds to the conference creation request |
+| Client → Server | MCS Erect Domain Request PDU | Requests domain establishment (followed by ellipsis indicating additional messages) |
+
+### Security Context
+
+- All RDP traffic in this phase is **encrypted and wrapped by the CredSSP External Security Protocol**.
+- This is indicated by a bracketed label on the right side of the diagram.
+
+## Diagram Structure
+
+- **Vertical Dashed Lines**: Represent the lifelines of the Client and Server.
+- **Solid Arrows**: Represent message exchanges.
+- **Dashed Boxes**: Enclose the RDP traffic exchange phase.
+- **Labels**: Provide context for each message and phase.
+
+The diagram clearly shows the progression from a security handshake to the establishment of encrypted RDP communication.
+
 ![Direct security-enhanced connection sequence](images/MS-RDPBCGR-250407_image14.png)
 Figure 14: Direct security-enhanced connection sequence
 As specified in the Negotiation-Based Approach, the client and server also confirm the selected protocol and the requested protocols in the Client Core Data (section 2.2.1.3.2) and Server Core Data (section 2.2.1.4.2), respectively.
@@ -12686,9 +13244,63 @@ Encryption and decryption of RDP traffic is only carried out by the External Sec
 ### Packet Layout in the I/O Data Stream
 Because RDP encryption is not used in the presence of an External Security Protocol (section 5.4.5) layer, the security header data (section 5.4.4) is not present in any RDP traffic (except for the Client Info (section 2.2.1.11) and licensing PDUs). All of the RDP traffic which is encrypted by the External Security Protocol is wrapped by headers determined by the protocol specification.
 For example, if SSL is used as the External Security Protocol, an encrypted RDP slow-path packet would appear as follows.
+# SSL Record Structure with Headers and Data
+
+The image displays a diagram of an SSL record structure, segmented into distinct header and data components. The diagram also includes a legend indicating which parts are encrypted and which are unencrypted.
+
+## Legend
+
+- **White box** = Unencrypted Data
+- **Gray box** = Encrypted Data
+
+## Structure Breakdown
+
+The SSL record is composed of the following sequential components:
+
+| Component           | Description                                                                 |
+|---------------------|-----------------------------------------------------------------------------|
+| SSL Record Header   | The initial header of the SSL record. This section is shown as encrypted.  |
+| TPKT Header         | The TPKT (Transaction Protocol Control Transport) header. Encrypted.       |
+| X.224 Data Header   | The X.224 data header. Encrypted.                                          |
+| MCS Header          | The MCS (Multiplexing Control Service) Header, which can be either a "Send Data Request" or "Send Data Indication". Encrypted. |
+| Data                | The actual data payload. Encrypted.                                        |
+
+## Observations
+
+- All components in the SSL record structure shown in the diagram are encrypted, as indicated by the gray shading.
+- The diagram does not show any unencrypted sections within the record.
+- The structure is presented as a linear sequence of headers followed by the data payload.
+- The MCS Header is explicitly labeled with its possible types: "Send Data Request" or "Send Data Indication".
+
 ![Encrypted slow-path packet](images/MS-RDPBCGR-250407_image15.png)
 Figure 15: Encrypted slow-path packet
 A fast-path packet would appear as follows if SSL is the External Security Protocol:
+# SSL Record Structure Diagram
+
+This diagram illustrates the structure of an SSL record, showing how different components are organized and whether they are encrypted or unencrypted.
+
+## Legend
+
+- **White box** = Unencrypted Data
+- **Gray box** = Encrypted Data
+
+## Record Structure
+
+The SSL record is composed of four sequential components:
+
+| Component         | Description                 | Encryption Status |
+|-------------------|-----------------------------|-------------------|
+| SSL Record Header | Header for the SSL record   | Unencrypted       |
+| Fast-Path Header  | Fast-path specific header   | Encrypted         |
+| Length            | Length of the data field    | Encrypted         |
+| Data              | Actual payload/data content | Encrypted         |
+
+## Notes
+
+- The diagram indicates that the `SSL Record Header` is unencrypted.
+- The `Fast-Path Header`, `Length`, and `Data` fields are all encrypted.
+- The components are arranged sequentially from left to right.
+
 ![Encrypted fast-path packet](images/MS-RDPBCGR-250407_image16.png)
 Figure 16: Encrypted fast-path packet
 Notice that in both of these cases, the security header data is missing. See sections 2.2.8.1 and 2.2.9.1 for more details on slow and fast-path packet formats.
@@ -12717,6 +13329,56 @@ The CredSSP protocol leverages TLS Alert Messages with the level set to Fatal ([
 RDSTLS is a variation of Enhanced RDP Security that is primarily used in the context of server redirection scenarios (section 1.3.8). Server authentication, encryption, decryption, and data integrity checks are implemented by leveraging the TLS security protocol, while user authentication is accomplished by exchanging RDSTLS PDUs directly following the TLS handshake.
 ##### RDSTLS Connection Sequence
 The RDSTLS connection sequence only takes place in the context of the Negotiation-Based Approach (section 5.4.2.1) of the security-enhanced connection sequence.
+# RDP Connection Establishment Sequence Diagram
+
+This sequence diagram illustrates the step-by-step process for establishing a secure Remote Desktop Protocol (RDP) connection between a Client and a Server, including connection initiation, security negotiation, authentication, and session setup.
+
+## Participants
+
+- **Client**: Initiates the connection and performs authentication.
+- **Server**: Accepts the connection request, negotiates security, and manages the session.
+
+## Sequence of Events
+
+The diagram is divided into four main phases, each marked by a curly brace annotation:
+
+### 1. Connection Initiation
+
+This phase establishes the basic network connection.
+
+- **Client → Server**: `X.224 Connection Request PDU`
+- **Server → Client**: `X.224 Connection Confirm PDU`
+
+> *Note: The dashed lines with ellipses indicate that this phase may involve additional handshake messages not explicitly shown.*
+
+### 2. TLS Security Protocol
+
+This phase negotiates and establishes the Transport Layer Security (TLS) encryption layer.
+
+- **Dashed lines with ellipses**: Represent multiple TLS handshake messages exchanged between Client and Server.
+- The exact messages are not detailed in the diagram but are implied to be standard TLS negotiation messages (e.g., ClientHello, ServerHello, Certificate, KeyExchange, etc.).
+
+### 3. RDSTLS Protocol (Encrypted and Wrapped by TLS Security Protocol)
+
+This phase handles authentication using the RDP Security Token Layer (RDSTLS), which operates over the established TLS connection.
+
+- **Server → Client**: `RDSTLS Capabilities PDU`
+- **Client → Server**: `RDSTLS Authentication Request PDU`
+- **Server → Client**: `RDSTLS Authentication Response PDU`
+
+> *Note: The RDSTLS messages are explicitly labeled as being "encrypted and wrapped by TLS Security Protocol," indicating that the authentication exchange is protected by the TLS layer.*
+
+### 4. Post-"Connection Initiation" RDP Traffic (Encrypted and Wrapped by TLS Security Protocol)
+
+This phase involves the setup of the RDP session and subsequent RDP traffic.
+
+- **Client → Server**: `MCS Connect Initial PDU with GCC Conference Create Request`
+- **Server → Client**: `MCS Connect Response PDU with GCC Conference Create Response`
+- **Client → Server**: `MCS Erect Domain Request PDU`
+- **Dashed lines with ellipses**: Indicate additional MCS (Multi-Channel Service) messages may follow.
+
+> *Note: All RDP traffic in this phase is explicitly labeled
+
 ![The RDSTLS connection sequence](images/MS-RDPBCGR-250407_image17.png)
 Figure 17: The RDSTLS connection sequence
 Since the RDTLS protocol is primarily used in the context of server redirection scenarios (section 1.3.8) there is a strong dependency on structures exchanged in the Server Redirection Packet (section 2.2.13.1), specifically the TargetCertificate, RedirectionGuid, UserName, Domain, and Password fields. For the purpose of server authentication in the TLS protocol, the X.509 certificate extracted from the TargetCertificate field of the Server Redirection Packet MUST be identical to the certificate that the server presents for authentication. If there is a mismatch, then the client SHOULD NOT continue the TLS handshake.
@@ -12729,6 +13391,65 @@ Upon successful completion of the RDSTLS protocol, the subsequent RDP traffic is
 RDS AAD Auth is a variation of Enhanced RDP Security that is used to authenticate a user to an Azure AD-joined device or to a Hybrid Azure AD-joined device. Server authentication, encryption, decryption, and data integrity checks are implemented by leveraging the TLS security protocol, while user authentication is accomplished by exchanging RDS AAD Auth PDUs directly following the TLS handshake.<58>
 ##### RDS AAD Auth Connection Sequence
 The RDS AAD Auth connection sequence only takes place in the context of the Negotiation-Based Approach (section 5.4.2.1) of the security-enhanced connection sequence.
+# RDP Authentication and Connection Sequence Diagram
+
+This sequence diagram illustrates the step-by-step interaction between a Client, Server, and Azure Active Directory (AAD) during an RDP (Remote Desktop Protocol) connection, including authentication and encryption setup.
+
+## Participants
+
+- **Client**: Initiates the connection and performs authentication.
+- **Server**: Handles connection requests, coordinates authentication with AAD, and manages the RDP session.
+- **AAD (Azure Active Directory)**: Provides authentication services and issues tokens.
+
+## Sequence of Events
+
+### 1. Connection Initiation
+
+- **Client → Server**: X.224 Connection Request PDU
+- **Server → Client**: X.224 Connection Confirm PDU
+  - *Grouped under "Connection Initiation"*
+
+### 2. RDP Access Token Acquisition
+
+- **Client → AAD**: RDP Access Token request
+- **AAD → Client**: RDP Access Token
+
+### 3. AAD Nonce Exchange
+
+- **Client → AAD**: AAD Nonce request
+- **AAD → Client**: AAD Nonce
+
+### 4. TLS Security Protocol Setup
+
+- **Client ↔ Server**: Multiple messages exchanged (indicated by dotted lines)
+  - *Grouped under "TLS Security Protocol"*
+  - This phase establishes a secure, encrypted channel using TLS.
+
+### 5. RDS AAD Authentication Protocol
+
+- **Server → Client**: Server Nonce
+- **Client → Server**: Authentication Request
+- **Server → Client**: Authentication Result
+  - *Grouped under "RDS AAD Auth Protocol (encrypted and wrapped by TLS Security Protocol)"*
+
+### 6. MCS (Multi-Connection Service) Setup
+
+- **Client → Server**: MCS Connect Initial PDU with GCC Conference Create Request
+- **Server → Client**: MCS Connect Response PDU with GCC Conference Create Response
+  - *Grouped under "The rest of the RDP protocol is encrypted and wrapped by TLS Security Protocol."*
+
+### 7. Domain Setup
+
+- **Client → Server**: MCS Erect Domain Request PDU
+
+## Security Notes
+
+- The **TLS Security Protocol** encrypts all subsequent communication.
+- The **RDS AAD Auth Protocol** is encrypted and wrapped within the TLS protocol.
+- The **rest of the RDP protocol** (after authentication) is also encrypted and wrapped by TLS.
+
+This diagram outlines the secure handshake and authentication process necessary for establishing a remote desktop session with Azure Active Directory authentication.
+
 ![The RDS AAD Auth connection sequence](images/MS-RDPBCGR-250407_image18.png)
 Figure 18 The RDS AAD Auth connection sequence
 - The client and the server negotiate RDS AAD Auth (section 5.4.2.1). The client MUST set the PROTOCOL_RDSAAD (0x00000010) flag in the requestedProtocols field of the RDP_NEG_REQ structure (section 2.2.1.1.1). If the server supports RDS AAD Auth, it MUST set the selectedProtocol field in the RDP_NEG_RSP structure to PROTOCOL_RDSAAD (section 2.2.1.2.1).

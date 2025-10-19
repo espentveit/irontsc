@@ -317,6 +317,41 @@ The Remote Desktop Protocol: Clipboard Virtual Channel Extension is divided into
 During the Initialization Sequence, the connection is set up and capabilities and settings exchanged. The transfer of Clipboard Format IDs, names, and data takes place during the Data Transfer Sequence.
 #### Initialization Sequence
 The goal of the Initialization Sequence is to establish the client and the server capabilities, exchange settings, and synchronize the initial state of the client and server clipboards.
+# Sequence Diagram: Client-Server Clipboard Initialization
+
+This sequence diagram illustrates the initial handshake and capability exchange between a Client and a Server, specifically for clipboard operations. The interactions are ordered chronologically from top to bottom.
+
+## Participants
+
+- **Client**: Initiates requests and receives responses from the Server.
+- **Server**: Responds to Client requests and sends initial capabilities.
+
+## Message Flow
+
+The diagram shows a series of Protocol Data Units (PDUs) exchanged between the Client and Server. The arrows indicate direction of communication.
+
+| Message Type | Direction | Description |
+|--------------|-----------|-------------|
+| Server Clipboard Capabilities PDU | Server → Client | The Server sends its clipboard capabilities to the Client. |
+| Monitor Ready PDU | Server → Client | The Server notifies the Client that the monitor is ready. |
+| Client Clipboard Capabilities PDU | Client → Server | The Client sends its own clipboard capabilities to the Server. |
+| Temporary Directory PDU | Client → Server | The Client provides a temporary directory path to the Server. |
+| Format List PDU | Client → Server | The Client requests a list of supported clipboard formats from the Server. |
+| Format List Response PDU | Server → Client | The Server responds with the list of supported clipboard formats. |
+
+## Structure
+
+- The diagram uses vertical dashed lines to represent the lifelines of each participant (Client and Server).
+- Horizontal arrows represent messages exchanged between the participants.
+- All messages are labeled with their type (e.g., "Server Clipboard Capabilities PDU").
+- The sequence flows from top to bottom, indicating the chronological order of events.
+
+## Key Observations
+
+- The Server initiates the communication by sending two messages to the Client before the Client responds.
+- The Client then sends three messages to the Server, followed by a response from the Server.
+- The exchange is symmetric: the Server provides initial information, and the Client provides its own capabilities and requests specific data (format list).
+
 ![Clipboard Redirection Initialization Sequence](images/MS-RDPECLIP-240423_image1.png)
 Figure 1: Clipboard Redirection Initialization Sequence
 - The server sends a Clipboard Capabilities PDU to the client to advertise the capabilities that it supports.
@@ -327,6 +362,71 @@ Figure 1: Clipboard Redirection Initialization Sequence
 - The server responds with a Format List Response PDU.
 #### Data Transfer Sequences
 The goal of the Data Transfer Sequences is to perform a copy or paste operation. The diagram that follows presents a possible data transfer sequence.
+# Clipboard Data Transfer Sequence Diagram
+
+This diagram illustrates the sequence of Protocol Data Units (PDUs) exchanged between a Shared Clipboard Owner and a Local Clipboard Owner during clipboard data transfer operations.
+
+## Participants
+
+- **Shared Clipboard Owner**: The source of the clipboard data.
+- **Local Clipboard Owner**: The destination receiving the clipboard data.
+
+## Sequence Overview
+
+The diagram shows a two-phase process: a "Copy Sequence" and a "Paste Sequence" (which includes two sub-sequences).
+
+### Phase 1: Copy Sequence
+
+This phase establishes the format list and optionally locks the clipboard data.
+
+1. **Format List PDU**  
+   - Direction: Shared Clipboard Owner → Local Clipboard Owner  
+   - Purpose: Requests the list of available clipboard formats.
+
+2. **Format List Response PDU**  
+   - Direction: Local Clipboard Owner → Shared Clipboard Owner  
+   - Purpose: Responds with the list of available clipboard formats.
+
+3. **Lock Clipboard Data PDU (Optional)**  
+   - Direction: Local Clipboard Owner → Shared Clipboard Owner  
+   - Purpose: Optional message to lock the clipboard data for exclusive access.
+
+### Phase 2: Paste Sequence
+
+This phase involves transferring the actual clipboard data.
+
+#### Sub-Phase A: Paste Sequence for Generic, Palette, Metafile, and File List Data
+
+1. **Format Data Request PDU**  
+   - Direction: Local Clipboard Owner → Shared Clipboard Owner  
+   - Purpose: Requests the data for specific clipboard formats.
+
+2. **Format Data Response PDU**  
+   - Direction: Shared Clipboard Owner → Local Clipboard Owner  
+   - Purpose: Responds with the requested clipboard data.
+
+#### Sub-Phase B: Paste Sequence for File Stream Data
+
+1. **File Contents Request PDU**  
+   - Direction: Local Clipboard Owner → Shared Clipboard Owner  
+   - Purpose: Requests the contents of a file stream.
+
+2. **File Contents Response PDU**  
+   - Direction: Shared Clipboard Owner → Local Clipboard Owner  
+   - Purpose: Responds with the requested file stream data.
+
+### Final Step
+
+3. **Unlock Clipboard Data PDU (Optional)**  
+   - Direction: Local Clipboard Owner → Shared Clipboard Owner  
+   - Purpose: Optional message to unlock the clipboard data after transfer.
+
+## Notes
+
+- The diagram uses arrows to indicate the direction of data flow.
+- Optional steps are explicitly marked as "(Optional)".
+- The diagram groups related PDUs under descriptive labels: "Copy Sequence" and "Paste Sequence" with further subdivisions for different data types.
+
 ![Data transfer using the shared clipboard](images/MS-RDPECLIP-240423_image2.png)
 Figure 2: Data transfer using the shared clipboard
 - The sequence of messages for a copy operation is the same for all format types, as specified in section 1.3.2.2.1.
@@ -342,6 +442,55 @@ The Format Data Request PDU is sent by the Local Clipboard Owner in response to 
 The File Contents Request PDU and File Contents Response PDU are used to implement the transfer of files. The Local Clipboard Owner first requests the list of files available from the clipboard. Upon receipt of this list, the Local Clipboard Owner can request the contents of a file listed therein by sending a File Contents Request PDU to the Shared Clipboard Owner. The resultant file contents data is transmitted by the Shared Clipboard Owner to the Local Clipboard Owner by using a File Contents Response PDU.
 #### Interacting with Local Clipboard and Applications
 The following diagram and accompanying explanation illustrate how an application, the system clipboards, and the Remote Desktop Protocol: Clipboard Virtual Channel Extension endpoints interact during a copy-and-paste operation.
+# Clipboard Synchronization Diagram
+
+This diagram illustrates the communication flow between two systems (A and B) for synchronizing clipboard data. It shows how local applications interact with their respective system clipboards and how these are connected via a virtual clipboard channel.
+
+## System Components
+
+Each system (A and B) contains the following components:
+
+- **Local Application**: An application running locally within the system.
+- **System Clipboard**: The clipboard service specific to the local system.
+- **Virtual Channel End-Point**: A component that acts as an interface to the virtual clipboard channel.
+- **Clipboard Virtual Channel**: A bidirectional communication channel connecting the two systems.
+
+## Communication Flow
+
+The diagram uses numbered arrows to represent the sequence of operations and data transfers.
+
+### Within System A
+
+- **1**: Local Application writes data to System Clipboard.
+- **10**: System Clipboard sends data to Virtual Channel End-Point.
+- **11**: Virtual Channel End-Point sends data to System Clipboard (possibly a confirmation or feedback).
+
+### Within System B
+
+- **7**: Local Application writes data to System Clipboard.
+- **14**: System Clipboard sends data to Virtual Channel End-Point.
+- **13**: Virtual Channel End-Point sends data to System Clipboard (possibly a confirmation or feedback).
+
+### Cross-System Communication
+
+- **2**: Virtual Channel End-Point in System A sends data to Clipboard Virtual Channel.
+- **3**: Clipboard Virtual Channel sends data to Virtual Channel End-Point in System B.
+- **4**: Virtual Channel End-Point in System B sends data to System Clipboard.
+- **5**: System Clipboard in System B sends data to Virtual Channel End-Point.
+- **6**: Virtual Channel End-Point in System B sends data to Clipboard Virtual Channel.
+- **9**: Clipboard Virtual Channel sends data to Virtual Channel End-Point in System A.
+- **12**: Virtual Channel End-Point in System A sends data to Clipboard Virtual Channel.
+- **15**: Clipboard Virtual Channel sends data to Virtual Channel End-Point in System B.
+
+## Summary Table
+
+| Step | Source | Destination | Description |
+|------|--------|-------------|-------------|
+| 1 | Local Application (A) | System Clipboard (A) | Data written to local clipboard |
+| 2 | Virtual Channel End-Point (A) | Clipboard Virtual Channel | Data sent to remote system |
+| 3 | Clipboard Virtual Channel | Virtual Channel End-Point (B) | Data received by remote system |
+| 4 | Virtual Channel
+
 ![Interaction of applications, the system clipboards, and virtual channel endpoints](images/MS-RDPECLIP-240423_image3.png)
 Figure 3: Interaction of applications, the system clipboards, and virtual channel endpoints
 The copy phase is performed in steps 1 through 5 and the paste phase is performed in steps 6 through 15:
@@ -368,6 +517,42 @@ The Remote Desktop Protocol: Clipboard Virtual Channel Extension operates only a
 The Remote Desktop Protocol: Clipboard Virtual Channel Extension is designed to be run within the context of a Remote Desktop Protocol virtual channel established between a client and server. This protocol is applicable when bidirectional data transfer between the local client clipboard and the clipboard in the remote session (hosted on the server) is required.
 ## Versioning and Capability Negotiation
 The Remote Desktop Protocol: Clipboard Virtual Channel Extension is capability-based. The client and the server exchange capabilities during the protocol Initialization Sequence (section 1.3.2.1) by using the Clipboard Capabilities PDU. Capability sets are packaged in a combined capability set structure. This structure contains a count of the number of capability sets, followed by the contents of the individual capability sets.
+# Diagram Description: Capability Sets
+
+This diagram illustrates a sequence of capability sets, with a total count indicated at the beginning.
+
+## Structure
+
+The diagram consists of a horizontal sequence of rectangular boxes arranged from left to right, all contained within a larger gray bounding box.
+
+### Boxes
+
+- **Leftmost Box**: Labeled "Number of capability sets which follow = N"
+  - This box indicates the total number of capability sets that are listed after it.
+  - The value `N` represents the count.
+
+- **Subsequent Boxes**: Labeled sequentially as "Capability Set 1", "Capability Set 2", ..., "Capability Set N"
+  - These boxes represent individual capability sets in the sequence.
+  - The ellipsis (`...`) between "Capability Set 2" and "Capability Set N" indicates that the sequence continues with additional sets up to the Nth set.
+
+## Relationships
+
+- The diagram establishes a direct relationship between the count `N` and the number of capability sets that follow.
+- Each capability set is numbered sequentially from 1 to N.
+- The sequence is ordered and linear, with each set following the previous one.
+
+## Summary Table
+
+| Box Label                            | Description                                       |
+|-------------------------------------|---------------------------------------------------|
+| Number of capability sets which follow = N | Indicates total count of capability sets to follow |
+| Capability Set 1                    | First capability set in the sequence              |
+| Capability Set 2                    | Second capability set in the sequence             |
+| ...                                 | Ellipsis indicating continuation                 |
+| Capability Set N                    | Last capability set in the sequence               |
+
+This diagram serves as a conceptual representation of a collection of N capability sets, with the count explicitly defined at the start.
+
 ![Combined capability set structure](images/MS-RDPECLIP-240423_image4.png)
 Figure 4: Combined capability set structure
 After the capabilities have been received and stored, the client and the server do not send PDUs or data formats that cannot be processed by the peer.

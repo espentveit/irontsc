@@ -286,6 +286,65 @@ The Remote Desktop Protocol: Licensing Extension involves the following componen
 - Active Directory: Stores licenses issued to users.
 - License Manager: Administers license servers.
 The following diagram illustrates the relationship and interaction among these components in a typical terminal server deployment.
+# Remote Desktop Licensing Architecture Diagram
+
+This diagram illustrates the licensing architecture for a Remote Desktop environment, showing how client devices, terminal servers, license servers, and directory services interact to manage and enforce software licenses.
+
+## Core Components
+
+The architecture consists of the following main components:
+
+- **Remote Desktop Client**
+- **Terminal Server**
+- **Active Directory**
+- **License Server**
+- **License Manager**
+- **Clearing House**
+
+## Component Details and Relationships
+
+### 1. Remote Desktop Client
+- **License Type**: Per Device License
+- **Connection to Terminal Server**: Uses RDP (Remote Desktop Protocol)
+- **Connection to License Server**: Uses RPC (Remote Procedure Call)
+
+### 2. Terminal Server
+- **Connection to Active Directory**: Uses LDAP (Lightweight Directory Access Protocol)
+- **Connection to License Server**: Uses RPC
+- **Connection to Remote Desktop Client**: Uses RDP
+
+### 3. Active Directory
+- **License Type**: Per User License
+- **Connection to Terminal Server**: Uses LDAP
+- **Connection to License Server**: Uses LDAP
+
+### 4. License Server
+- **Contains**: License DB (License Database)
+- **Connection to Terminal Server**: Uses RPC
+- **Connection to License Manager**: Uses RPC
+- **Connection to Active Directory**: Uses LDAP
+
+### 5. License Manager
+- **Connection to License Server**: Uses RPC
+- **Connection to Clearing House**: Uses Https/Web/Telephone
+
+### 6. Clearing House
+- **Connection to License Manager**: Via Https/Web/Telephone
+
+## Summary of Interactions
+
+| Component            | Connects To             | Protocol/Method      | Purpose                                      |
+|----------------------|-------------------------|----------------------|----------------------------------------------|
+| Remote Desktop Client| Terminal Server         | RDP                  | Establishes remote desktop session           |
+| Remote Desktop Client| License Server          | RPC                  | Requests license validation                  |
+| Terminal Server      | Active Directory        | LDAP                 | Authenticates users                          |
+| Terminal Server      | License Server          | RPC                  | Requests license for session                 |
+| Terminal Server      | Active Directory        | LDAP                 | Queries user license status                  |
+| License Server       | Active Directory        | LDAP                 | Syncs user license data                      |
+| License Server       | License Manager         | RPC                  | Receives license management commands         |
+| License Manager      | Clearing House          | Https/Web/Telephone  | Reports license usage or obtains updates     |
+| License Manager
+
 ![Licensing architecture components for terminal server licensing](images/MS-RDPELE-240423_image1.png)
 Figure 1: Licensing architecture components for terminal server licensing
 The Remote Desktop Protocol: Licensing Extension facilitates the exchange of licensing information between the Remote Desktop client and the terminal server and is restricted between these two components only. The interaction among the remaining components (for example, between the terminal server and the license server) is not a function of the Remote Desktop Protocol: Licensing Extension.
@@ -305,6 +364,52 @@ A target machine (terminal server or personal terminal server) initiates the lic
 When a Remote Desktop client connects to a target machine, either the client has a license, or it does not.
 If the client is connecting to a terminal server and the client does not have a license, the terminal server tries to obtain a license (See New License Flow (section 1.3.3.1).) If the client has a license, the terminal server validates the version and expiry date. If the license is valid, access is allowed. If the license is expired, temporary, or a lower version than the operating system version of the terminal server, the license is upgraded. For the steps to upgrade the license, see Upgrade License Flow (section 1.3.3.2).
 If the target machine is a personal terminal server, whether the client sends the license or not, the server always sends a Licensing Error Message (section 2.2.2.8) with the error code STATUS_VALID_CLIENT and the state transition code ST_NO_TRANSITION. Also, in the case that the client sends a license, the server does not validate it. The licensing protocol is complete at this point.
+# License Validation Flowchart
+
+This flowchart illustrates the process for validating a client's license and handling various scenarios related to license status, upgrades, and server communication.
+
+## Main Flow
+
+The process begins with the client sending a `Client Info Packet` to the server, which then responds with a `Server License Request Packet`.
+
+### Server Certificate Validation
+
+- **Decision**: Is the Server Cert Valid?
+  - **NO**: Flow leads to `C → S Error Abort`
+  - **YES**: Proceed to check license availability
+
+### License Availability Check
+
+- **Decision**: Is there a valid license in the store?
+  - **NO**: Client sends a `Client New License Request`
+    - This leads to a `Platform Challenge` and `Platform Challenge Response` exchange.
+    - Then checks if the `Grace Period` has expired.
+      - **YES**: Flow leads to `S → C Error Abort`
+      - **NO**: Proceeds to check if the license server (LS) could be contacted.
+        - **YES**: Checks if the license was issued.
+          - **YES**: Sends `New License Packet`
+          - **NO**: Flow leads to `S → C Error Abort`
+        - **NO**: Flow leads to `S → C Error Abort`
+  - **YES**: Client sends `Client License Info`
+    - **Decision**: Is it a valid license?
+      - **NO**: Flow leads to `S → C Success`
+      - **YES**: **Decision**: Is it a valid temporary license?
+        - **NO**: **Decision**: Does it need an upgrade?
+          - **NO**: Flow leads to `S → C Success`
+          - **YES**: Flow leads to `S → C Platform Challenge`
+            - Client sends `Platform Challenge Response`
+            - **Decision**: Could the LS be contacted?
+              - **NO**: Flow leads to `S → C Error Abort`
+              - **YES**: **Decision**: Was the License Upgraded?
+                - **YES**: Flow leads to `S → C Upgrade License Packet`
+                - **NO**: **Decision**: Is the Client License Still Valid?
+                  - **YES**: Flow leads to `S → C Success`
+                  - **NO**: Flow leads to `S → C Error Abort`
+        - **YES**: Flow leads to `S → C Platform Challenge`
+          - Client sends `Platform Challenge Response`
+          - **Decision**: Could the LS be contacted?
+            - **NO**: Flow leads to `S → C Error Abort`
+
 ![Licensing PDU flows in Terminal Server](images/MS-RDPELE-240423_image2.png)
 Figure 2: Licensing PDU flows in Terminal Server
 This flow chart describes the logic for the following cases:
@@ -313,10 +418,94 @@ This flow chart describes the logic for the following cases:
 - An error condition occurs.
 #### New License Flow
 When the Remote Desktop client does not have a license in its license store, the message flow is as shown in the following diagram.
+# Sequence Diagram: Remote Desktop Client and Terminal Server License Exchange
+
+This sequence diagram illustrates the interaction between a Remote Desktop Client and a Terminal Server to obtain and validate a new license.
+
+## Participants
+
+- **Remote Desktop Client**: The client application requesting a license.
+- **Terminal Server**: The server providing and validating licenses.
+
+## Message Flow
+
+The interaction proceeds in the following sequence:
+
+1. **License Request**
+   - Direction: Terminal Server → Remote Desktop Client
+   - Description: The Terminal Server initiates a license request to the client.
+
+2. **New License Request**
+   - Direction: Remote Desktop Client → Terminal Server
+   - Description: The client responds to the initial request by sending a new license request to the server.
+
+3. **Platform Challenge**
+   - Direction: Terminal Server → Remote Desktop Client
+   - Description: The server sends a platform challenge to the client, likely to verify the client's environment or identity.
+
+4. **Platform Challenge Response**
+   - Direction: Remote Desktop Client → Terminal Server
+   - Description: The client responds to the platform challenge sent by the server.
+
+5. **New License**
+   - Direction: Terminal Server → Remote Desktop Client
+   - Description: The server sends the newly issued license to the client.
+
+## Summary Table
+
+| Step | Message                  | Direction                 | Description                                      |
+|------|--------------------------|---------------------------|--------------------------------------------------|
+| 1    | License Request          | Terminal Server → Client  | Initial request for license from the server.     |
+| 2    | New License Request      | Client → Terminal Server  | Client sends a new license request to the server.|
+| 3    | Platform Challenge       | Terminal Server → Client  | Server sends a challenge to verify the client.   |
+| 4    | Platform Challenge Response | Client → Terminal Server | Client responds to the platform challenge.       |
+| 5    | New License              | Terminal Server → Client  | Server grants the new license to the client.     |
+
 ![Remote Desktop client new license flow](images/MS-RDPELE-240423_image3.png)
 Figure 3: Remote Desktop client new license flow
 #### Upgrade License Flow
 When the Remote Desktop client has a license in its license store, the message flow is as shown in the following diagram.
+# Sequence Diagram: Remote Desktop Client and Terminal Server License Exchange
+
+This sequence diagram illustrates the interaction between a Remote Desktop Client and a Terminal Server during a license negotiation process.
+
+## Participants
+
+- **Remote Desktop Client**: Initiates the license request and responds to platform challenges.
+- **Terminal Server**: Sends license requests, challenges, and upgrade licenses.
+
+## Message Flow
+
+The diagram shows a sequence of five messages exchanged between the two participants:
+
+1. **License Request**
+   - Direction: Terminal Server → Remote Desktop Client
+   - Description: The Terminal Server sends a license request to the Remote Desktop Client.
+
+2. **License Info**
+   - Direction: Remote Desktop Client → Terminal Server
+   - Description: The Remote Desktop Client sends license information back to the Terminal Server.
+
+3. **Platform Challenge**
+   - Direction: Terminal Server → Remote Desktop Client
+   - Description: The Terminal Server sends a platform challenge to the Remote Desktop Client.
+
+4. **Platform Challenge Response**
+   - Direction: Remote Desktop Client → Terminal Server
+   - Description: The Remote Desktop Client responds to the platform challenge.
+
+5. **Upgrade License**
+   - Direction: Terminal Server → Remote Desktop Client
+   - Description: The Terminal Server sends an upgrade license to the Remote Desktop Client.
+
+## Diagram Structure
+
+- The diagram uses vertical dashed lines to represent the lifelines of each participant.
+- Horizontal arrows indicate messages with their direction and label.
+- All messages are sent in a top-to-bottom sequence, representing the chronological order of events.
+
+This interaction is typical in software licensing systems where a client must authenticate its platform and then receive an appropriate license, potentially including an upgrade.
+
 ![Remote Desktop client upgrade license flow](images/MS-RDPELE-240423_image4.png)
 Figure 4: Remote Desktop client upgrade license flow
 ## Relationship to Other Protocols
@@ -782,9 +971,112 @@ ST_NO_TRANSITION is used when the server is to indicate success. It MUST set the
 - ST_RESEND_LAST_MESSAGE makes the client and server resend the previously sent message.
 ST_RESET_PHASE_TO_START and ST_RESEND_LAST_MESSAGE are not shown in the Client State Transition diagram (section 3.1.5.3.1) and Server State Transition diagram (section 3.1.5.3.2), as they can cause confusion.<17>
 ##### Client State Transition
+# Client Licensing State Diagram
+
+This diagram illustrates the state transitions for a client licensing process. It shows how the client moves between different licensing states based on various events and messages received.
+
+## States
+
+The diagram contains four main states:
+
+- **CLIENT LICENSING AWAIT**
+- **CLIENT PROCESS LICENSING**
+- **CLIENT LICENSING COMPLETED**
+- **CLIENT LICENSING ABORTED**
+
+## Transitions
+
+The following transitions are defined between states:
+
+### From "CLIENT LICENSING AWAIT" to "CLIENT PROCESS LICENSING"
+- **Trigger:** `SERVER_LICENSE_REQUEST received`
+
+### From "CLIENT PROCESS LICENSING" to "CLIENT LICENSING ABORTED"
+- **Trigger:** `LICENSE_ERROR_MESSAGE sent/received`
+- **Condition:** `dwStateTransition = ST_TOTAL_ABORT`
+
+### From "CLIENT PROCESS LICENSING" to "CLIENT LICENSING COMPLETED"
+- **Trigger:** `LICENSE_ERROR_MESSAGE received`
+- **Condition:** `dwErrorCode = STATUS_VALID_CLIENT` and `dwStateTransition = ST_NO_TRANSITION`
+
+### From "CLIENT PROCESS LICENSING" to "CLIENT LICENSING COMPLETED" (Alternative Path)
+- **Trigger:** `SERVER_UPGRADE_LICENSE received`
+
+### From "CLIENT PROCESS LICENSING" to "CLIENT LICENSING COMPLETED" (Alternative Path)
+- **Trigger:** `SERVER_NEW_LICENSE received`
+
+### From "CLIENT LICENSING COMPLETED" to "CLIENT PROCESS LICENSING"
+- **Trigger:** `SERVER_UPGRADE_LICENSE received` (This transition is shown in the diagram but appears to be a return path from completed to processing, which is not typical for a state machine unless it's a re-initiation)
+
+## Notes
+
+- The diagram shows that the client can transition from "CLIENT PROCESS LICENSING" to "CLIENT LICENSING COMPLETED" via multiple paths, including error handling with a valid client status or receiving new/upgrade licenses.
+- The "CLIENT LICENSING ABORTED" state is only reachable from "CLIENT PROCESS LICENSING" upon receiving a license error message that triggers a total abort.
+- The diagram implies a state machine where transitions are triggered by specific events and may be subject to conditions (e.g., `dwErrorCode`, `dwStateTransition`).
+
 ![Client state transition](images/MS-RDPELE-240423_image5.png)
 Figure 5: Client state transition
 ##### Server State Transition
+# Server Licensing State Diagram
+
+This diagram illustrates the state transitions for a server licensing process, showing how the system moves between different states based on specific events or error conditions.
+
+## States
+
+The diagram contains five main states, represented as circles:
+
+- **SERVER LICENSING BEGIN**
+- **SERVER PROCESS LICENSING**
+- **SERVER LICENSING ABORTED**
+- **SERVER LICENSING COMPLETED**
+
+## Transitions
+
+The following transitions define how the system moves between states:
+
+### From "SERVER LICENSING BEGIN"
+
+- **→ SERVER PROCESS LICENSING**
+  - Trigger: `SERVER_LICENSE_REQUEST sent`
+
+### From "SERVER PROCESS LICENSING"
+
+- **→ SERVER LICENSING ABORTED**
+  - Trigger: `LICENSE_ERROR_MESSAGE sent/received`
+  - Conditions: `dwStateTransition = ST_TOTAL_ABORT`
+
+- **→ SERVER LICENSING COMPLETED**
+  - Trigger: `LICENSE_ERROR_MESSAGE sent`
+  - Conditions: 
+    - `dwErrCode = STATUS_VALID_CLIENT`
+    - `dwStateTransition = ST_NO_TRANSITION`
+
+- **→ SERVER LICENSING COMPLETED**
+  - Trigger: `SERVER_UPGRADE_LICENSE sent`
+
+- **→ SERVER LICENSING COMPLETED**
+  - Trigger: `SERVER_NEW_LICENSE sent`
+
+### From "SERVER LICENSING ABORTED"
+
+- **→ SERVER PROCESS LICENSING**
+  - (Implicit transition, as shown by the arrow pointing back to "SERVER PROCESS LICENSING")
+
+### From "SERVER LICENSING COMPLETED"
+
+- **→ SERVER PROCESS LICENSING**
+  - (Implicit transition, as shown by the arrow pointing back to "SERVER PROCESS LICENSING")
+
+## Summary Table of Transitions
+
+| From State                 | To State                 | Trigger / Conditions                                                                 |
+|---------------------------|--------------------------|--------------------------------------------------------------------------------------|
+| SERVER LICENSING BEGIN    | SERVER PROCESS LICENSING | `SERVER_LICENSE_REQUEST sent`                                                       |
+| SERVER PROCESS LICENSING  | SERVER LICENSING ABORTED | `LICENSE_ERROR_MESSAGE sent/received`, `dwStateTransition = ST_TOTAL_ABORT`         |
+| SERVER PROCESS LICENSING  | SERVER LICENSING COMPLETED | `LICENSE_ERROR_MESSAGE sent`, `dwErrCode = STATUS_VALID_CLIENT`, `dwStateTransition = ST_NO_TRANSITION` |
+| SERVER PROCESS LICENSING  | SERVER LICENSING COMPLETED | `SERVER_UPGRADE_LICENSE sent`                                                       |
+| SERVER PROCESS LICENSING  | SERVER LICENSING COMPLETED | `SERVER_NEW
+
 ![Server state transition](images/MS-RDPELE-240423_image6.png)
 Figure 6: Server state transition
 ### Timer Events
@@ -2712,6 +3004,37 @@ The license encryption key is different from the session encryption key used in 
 The client and server both generate a 32-byte random value using a cryptographically safe random number generator.
 The server generates a 32-byte server random value and sends it to the client in the Server License Request message. The server also sends its public key embedded in a server certificate as part of the Server License Request message.
 On receipt of a Server License Request message, the client generates a 32-byte client random value. It also generates a 48-byte random number called the premaster secret. The client encrypts the premaster secret (see section 5.1.1.1) using the server's public key (embedded in the Server Certificate in the Server License Request message). The client then sends the client random value and the encrypted premaster secret to the server in a Client New License Request message or a Client License Information message, depending on whether the client possesses a license.
+# Remote Desktop Client and Terminal Server Interaction Diagram
+
+This sequence diagram illustrates the communication flow between a Remote Desktop Client and a Terminal Server during a license and security handshake process.
+
+## Participants
+
+- **Remote Desktop Client**: Initiates the connection and responds to server requests.
+- **Terminal Server**: Responds to the client's requests and provides license information.
+
+## Communication Sequence
+
+The diagram shows a two-step interaction:
+
+### Step 1: Server License Request
+- **Direction**: From Terminal Server → Remote Desktop Client
+- **Message Content**: 
+  - `Server License Request:`
+  - `Server Random and Certificate`
+- **Purpose**: The server sends its license request, including a random value and a certificate, to the client.
+
+### Step 2: New License Request / License Info
+- **Direction**: From Remote Desktop Client → Terminal Server
+- **Message Content**:
+  - `New License Request/License Info:`
+  - `Client Random and Encrypted PreMaster Secret`
+- **Purpose**: The client responds with its own random value and an encrypted pre-master secret to establish a secure session.
+
+## Diagram Structure
+
+The diagram uses vertical dashed lines to represent the lifelines of each participant, with horizontal arrows indicating message flow. The messages are labeled with their content and purpose. The arrows show the direction of communication, with the first message going from server to client and the second from client to server.
+
 ![Client and server random values and premaster secret flows](images/MS-RDPELE-240423_image7.png)
 Figure 7: Client and server random values and premaster secret flows
 For information on how the licensing encryption key is generated, see section 5.1.2.

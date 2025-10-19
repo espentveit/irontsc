@@ -371,6 +371,52 @@ The graphics commands specified in section 2.2 are used to efficiently encode gr
 - RDPGFX_SURFACE_TO_SURFACE_PDU (section 2.2.2.5)
 - RDPGFX_SURFACE_TO_CACHE_PDU (section 2.2.2.6)
 - RDPGFX_CACHE_TO_SURFACE_PDU (section 2.2.2.7)
+# Graphics Blit Operations Diagram
+
+This diagram illustrates a sequence of blit operations and data transfers between different graphical components, including surfaces and a cache. The operations are numbered and connected by arrows to show their flow and dependencies.
+
+## Components
+
+- **WireToSurface PDU**: A data processing unit (PDU) that initiates the first operation.
+- **Surface: 0x01**: A graphical surface identified by the hexadecimal address 0x01.
+- **Surface: 0x02**: A graphical surface identified by the hexadecimal address 0x02.
+- **Cache**: A memory buffer or storage area used for temporary graphics data.
+- **SolidFill PDU**: A data processing unit (PDU) that provides solid fill data.
+
+## Operations and Data Flows
+
+The diagram shows five distinct blit operations, each labeled with a number and a description:
+
+1. **WireToSurface Blit**
+   - Originates from the `WireToSurface PDU`.
+   - Transfers data to `Surface: 0x01`.
+   - This is the initial data transfer into the first surface.
+
+2. **SolidFill**
+   - Originates from the `SolidFill PDU`.
+   - Transfers solid fill data to `Surface: 0x02`.
+   - This operation modifies the second surface with a solid fill pattern.
+
+3. **SurfaceToSurface Blit**
+   - Transfers data from `Surface: 0x01` to `Surface: 0x02`.
+   - This operation copies content from the first surface to the second.
+
+4. **SurfaceToCache Blit**
+   - Transfers data from `Surface: 0x02` to the `Cache`.
+   - This operation saves the content of the second surface to the cache.
+
+5. **CacheToSurface Blit**
+   - Transfers data from the `Cache` back to `Surface: 0x02`.
+   - This operation retrieves content from the cache and updates the second surface.
+
+## Visual Representation
+
+The diagram uses arrows to indicate the direction of data flow. Different shading patterns are used to represent different data or content types within the surfaces and cache.
+
+- The `WireToSurface PDU` and `SolidFill PDU` are shown as rectangular boxes, indicating they are processing units.
+- The surfaces and cache are represented as rectangular containers with internal regions that can be filled with different patterns.
+- The blit operations are labeled with numbers and arrows pointing
+
 ![Overview of the blit commands](images/MS-RDPEGFX-250811_image1.png)
 Figure 1: Overview of the blit commands
 For more details regarding the graphics protocol behavior, sequencing, and processing rules, see section 3.
@@ -2090,6 +2136,41 @@ None.
 ### Bitmap Compression
 #### RemoteFX Progressive Codec Compression
 The functional stages involved in the encoding path are illustrated in the following figure. Each of these stages is described in the following subsections.
+# Image Processing Pipeline Diagram
+
+This diagram illustrates a multi-stage image encoding process, likely for a compression algorithm. The flow is sequential, with some feedback loops for reference data.
+
+## Main Processing Flow
+
+The primary data path proceeds as follows:
+
+1.  **Input image/region** → Enters the pipeline.
+2.  **Color conversion (RGB to YCbCr)** → Converts the input color space.
+3.  **DWT** → Applies Discrete Wavelet Transform.
+4.  **Quantization and linearization** → Reduces precision and transforms data.
+5.  **Sub-band diffing** → Performs differential encoding across wavelet sub-bands.
+6.  **Progressive entropy encoding** → Encodes the data progressively using entropy coding.
+7.  **Encoded tiles** → Output of the encoding process.
+
+## Feedback and Reference Mechanism
+
+-   **Reference bits** → This block receives feedback from the "Progressive entropy encoding" stage via a dashed line.
+-   The "Reference bits" block feeds back into the "Sub-band diffing" stage via a dashed line, suggesting that reference data is used to assist in the differential encoding process.
+
+## Key Components and Relationships
+
+| Stage | Description | Input | Output | Feedback |
+| :--- | :--- | :--- | :--- | :--- |
+| Input | Starting point | Input image/region | - | - |
+| Color conversion | Converts RGB to YCbCr | Input image/region | Data for DWT | - |
+| DWT | Discrete Wavelet Transform | Color-converted data | Data for Quantization | - |
+| Quantization and linearization | Reduces precision and linearizes data | DWT output | Data for Sub-band diffing | - |
+| Sub-band diffing | Differential encoding across sub-bands | Quantized data | Data for Progressive entropy encoding | Reference bits (feedback) |
+| Progressive entropy encoding | Progressive entropy coding | Sub-band diffing output | Encoded tiles | Reference bits (feedback) |
+| Reference bits | Stores reference data for diffing | Progressive entropy encoding (dashed) | Feedback to Sub-band diffing | - |
+
+The dashed lines indicate a feedback loop, where "Reference bits" are generated from the "Progressive entropy encoding" stage and used to inform the "Sub-band diffing" stage. This is typical in predictive or differential coding schemes.
+
 ![RemoteFX Progressive Codec encoding stages](images/MS-RDPEGFX-250811_image2.png)
 Figure 2: RemoteFX Progressive Codec encoding stages
 When this encoding path is compared to [MS-RDPRFX] section 3.1.8.1, differencing has been removed, sub-band diffing has been added, and progressive encoding has been incorporated into the entropy encoder.
@@ -2108,12 +2189,92 @@ The first pass for a given direction (horizontal or vertical) takes an input of 
 The Original Method (section 3.2.8.1.2.1) for dealing with boundaries when encoding tiles introduces tile artifacts. The result is that users can perceive where the tile boundaries are in a decoded image. The Reduce-Extrapolate method removes this artifact.
 The first pass for a given direction (horizontal or vertical) takes an input of 64 coefficients and produces 33 low-frequency results and 31 high-frequency results.
 A 65th input coefficient is introduced by extrapolating from the last two input coefficients. Note that the subscripts used in the equations that follow are 1-based (in contrast to the equations in [MS-RDPRFX] section 3.1.8.1.4, which are 0–based). It is possible for the extrapolated 65th coefficient to lie outside of the normal pixel range. Furthermore, extrapolation is only required for the first level.
+IC₆₅ = 2.IC₆₄ - IC₆₃
+
 ![Bands resulting from the Reduce-Extrapolate DWT Method](images/MS-RDPEGFX-250811_image3.png)
 The first-pass DWT is performed on the 65 coefficients, mirroring around the first and the sixty-fifth boundary elements. As a result, 33 low-frequency and 32 high-frequency results are obtained. The final frequency result is zero and is dropped.
+# Mathematical Derivation of $ H_{32} $
+
+The image displays a step-by-step algebraic derivation showing that the expression $ H_{32} $ simplifies to zero.
+
+## Step-by-Step Breakdown
+
+The derivation is presented as a sequence of four lines:
+
+1. **Initial Expression:**
+   $$
+   H_{32} = -\frac{1}{4} IC_{63} + \frac{1}{2} IC_{64} - \frac{1}{4}IC_{65}
+   $$
+
+2. **Substitution:**
+   $$
+   = -\frac{1}{4} IC_{63} + \frac{1}{2}IC_{64} - \frac{1}{4}(2.IC_{64} - IC_{63})
+   $$
+
+3. **Expansion:**
+   $$
+   = -\frac{1}{4} IC_{63} + \frac{1}{2}IC_{64} - \frac{1}{2}IC_{64} + \frac{1}{4} IC_{63}
+   $$
+
+4. **Final Result:**
+   $$
+   = 0
+   $$
+
+## Key Observations
+
+- The derivation involves algebraic manipulation of terms containing $ IC_{63} $, $ IC_{64} $, and $ IC_{65} $.
+- The substitution step replaces $ IC_{65} $ with the expression $ (2.IC_{64} - IC_{63}) $.
+- The final result is $ H_{32} = 0 $, indicating that the original expression evaluates to zero after simplification.
+- The use of "IC" likely denotes a specific variable or function in the context of the problem (e.g., "Interaction Constant" or similar), though this is not specified in the image.
+
 ![Bands resulting from the Reduce-Extrapolate DWT Method](images/MS-RDPEGFX-250811_image4.png)
 The second-pass DWT takes the 33 low-frequency results from the first pass and performs a DWT with normal mirroring, producing in turn 17 low-frequency elements and 16 high-frequency elements.
 Finally, the third-pass DWT takes the 17 low-frequency results and produces (using the same techniques as the previous pass) 9 low-frequency elements and 8 high-frequency elements.
 The resulting bands and the sizes are illustrated in the following figure.
+# Image Description: Wavelet Subband Decomposition Grid
+
+This image displays a grid representing a multi-level wavelet decomposition of a 2D signal or image. The grid is structured with labeled subbands and coordinate axes.
+
+## Grid Structure
+
+The grid is organized into a hierarchical decomposition pattern, with the top-left corner representing the original signal and subsequent levels showing decomposed subbands.
+
+### Coordinate Axes
+
+- **Vertical Axis (Rows):** Labeled from top to bottom with values: `9`, `8`, `16`, `31`.
+- **Horizontal Axis (Columns):** Labeled from left to right with values: `9`, `8`, `16`, `31`.
+
+### Subband Labels
+
+The grid contains eight labeled subbands, which represent different frequency components at different decomposition levels:
+
+- **Level 3 (LL3, HL3, LH3, HH3):** Top-left 2x2 block.
+- **Level 2 (HL2, LH2, HH2):** Middle block.
+- **Level 1 (HL1, LH1, HH1):** Bottom block.
+
+### Subband Layout
+
+The grid is divided into 8 subbands as follows:
+
+| Subband | Location (Row, Column) | Size (Rows x Columns) |
+|---------|------------------------|------------------------|
+| LL3     | (9, 9)                 | 1x1                    |
+| HL3     | (9, 8)                 | 1x1                    |
+| LH3     | (8, 9)                 | 1x1                    |
+| HH3     | (8, 8)                 | 1x1                    |
+| HL2     | (9, 16)                | 1x2                    |
+| LH2     | (16, 9)                | 2x1                    |
+| HH2     | (16, 16)               | 2x2                    |
+| HL1     | (16, 31)               | 2x2                    |
+| LH1     | (31, 9)                | 2x2                    |
+| HH1     | (31, 31)               | 2x2                    |
+
+### Dimensions
+
+- The entire grid spans from row `9` to row `31` and from column `9` to column `33`.
+- The grid is divided into
+
 ![Bands resulting from the Reduce-Extrapolate DWT Method](images/MS-RDPEGFX-250811_image5.png)
 Figure 3: Bands resulting from the Reduce-Extrapolate DWT Method
 ##### Quantization and Linearization
@@ -2124,6 +2285,31 @@ To compress each tile in a surface, the encoder stores the quantized DWT coeffic
 The first phase of the Sub-Band Diffing Stage decides between sending the quantized DWT coefficients that have been calculated (section 3.2.8.1.3) or sending the differences with respect to the reference bits. This decision is made for each tile being encoded. If the quantized DWT coefficients of the tile are to be sent, then the tile is called an "original tile"; otherwise, it is referred to as a "difference tile".
 A tile that is being encoded for the first time is always sent as an original tile.
 The calculation to determine the difference is performed on all three color components. Each of the 1024 coefficients from the tile contained in the reference bits are subtracted from each of the 1024 coefficients from the most recently calculated tile. This data is used to construct the difference tile.
+# Mathematical Equation
+
+The image displays a single mathematical equation in a clear, black font on a white background.
+
+## Equation
+
+The equation is:
+
+$$
+QC_{DT} = QC_{OT} - QC_{RB}
+$$
+
+## Components
+
+- **Left-hand side**: $QC_{DT}$
+  - Represents a quantity or value labeled as "QC_DT".
+- **Right-hand side**: $QC_{OT} - QC_{RB}$
+  - Represents the difference between two quantities:
+    - $QC_{OT}$: Quantity labeled "QC_OT"
+    - $QC_{RB}$: Quantity labeled "QC_RB"
+
+## Structure
+
+The equation expresses that the value of $QC_{DT}$ is equal to the value of $QC_{OT}$ minus the value of $QC_{RB}$. This is a standard subtraction relationship.
+
 ![MS-RDPEGFX-250811_image6.png](images/MS-RDPEGFX-250811_image6.png)
 In the preceding formula, "QC" stands for "Quantized Coefficient", "DT" for "Difference Tile", "OT" for "Original Tile", and "RB" for "Reference Bits".
 Zeros are counted in both the difference tile and the original tile in only the Luma (Y) component in all the bands except for the LL3 band. The tile with the most number of zeros is selected to be sent to the RLGR Entropy Encoder. In the case of a tie, the original tile is preferred. If an original tile is selected over a difference tile, the reference bits MUST be cleared and filled with zeros.
@@ -2132,12 +2318,66 @@ The progressive encoder either can send a complete tile or can transmit multiple
 If a tile is to be transmitted in its entirety, then the tile data is dispatched to the RLGR1 Entropy Encoder ([MS-RDPRFX] section 3.1.8.1.7.1), and the output forms the payload to be sent to the decoder.
 If a tile is to be transmitted progressively, the Progressive Entropy Encoding Stage is exercised numerous times with the same input tile to generate multiple payloads that are consumed by the decoder to re-create the tile in its entirety. Sending a tile progressively is accomplished by executing a First Progressive Pass (section 3.2.8.1.5.1) followed by subsequent Upgrade Progressive Passes (section 3.2.8.1.5.2).
 SB represents the data output from the Sub-Band Diffing Stage. This data is sent through multiple progressive stages.
+# Mathematical Formula
+
+The image displays a mathematical equation that defines a variable `SB` as the sum of a sequence of terms.
+
+## Equation
+
+$$ SB = D_1 + D_2 + D_3 + \cdots + D_n $$
+
+## Description
+
+- **Left-hand side**: `SB` is the variable being defined.
+- **Right-hand side**: A summation of terms `D_1`, `D_2`, `D_3`, ..., `D_n`.
+- The sequence begins with `D_1` and ends with `D_n`, indicating `n` total terms.
+- The ellipsis (`...`) represents the continuation of the pattern for all terms between the third and the final term.
+- The formula expresses that `SB` is the sum of the first `n` terms of the sequence `D_i`.
+
+## Structure
+
+| Component | Description |
+|-----------|-------------|
+| `SB` | The sum or total value being calculated |
+| `D_i` | The individual terms in the sequence, indexed from 1 to `n` |
+| `n` | The total number of terms in the sequence |
+| `+` | The addition operator, indicating summation |
+| `...` | Ellipsis indicating continuation of the pattern |
+
+This formula is commonly used in mathematics, statistics, and computer science to represent the summation of a sequence of values.
+
 ![MS-RDPEGFX-250811_image7.png](images/MS-RDPEGFX-250811_image7.png)
 Where D1, D2, D3, ..., Dn is the data that is transmitted via n progressive passes.
 When a progressive pass is performed, DAS ("Data Already Sent") represents the cumulated data that has been transmitted through the previous passes, DTS ("Data To Send") represents the data to be transmitted in the current pass, and DRS ("Data Remaining to be Sent") represents the data that remains to be sent after the current pass.
 When performing pass i:
+DAS = Σ D_j
+
 ![MS-RDPEGFX-250811_image8.png](images/MS-RDPEGFX-250811_image8.png)
+DTS = D_i
+
 ![MS-RDPEGFX-250811_image9.png](images/MS-RDPEGFX-250811_image9.png)
+# Mathematical Formula
+
+The image displays a mathematical formula for calculating DRS.
+
+## Formula
+
+$$
+DRS = \sum_{j=i+1}^{n} D_j
+$$
+
+## Description
+
+- **DRS**: Represents the total value being calculated.
+- **Σ (Summation symbol)**: Indicates that the values of $D_j$ are being summed.
+- **j = i + 1**: The summation index starts at $j = i + 1$.
+- **n**: The upper limit of the summation.
+- **D_j**: The individual terms being summed, where $j$ is the index variable.
+
+## Interpretation
+
+This formula calculates the sum of all $D_j$ values from $j = i + 1$ up to $j = n$. In other words, it adds together the elements of a sequence or array starting from the element after position $i$ (i.e., position $i+1$) through the final element at position $n$.
+
 ![MS-RDPEGFX-250811_image10.png](images/MS-RDPEGFX-250811_image10.png)
 Each time a progressive pass is performed, DRS is reduced by the current DTS, and DAS is increased by the current DTS for the next pass.
 ###### Performing the First Progressive Pass
@@ -2287,10 +2527,119 @@ A4B2C5D1
 Note that in the real case, each ANSI character is a pixel represented by 3 bytes (R, G, B components). This type of encoding is suitable for the content in the residual layer (section 2.2.4.1.1.1).
 ##### Decompressing a Bitmap
 The following flowchart shows how to decompress a bitmap that is compressed using ClearCodec compression techniques.
+# Bitmap Decompression Flowchart
+
+This flowchart outlines the process for decompressing a bitmap using the ClearCodec format, with special handling for glyph data.
+
+## Start and Initial Setup
+
+- **Start Decompress Bitmap**
+  - The process begins here.
+- **Read flags field from ClearCodec bitmap stream header**
+  - Initial step to read the header flags.
+- **Is "glyph index" flag set?**
+  - Decision point to determine if glyph data is involved.
+    - **Yes** → Proceed to read glyphIndex field.
+    - **No** → Proceed to read composite payload header parameters.
+
+## Glyph Index Handling
+
+- **Read glyphIndex field**
+  - If the "glyph index" flag is set, read the glyphIndex field.
+- **Is "glyph hit" flag set?**
+  - Decision point to determine if the glyph is a hit (i.e., should be copied).
+    - **Yes** → Copy pixels from the Decompressor Glyph Storage position specified by the glyphIndex field to the output bitmap.
+    - **No** → Proceed to read composite payload header parameters.
+
+## Composite Payload Processing
+
+- **Read composite payload header parameters**
+  - Read the header parameters for the composite payload.
+- **Is residual byte count > 0?**
+  - Decision point for residual layer.
+    - **Yes** → Decompress residual layer and write to output bitmap.
+    - **No** → Proceed to check bands bytes.
+- **Is bands bytes count > 0?**
+  - Decision point for bands layer.
+    - **Yes** → Decompress bands layer and write to output bitmap.
+    - **No** → Proceed to check subcodec bytes.
+- **Is subcodec byte count > 0?**
+  - Decision point for subcodec layer.
+    - **Yes** → Decompress subcodec layer and write to output bitmap.
+    - **No** → Set alpha channel in output bitmap to fully opaque (0xFF).
+
+## Final Steps
+
+- **Is "glyph index" flag set?**
+  - Decision point to determine if the glyph index should be used for storage.
+    - **Yes** → Copy decompressed bitmap to the Decompressor Glyph Storage position specified by the glyphIndex field.
+    - **No** → Proceed to finished state.
+- **Finished Decompress Bitmap**
+  - End of the decompression process.
+
+## Notes
+
+- The flowchart shows a branching structure with multiple decision points based on flag settings and byte counts.
+- The process handles different layers
+
 ![Decompressing a bitmap using ClearCodec Bitmap Compression](images/MS-RDPEGFX-250811_image11.png)
 Figure 4: Decompressing a bitmap using ClearCodec Bitmap Compression
 #### RemoteFX Progressive Codec Compression
 The functional stages involved in the decoding path are illustrated in the following figure. Compared to the encoding stages, the decoding stage operations are the operations of the encoding stage in reverse order.
+# Decoding Process Flowchart
+
+This diagram illustrates the decoding process for a video or image tile, likely within a video compression standard such as H.264/AVC or HEVC, showing how an encoded tile is progressively decoded and reconstructed.
+
+## Main Flow
+
+The process begins with an input and proceeds through several stages to produce a decoded output.
+
+- **Input**: `Encoded tile`
+  - Enters the `Progressive entropy decode` block.
+
+- **Progressive entropy decode**
+  - Performs entropy decoding on the encoded tile.
+  - Receives feedback from the `Persistent progressive state` block.
+  - Outputs to the `Add` block.
+  - Also has a feedback connection to the `Current frame` block (dashed line).
+
+- **Add**
+  - Combines the output from `Progressive entropy decode` with the `Current frame`.
+  - Outputs to the `Inverse DWT` block.
+
+- **Inverse DWT**
+  - Performs inverse Discrete Wavelet Transform.
+  - Outputs to the `Color conversion (YCbCr to RGB)` block.
+
+- **Color conversion (YCbCr to RGB)**
+  - Converts the decoded chroma and luma components to RGB color space.
+  - Outputs the final result: `Decoded image/region`.
+
+## Feedback Loops and State Management
+
+The diagram includes feedback mechanisms to support progressive decoding.
+
+- **Persistent progressive state**
+  - Maintains state information across successive decoding operations.
+  - Provides feedback to the `Progressive entropy decode` block (dashed line).
+  - Receives feedback from the `Progressive entropy decode` block (dashed line).
+
+- **Current frame**
+  - Represents the reconstructed frame or region being built progressively.
+  - Receives input from the `Progressive entropy decode` block (dashed line).
+  - Provides input to the `Add` block (dashed line).
+  - Also receives feedback from the `Add` block (dashed line).
+
+## Summary of Blocks and Connections
+
+| Block Name | Description | Input(s) | Output(s) |
+|------------|-------------|----------|-----------|
+| Encoded tile | Input source | — | Progressive entropy decode |
+| Progressive entropy decode | Entropy decoding stage | Encoded tile, Persistent progressive state | Add |
+| Persistent progressive state | Maintains decoding state | Progressive entropy decode | Progressive entropy decode |
+| Add | Combines decoded data with current frame | Progressive entropy decode, Current frame | Inverse DWT |
+| Current frame | Re
+
 ![RemoteFX Progressive Codec decoding stages](images/MS-RDPEGFX-250811_image12.png)
 Figure 5: RemoteFX Progressive Codec decoding stages
 When compared to [MS-RDPRFX] section 3.1.8.2, the codec now maintains state. "Current frame" contains the DWT coefficients of the tiles, and "Persistent progressive state" is used to maintain information pertinent to tiles that have been received in progressive chunks.
@@ -2340,46 +2689,336 @@ Color conversion is identical to the technique specified in [MS-RDPRFX] section 
 ##### Color Conversion
 The forward transformation from ARGB to AYUV is based on full-range BT.709 ([ITU-BT.709-5] section 4) and is described by the following two formulas:
 A = A
+( Y )
+( U ) = ( (  54   183   18  ) ( R ) ) >> 8 + ( 0 )
+( V )   ( ( -29  -99  128  ) ( G ) )         ( 128 )
+        ( ( 128 -116  -12  ) ( B ) )         ( 128 )
+
 ![MS-RDPEGFX-250811_image13.png](images/MS-RDPEGFX-250811_image13.png)
 The resultant Y, U, and V components MUST be clamped to the range 0...255 inclusive.
 The reverse transformation from AYUV to ARGB is described by the following two formulas:
 A = A
+(R)
+(G) = (matrix) * (vector)
+(B)
+
 ![MS-RDPEGFX-250811_image14.png](images/MS-RDPEGFX-250811_image14.png)
 The resultant R, G, and B components MUST be clamped to the range 0...255 inclusive.
 ##### YUV420p Stream Combination for YUV444 mode
 The RFX_AVC444_BITMAP_STREAM structure (section 2.2.4.5) encapsulates two RFX_AVC420_BITMAP_STREAM structures (section 2.2.4.4). These two YUV420p streams MUST be combined to produce a YUV444 frame.
 A YUV444 frame can be represented as shown in the following figure, where Y444, U444, and V444 are the Y, U, and V planes of a source YUV444 frame. It is assumed that the resolution of these planes is specified by the width W and height H.
+# Image Description: YUV Color Space Components
+
+The image displays three adjacent square panels, each representing a component of the YUV color space. These components are commonly used in video and image processing for color representation.
+
+## Panel Layout
+
+The three panels are arranged horizontally in a row, side by side, with no visible gaps between them.
+
+## Individual Panels
+
+Each panel contains a single label centered within it. The labels represent the standard YUV color components:
+
+- **Left Panel**: Labeled `Y₄₄₄`
+- **Middle Panel**: Labeled `U₄₄₄`
+- **Right Panel**: Labeled `V₄₄₄`
+
+## Component Descriptions
+
+| Component | Label | Description |
+|-----------|-------|-------------|
+| Luminance  | Y₄₄₄ | Represents the brightness or luminance component of the image. The subscript "444" indicates that this component is sampled at full resolution (4:4:4 chroma subsampling). |
+| Chrominance (U) | U₄₄₄ | Represents the blue-difference chroma component. The subscript "444" indicates full resolution sampling. |
+| Chrominance (V) | V₄₄₄ | Represents the red-difference chroma component. The subscript "444" indicates full resolution sampling. |
+
+## Visual Characteristics
+
+- All three panels are identical in size and shape (squares).
+- Each panel has a white background and a thin black border.
+- The text is black, centered both horizontally and vertically within each panel.
+- The font appears to be a standard sans-serif typeface.
+
+## Interpretation
+
+This image visually represents the YUV color space with 4:4:4 chroma subsampling, where all three components (Y, U, V) are sampled at the same resolution. This is often used in high-fidelity video applications where color fidelity is critical.
+
 ![A representation of a YUV444 frame as three planes](images/MS-RDPEGFX-250811_image15.png)
 Figure 6: A representation of a YUV444 frame as three planes
 The YUV444 frame represented in the previous figure can be packed into two YUV420 frames (a main and auxiliary view) as shown in the following figure, which represents the frame at a 16x16 macroblock level.
+# YUV420 Color Space Representation
+
+This diagram illustrates the YUV420 color space format, which separates an image into luminance (Y) and chrominance (U, V) components with a specific subsampling pattern.
+
+## Main View (Y Component)
+
+- **Y (B1)**: The luminance component, which contains the brightness information of the image.
+  - This component is full-resolution, meaning it has the same dimensions as the original image.
+  - Labeled as `B1`.
+
+## Chroma420 View (U and V Components)
+
+- **Chroma420**: This section represents the chrominance components, which are subsampled to reduce data size while preserving color information.
+  - **U (B4)** and **V (B5)**: These components are combined into a single block in the auxiliary view.
+    - The dashed line indicates that U and V are stored together in this block.
+    - Labeled as `B4` and `B5` respectively.
+  - **U (B6)**: A separate U component block.
+    - Labeled as `B6`.
+  - **V (B7)**: A separate V component block.
+    - Labeled as `B7`.
+
+## Component Mapping
+
+The diagram shows how the YUV420 format is structured:
+
+| Component | Label | Resolution | Description |
+|-----------|-------|------------|-------------|
+| Y         | B1    | Full       | Luminance (brightness) |
+| U         | B2    | Half       | Chrominance (blue difference) |
+| V         | B3    | Half       | Chrominance (red difference) |
+| U         | B4    | Quarter    | Chrominance (blue difference) |
+| V         | B5    | Quarter    | Chrominance (red difference) |
+| U         | B6    | Quarter    | Chrominance (blue difference) |
+| V         | B7    | Quarter    | Chrominance (red difference) |
+
+## Notes
+
+- The "Main View" contains the Y component (B1) and the U and V components (B2, B3) at half resolution.
+- The "Auxiliary View" contains the U and V components (B4, B5, B6, B7) at quarter resolution.
+- The diagram uses labels B1 through B7 to identify each component block.
+- The dashed line in the auxiliary view indicates that U and
+
 ![A representation of a YUV444 macroblock as two YUV420p macroblocks](images/MS-RDPEGFX-250811_image16.png)
 Figure 7: A representation of a YUV444 macroblock as two YUV420p macroblocks
 The areas marked as B1 to B7 make up the Y, U, and V planes of the two YUV420p macroblocks representing the main (luma) and auxiliary (chroma) views. These areas are related to Y444, U444, and V444 as follows:
+# Main view:
+
+- **Area B1**: $Y_{420}(x,y) = Y_{444}(x,y)$, where the range of $(x,y)$ is $[0, W-1] \times [0, H-1]$
+
+- **Area B2**: $U_{420}(x,y) = \tilde{U}_{444}(2x, 2y)$, where the range of $(x,y)$ is $[0, \frac{W}{2} - 1] \times [0, \frac{H}{2} - 1]$
+
+- **Area B3**: $V_{420}(x,y) = \tilde{V}_{444}(2x, 2y)$, where the range of $(x,y)$ is $[0, \frac{W}{2} - 1] \times [0, \frac{H}{2} - 1]$
+
+# Auxiliary view:
+
+- **Area B4**: $Y_{420}(x,y) = U_{444}(x, 2y + 1)$, where the range of $(x,y)$ is $[0,15] \times [0,7]$
+
+- **Area B5**: $Y_{420}(x, 8 + y) = V_{444}(x, 2y + 1)$, where the range of $(x,y)$ is $[0,15] \times [0,7]$
+
+- **Area B6**: $U_{420}(x,y) = U_{444}(2x + 1, 2y)$, where the range of $(x,y)$ is $[0,7] \times [0,7]$
+
+- **Area B7**: $V_{420}(x,y) = V_{444}(2x + 1, 2y)$, where the range of $(x,y)$ is $[0,7] \times [0,7]$
+
 ![MS-RDPEGFX-250811_image17.png](images/MS-RDPEGFX-250811_image17.png)
 Color conversion MUST occur as follows in each case:
 For macroblocks that are in rectangles in a received luma subframe (refer to the regionRects field of the corresponding RFX_AVC420_METABLOCK (section 2.2.4.4.1)), color conversion MUST be performed as in YUV420p mode using only the data in the main view.
 For macroblocks that are in rectangles in a received chroma subframe (refer to the regionRects field of the corresponding RFX_AVC420_METABLOCK), color conversion MUST use the Y, U, and V components from the last corresponding rectangle in a luma subframe together with the current chroma subframe.
+# Reverse Filter for Color Conversion
+
+The following reverse filter must be applied to $\tilde{U}_{444}(2x,2y)$ and $\tilde{V}_{444}(2x,2y)$ prior to color conversion.
+
+## Filter Equations
+
+The filter is defined by two equations that transform the input chrominance components $ \tilde{U}_{444} $ and $ \tilde{V}_{444} $ into the output components $ U_{444} $ and $ V_{444} $.
+
+### U Component Equation
+
+$$
+U_{444}(2x,2y) = \tilde{U}_{444}(2x,2y) \cdot 4 - U_{444}(2x + 1,2y) - U_{444}(2x,2y + 1) - U_{444}(2x + 1,2y + 1)
+$$
+
+### V Component Equation
+
+$$
+V_{444}(2x,2y) = \tilde{V}_{444}(2x,2y) \cdot 4 - V_{444}(2x + 1,2y) - V_{444}(2x,2y + 1) - V_{444}(2x + 1,2y + 1)
+$$
+
+## Key Observations
+
+- The filter operates on pixel coordinates that are even multiples of 2 (i.e., $2x, 2y$), indicating it is applied to a subsampled or downsampled chrominance plane.
+- The filter is applied to the *interpolated* or *upsampled* chrominance components $ \tilde{U}_{444} $ and $ \tilde{V}_{444} $, which are typically obtained from a lower-resolution chrominance plane.
+- The filter uses a 3x3 neighborhood centered at $(2x, 2y)$, including the center pixel and its 8 neighbors, but only the 4 neighbors that are offset by 1 in x or y direction.
+- The filter is applied prior to color conversion, suggesting it is part of a chrominance resampling or reconstruction process, possibly during the conversion from YUV or YCbCr to RGB.
+- The coefficients are 4 (for the center pixel) and -
+
 ![MS-RDPEGFX-250811_image18.png](images/MS-RDPEGFX-250811_image18.png)
 Note that the ranges for x and y in the chroma subframe (auxiliary view) are based on 16x16 macroblock sizes, and the view in the figure captioned "A representation of a YUV444 macroblock as two YUV420p macroblocks" shows interleaving in the chroma subframe for B4 and B5 on an 8-line basis. Color conversion MUST be performed for the entire macroblock, after which the region mask in regionRects MUST be applied. The use of 2x or 2y denotes even pixels, while (2x+1) or (2y+1) denotes odd pixels.
 Due to potential visual artifacts stemming from the quantization of AVC encoding, applying the reverse filter is not optimal in all cases. If the reverse filter for a pixel component (U and V separately) changes the value by less than a given threshold, then the nonreversed value SHOULD be used instead. A cutoff threshold of 30 is used for this purpose. Note that this is an optional step and is not required in decoding.
+# Mathematical Expressions
+
+The image displays two mathematical expressions, each defining a function in terms of absolute differences and conditional operations.
+
+## Expression 1: U₄₄₄(2x, 2y)
+
+The first expression defines the function $ U_{444}(2x, 2y) $:
+
+$$
+U_{444}(2x, 2y) = \left( \text{abs} \left( \tilde{U}_{444}(2x, 2y) - U_{444}(2x, 2y) \right) > 30 \right) ? U_{444}(2x, 2y) : \tilde{U}_{444}(2x, 2y)
+$$
+
+This is a ternary conditional operator. It evaluates the absolute difference between $ \tilde{U}_{444}(2x, 2y) $ and $ U_{444}(2x, 2y) $. If this difference is greater than 30, the function returns $ U_{444}(2x, 2y) $; otherwise, it returns $ \tilde{U}_{444}(2x, 2y) $.
+
+## Expression 2: V₄₄₄(2x, 2y)
+
+The second expression defines the function $ V_{444}(2x, 2y) $:
+
+$$
+V_{444}(2x, 2y) = \left( \text{abs} \left( \tilde{V}_{444}(2x, 2y) - V_{444}(2x, 2y) \right) > 30 \right) ? V_{444}(2x, 2y) : \tilde{V}_{444}(2x, 2y)
+$$
+
+This expression follows the same structure as the first. It evaluates the absolute difference between $ \tilde{V}_{444}(2x, 2y) $ and $ V_{444}(2x, 2y) $. If this difference is greater than 30, the function returns $ V_{444}(2x, 2y) $; otherwise, it returns $ \tilde{V}_{444}(2x
+
 ![MS-RDPEGFX-250811_image19.png](images/MS-RDPEGFX-250811_image19.png)
 ##### YUV420p Stream Combination for YUV444v2 mode
 The RFX_AVC444V2_BITMAP_STREAM structure (section 2.2.4.6) encapsulates two RFX_AVC420_BITMAP_STREAM structures (section 2.2.4.4). These two YUV420p streams MUST be combined to produce a YUV444 frame.
 Note that the process of combining the streams is similar to the process used for YUV444 mode described in section 3.3.8.3.2, but the streams have a different layout in the auxiliary view. The terminology for YUV420 and YUV444 frames refers to buffers and remains the same.
 A YUV444 frame can be represented as shown in the following figure, where Y444, U444, and V444 are the Y, U, and V planes of a source YUV444 frame. It is assumed that the resolution of these planes is specified by the width W and height H.
+# Image Description: YUV Color Space Components
+
+The image displays three adjacent square panels, each representing a component of the YUV color space. These components are commonly used in video and image processing for color representation.
+
+## Panel Layout
+
+The three panels are arranged horizontally in a row, side by side, with no visible gaps between them.
+
+## Individual Panels
+
+Each panel contains a single label centered within it. The labels represent the standard YUV color components:
+
+- **Left Panel**: Labeled `Y₄₄₄`
+- **Middle Panel**: Labeled `U₄₄₄`
+- **Right Panel**: Labeled `V₄₄₄`
+
+## Component Descriptions
+
+| Component | Label | Description |
+|-----------|-------|-------------|
+| Luminance  | Y₄₄₄ | Represents the brightness or luminance component of the image. The subscript "444" indicates that this component is sampled at full resolution (4:4:4 chroma subsampling). |
+| Chrominance (U) | U₄₄₄ | Represents the blue-difference chroma component. The subscript "444" indicates full resolution sampling. |
+| Chrominance (V) | V₄₄₄ | Represents the red-difference chroma component. The subscript "444" indicates full resolution sampling. |
+
+## Visual Characteristics
+
+- All three panels are identical in size and shape (squares).
+- Each panel has a white background and a thin black border.
+- The text is black, centered both horizontally and vertically within each panel.
+- The font appears to be a standard sans-serif typeface.
+
+## Interpretation
+
+This image visually represents the YUV color space with 4:4:4 chroma subsampling, where all three components (Y, U, V) are sampled at the same resolution. This is often used in high-fidelity video applications where color fidelity is critical.
+
 ![A representation of a YUV444 frame as three planes](images/MS-RDPEGFX-250811_image15.png)
 Figure 8: A representation of a YUV444 frame as three planes
 The YUV444 frame represented in the previous figure can be packed into two YUV420 frames (a main and auxiliary view) as shown in the following figure, which represents the full frame.
+# YUV420 Color Space Representation
+
+This diagram illustrates the YUV420 color space format, which separates luminance (Y) and chrominance (U, V) components with a specific subsampling pattern.
+
+## Main View (Y Component)
+
+The main view represents the luminance component (Y) and the chrominance components (U, V) at full resolution.
+
+- **Y (B1)**: Full-resolution luminance component.
+- **U (B2)**: Chrominance component U at half the resolution of Y.
+- **V (B3)**: Chrominance component V at half the resolution of Y.
+
+## Auxiliary View (Chroma420)
+
+The auxiliary view shows the chrominance components (U, V) with a 4:2:0 subsampling pattern, meaning the chrominance is sampled at half the horizontal and vertical resolution of the luminance.
+
+- **U (B4)**: Chrominance component U at half the resolution of Y.
+- **V (B5)**: Chrominance component V at half the resolution of Y.
+- **U (B6)**: Chrominance component U at quarter the resolution of Y.
+- **V (B7)**: Chrominance component V at quarter the resolution of Y.
+- **U (B8)**: Chrominance component U at quarter the resolution of Y.
+- **V (B9)**: Chrominance component V at quarter the resolution of Y.
+
+## Structure Summary
+
+| Component | Resolution Relative to Y | Block ID |
+|-----------|--------------------------|----------|
+| Y         | Full resolution          | B1       |
+| U         | Half resolution          | B2, B4, B6, B8 |
+| V         | Half resolution          | B3, B5, B7, B9 |
+
+The diagram visually represents how the YUV420 format organizes data for efficient storage and transmission by separating the luminance and chrominance components and subsampling the chrominance.
+
 ![A representation of a YUV444 frame as two YUV420p frames](images/MS-RDPEGFX-250811_image20.png)
 Figure 9: A representation of a YUV444 frame as two YUV420p frames
 The areas marked as B1 to B9 make up the Y, U, and V planes of the two YUV420p macroblocks representing the main (luma) and auxiliary (chroma) views. These areas are related to Y444, U444, and V444 as follows.
+```markdown
+# Main view:
+
+- **Arrear B1**: $Y_{420}(x,y) = Y_{444}(x,y)$, where the range of $(x,y)$ is $[0, W-1] \times [0, H-1]$.
+- **Arrear B2**: $Y_{420}(x,y) = \tilde{U}_{444}(2x, 2y)$, where the range of $(x,y)$ is $[0, \frac{W}{2} - 1] \times [0, \frac{H}{2} - 1]$.
+- **Arrear B3**: $V_{420}(x,y) = \tilde{V}_{444}(2x, 2y)$, where the range of $(x,y)$ is $[0, \frac{W}{2} - 1] \times [0, \frac{H}{2} - 1]$.
+
+# Auxiliary view:
+
+- **Arrear B4**: $Y_{420}(x,y) = U_{444}(2x + 1, y)$, where the range of $(x,y)$ is $[0, \frac{W}{2} - 1] \times [0, H-1]$.
+- **Arrear B5**: $Y_{420}\left(\frac{W}{2} + x, y\right) = V_{444}(2x + 1, y)$, where the range of $(x,y)$ is $[0, \frac{W}{2} - 1] \times [0, H-1]$.
+- **Arrear B6**: $U_{420}(x,y) = U_{444}(4x, 2y + 1)$, where the range of $(x,y)$ is $[0, \frac{W}{4} - 1] \times [0, \frac{H}{2} - 1]$.
+- **Arrear B7**: $U_{420}\left(\frac{W}{4} + x, y\right) = V_{444}(4x, 2y + 1)$, where the range of $(x,y)$ is $[0, \frac{W}{4} - 1
+
 ![MS-RDPEGFX-250811_image21.png](images/MS-RDPEGFX-250811_image21.png)
 Color conversion MUST occur as follows in each case:
 For macroblocks that are in rectangles in a received luma subframe (refer to the regionRects field of the corresponding RFX_AVC420_METABLOCK (section 2.2.4.4.1)), color conversion MUST be performed as in YUV420p mode using only the data in the main view.
 For macroblocks that are in rectangles in a received chroma subframe (refer to the regionRects field of the corresponding RFX_AVC420_METABLOCK), color conversion MUST use the Y, U, and V components from the last corresponding rectangle in a luma subframe together with the current chroma subframe.
+# Reverse Filter for Color Conversion
+
+The following reverse filter must be applied to $\tilde{U}_{444}(2x, 2y)$ and $\tilde{V}_{444}(2x, 2y)$ prior to color conversion.
+
+## Filter Equations
+
+The filter is defined by two equations that compute new values $\tilde{U}_{444}(2x, 2y)$ and $\tilde{V}_{444}(2x, 2y)$ based on a weighted average of four neighboring values.
+
+### Equation for $\tilde{U}_{444}(2x, 2y)$
+
+$$
+\tilde{U}_{444}(2x, 2y) = \frac{U_{444}(2x, 2y) + U_{444}(2x + 1, 2y) + U_{444}(2x, 2y + 1) + U_{444}(2x + 1, 2y + 1)}{4}
+$$
+
+### Equation for $\tilde{V}_{444}(2x, 2y)$
+
+$$
+\tilde{V}_{444}(2x, 2y) = \frac{V_{444}(2x, 2y) + V_{444}(2x + 1, 2y) + V_{444}(2x, 2y + 1) + V_{444}(2x + 1, 2y + 1)}{4}
+$$
+
+## Structure Summary
+
+- **Input**: The filter operates on the original values $U_{444}$ and $V_{444}$ at positions $(2x, 2y)$, $(2x+1, 2y)$, $(2x, 2y+1)$, and $(2x+1, 2y+1)$.
+- **Output**: The filtered values $\tilde{U}_{444}(2x, 2y)$ and $\tilde{V}_{444}(2x, 2y)$ are computed as the average of the four input values.
+- **Purpose**: This is a spatial averaging filter applied prior to color conversion, likely to smooth or reconstruct chrominance components in a 4:4:4 format.
+
 ![MS-RDPEGFX-250811_image22.png](images/MS-RDPEGFX-250811_image22.png)
 Note that the ranges for x and y in the chroma subframe (auxiliary view) are based on 16x16 macroblock sizes, and the view in the figure captioned "A representation of a YUV444 macroblock as two YUV420p macroblocks" shows interleaving in the chroma subframe for B4 and B5 on an 8-line basis. Color conversion MUST be performed for the entire macroblock, after which the region mask in regionRects MUST be applied. The use of 2x or 2y denotes even pixels, while (2x+1) or (2y+1) denotes odd pixels.
 Due to potential visual artifacts stemming from the quantization of AVC encoding, applying the reverse filter is not optimal in all cases. If the reverse filter for a pixel component (U and V separately) changes the value by less than a given threshold, then the nonreversed value SHOULD be used instead. A cutoff threshold of 30 is used for this purpose. Note that this is an optional step and is not required in decoding.
+# Mathematical Equations
+
+The image displays two mathematical equations involving functions $U_{444}$ and $V_{444}$, each defined with a conditional operation based on the absolute difference between two related functions.
+
+## Equation 1
+
+$$
+U_{444}(2x, 2y) = \left( \text{abs} \left( \tilde{U}_{444}(2x, 2y) - U_{444}(2x, 2y) \right) > 30 \right) ? U_{444}(2x, 2y) : \tilde{U}_{444}(2x, 2y)
+$$
+
+This equation defines $U_{444}(2x, 2y)$ as follows:
+- If the absolute difference between $\tilde{U}_{444}(2x, 2y)$ and $U_{444}(2x, 2y)$ is greater than 30, then $U_{444}(2x, 2y)$ takes the value of $U_{444}(2x, 2y)$.
+- Otherwise, it takes the value of $\tilde{U}_{444}(2x, 2y)$.
+
+## Equation 2
+
+$$
+V_{444}(2x, 2y) = \left( \text{abs} \left( \tilde{V}_{444}(2x, 2y) - V_{444}(2x, 2y) \right) > 30 \right) ? V_{444}(2x, 2y) : \tilde{V}_{444}(2x, 2y)
+$$
+
+This equation defines $V_{444}(2x, 2y)$ as follows:
+- If the absolute difference between $\tilde{V}_{444}(2x, 2y)$ and $V_{444}(2x, 2y)$ is greater than 30, then $V_{444}(2x, 2y)$ takes the value of $V_{444}(2x, 2y)$.
+- Otherwise, it takes the value of $\tilde{V}_{444}(2x, 2y)$.
+
+## Structure Summary
+
 ![MS-RDPEGFX-250811_image23.png](images/MS-RDPEGFX-250811_image23.png)
 # Protocol Examples
 ## Bitmap Compression
@@ -2615,16 +3254,145 @@ Since there is no more data in the payload, it follows that decoding is complete
 Since the glyphIndex field was present in the CLEARCODEC_BITMAP_STREAM header of this packet, the Decompressor Glyph Storage (section 3.3.1.9) ADM element at position 120 is updated with the decoded bitmap.
 #### Example 5
 In order to instruct a client to render a glyph and then insert the glyph into the Decompressor Glyph Storage (section 3.3.1.9) ADM element, the server encapsulates an encoded representation of the glyph within a CLEARCODEC_BITMAP_STREAM (section 2.2.4.1) structure. This structure is embedded within an RDPGFX_WIRE_TO_SURFACE_PDU_1 (section 2.2.2.1) message, which is transmitted to the client. Within the CLEARCODEC_BITMAP_STREAM structure, the CLEARCODEC_FLAG_GLYPH_INDEX (0x01) flag is present in the flags field, while the CLEARCODEC_FLAG_GLYPH_HIT (0x02) flag is absent. The glyph bitmap is present in the compositePayload field. Once decoded, the glyph is effectively a linear stream of pixels, as shown in the following diagram.
+# Image Description: Alternating Black and White Rectangles
+
+This image displays a horizontal row of 12 equally sized rectangular blocks arranged side-by-side. The blocks alternate in color between black and white, starting with black on the left.
+
+## Block Sequence
+
+The sequence of blocks from left to right is as follows:
+
+| Position | Color  |
+|----------|--------|
+| 1        | Black  |
+| 2        | White  |
+| 3        | Black  |
+| 4        | Black  |
+| 5        | White  |
+| 6        | White  |
+| 7        | Black  |
+| 8        | Black  |
+| 9        | White  |
+| 10       | White  |
+| 11       | Black  |
+| 12       | Black  |
+
+## Observations
+
+- **Pattern**: The pattern is not strictly alternating (e.g., BWBWBW...). Instead, it appears to group blocks in sets of two black blocks followed by two white blocks, except for the first and last pairs.
+- **Structure**: All blocks are identical in size and are separated by thin, uniform gray borders.
+- **Overall Layout**: The entire row is contained within a single, thin gray border.
+
 ![Sixteen glyph pixels stored in a linear stream with no implied dimensions](images/MS-RDPEGFX-250811_image24.png)
 Figure 10: Sixteen glyph pixels stored in a linear stream with no implied dimensions
 The width and height of the glyph is determined by the rectangle defined in the destRect field of the encapsulating RDPGFX_WIRE_TO_SURFACE_PDU_1 message. For example, assuming that the width is 2 pixels and the height is 8 pixels, the following image would be rendered by the client.
+# Checkered Pattern Image
+
+The image displays a vertical arrangement of alternating black and white squares, forming a checkered pattern. The pattern is consistent throughout the entire height of the image.
+
+## Structure
+
+- The image is composed of 8 rows and 2 columns of squares.
+- Each square is of equal size.
+- The pattern alternates between black and white squares both horizontally and vertically.
+
+## Pattern Details
+
+### Row-by-Row Breakdown
+
+| Row | Left Square | Right Square |
+|-----|-------------|--------------|
+| 1   | Black       | White        |
+| 2   | White       | Black        |
+| 3   | Black       | White        |
+| 4   | White       | Black        |
+| 5   | Black       | White        |
+| 6   | White       | Black        |
+| 7   | Black       | White        |
+| 8   | White       | Black        |
+
+### Pattern Characteristics
+
+- **Alternating Colors**: Each row alternates between black and white, starting with black in the first row.
+- **Consistent Layout**: The pattern is identical in each row, creating a uniform checkered appearance.
+- **No Labels or Text**: The image contains no text, labels, or additional graphical elements.
+
+This structure resembles a simplified checkerboard or a two-column grid with a consistent alternating color scheme.
+
 ![A 2 x 8 glyph](images/MS-RDPEGFX-250811_image25.png)
 Figure 11: A 2 x 8 glyph
 The decoded linear stream of pixels is stored within the Decompressor Glyph Storage ADM element in the slot specified by the glyphIndex field of the encapsulating CLEARCODEC_BITMAP_STREAM structure. The pixels are stored with no implied dimensions. For the sake of this example, assume that the assigned slot is Slot 4.
 If the server detects a cache hit and determines that the glyph stored by the client in Slot 4 of the Decompressor Glyph Storage ADM element has to be rendered, the client will be sent a CLEARCODEC_BITMAP_STREAM structure (encapsulated within a RDPGFX_WIRE_TO_SURFACE_PDU_1 message) with the flags field containing both the CLEARCODEC_FLAG_GLYPH_INDEX and CLEARCODEC_FLAG_GLYPH_HIT flags. The optional compositePayload field will not be present. Note that in this case, the dimensions of the rectangle specified by the container RDPGFX_WIRE_TO_SURFACE_PDU_1 message (in the destRect field) can be any width and height that yields an effective area of 16 pixels2. For example, a possible configuration could be the following 4-pixel-by-4-pixel glyph.
+# Grid Image Description
+
+The image displays a 4x4 grid composed of 16 equal-sized squares. The grid is divided by gray lines, forming a structured matrix.
+
+## Grid Structure
+
+- The grid has 4 rows and 4 columns.
+- Each cell is a square of uniform size.
+- The grid is bordered by a thin gray outline.
+
+## Cell Color Pattern
+
+The cells alternate between black and white in a specific pattern:
+
+- **Black cells**: Located in the first column (leftmost) and the fourth column (rightmost) of every row.
+- **White cells**: Located in the second and third columns of every row.
+
+This creates a checkerboard-like pattern, but only along the outer edges.
+
+### Cell Color Table
+
+| Row | Column 1 | Column 2 | Column 3 | Column 4 |
+|-----|----------|----------|----------|----------|
+| 1   | Black    | White    | White    | Black    |
+| 2   | Black    | White    | White    | Black    |
+| 3   | Black    | White    | White    | Black    |
+| 4   | Black    | White    | White    | Black    |
+
+## Visual Characteristics
+
+- **Color contrast**: High contrast between black and white cells.
+- **Border**: Thin gray lines separate each cell and form the outer border.
+- **Alignment**: All cells are perfectly aligned and evenly spaced.
+
+This pattern suggests a deliberate design, possibly for visual testing, pattern recognition, or as a simple graphic element.
+
 ![A 4 x 4 glyph](images/MS-RDPEGFX-250811_image26.png)
 Figure 12: A 4 x 4 glyph
 Another possible configuration is the following 8-pixel-by-2-pixel glyph.
+# Image Description: Grid of Black and White Squares
+
+This image displays a 2x7 grid of squares, arranged in two rows and seven columns. Each square is either black or white, forming a specific alternating pattern.
+
+## Grid Layout
+
+The grid is composed of 14 squares total (2 rows × 7 columns).
+
+| Column | Row 1 Color | Row 2 Color |
+|--------|-------------|-------------|
+| 1      | Black       | Black       |
+| 2      | White       | White       |
+| 3      | White       | White       |
+| 4      | Black       | Black       |
+| 5      | Black       | Black       |
+| 6      | White       | White       |
+| 7      | White       | White       |
+
+## Pattern Analysis
+
+- **Row 1 Pattern**: Black, White, White, Black, Black, White, White
+- **Row 2 Pattern**: Black, White, White, Black, Black, White, White
+
+The pattern is not perfectly alternating. The first two columns are black-white-white, followed by black-black, then white-white, and ending with white-white.
+
+## Visual Characteristics
+
+- All squares are of equal size.
+- The grid is bordered by thin gray lines separating the individual squares.
+- The image is presented in a simple, monochromatic style with no additional labels or text.
+
 ![An 8 x 2 glyph](images/MS-RDPEGFX-250811_image27.png)
 Figure 13: An 8 x 2 glyph
 In effect, a linear stream of pixels stored in a slot in the Decompressor Glyph Storage ADM element can be blitted into a number of rectangular configurations, as long as all of the pixels are used in the configuration. The ultimate configuration is determined by cache hits encountered by the server encoder.

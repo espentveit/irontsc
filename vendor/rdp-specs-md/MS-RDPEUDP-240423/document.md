@@ -189,6 +189,44 @@ It has the following two primary goals:
 - Share network resources with other users.
 To achieve these goals, the protocol has two modes of operation. The first mode is a reliable mode where data is transferred reliably through persistent retransmits. The second mode is an unreliable mode, where no guarantees are made about reliability and the timeliness of data is preserved by avoiding retransmits. In addition, the Remote Desktop Protocol: UDP Transport Extension Protocol includes a forward error correction (FEC) logic that can be used to recover from random packet losses.
 The protocol’s two communicating parties, the endpoints of the UDP connection, are peers and use the same protocol. The connection between the two endpoints is bidirectional – data and acknowledgments (section 3.1.1.4) can be transmitted in both directions simultaneously. Logically, each single connection can be viewed as two unidirectional connections, as shown in the following figure. Both of these unidirectional connections are symmetrical and each endpoint has both a Sender and a Receiver entity. In this specification, the initiating endpoint A is referred to as the terminal client and endpoint B is referred to as the terminal server.
+# Communication Diagram: Endpoint A and Endpoint B
+
+This diagram illustrates a communication model between two endpoints, Endpoint A and Endpoint B, showing the flow of data and acknowledgments between their respective sender and receiver components.
+
+## Endpoint A
+
+- **Sender**
+  - Sends data to Endpoint B's Receiver.
+  - Receives acknowledgments from Endpoint B's Receiver.
+- **Receiver**
+  - Receives data from Endpoint B's Sender.
+  - Sends acknowledgments to Endpoint B's Sender.
+
+## Endpoint B
+
+- **Receiver**
+  - Receives data from Endpoint A's Sender.
+  - Sends acknowledgments to Endpoint A's Sender.
+- **Sender**
+  - Sends data to Endpoint A's Receiver.
+  - Receives acknowledgments from Endpoint A's Receiver.
+
+## Communication Flow
+
+The diagram depicts bidirectional communication with the following flows:
+
+| Direction        | From             | To               | Message Type       |
+|------------------|------------------|------------------|--------------------|
+| Data Flow 1      | Endpoint A Sender | Endpoint B Receiver | Data               |
+| Acknowledgment 1 | Endpoint B Receiver | Endpoint A Sender | Acknowledgments    |
+| Data Flow 2      | Endpoint B Sender | Endpoint A Receiver | Data               |
+| Acknowledgment 2 | Endpoint A Receiver | Endpoint B Sender | Acknowledgments    |
+
+- **Data** flows are represented by solid lines with solid arrowheads.
+- **Acknowledgments** flow is represented by dashed lines with solid arrowheads.
+
+This structure suggests a full-duplex communication model where each endpoint can send and receive data simultaneously, with each data transmission being acknowledged by the receiver.
+
 ![The UDP bidirectional endpoints connection](images/MS-RDPEUDP-240423_image1.png)
 Figure 1: The UDP bidirectional endpoints connection
 ### RDP-UDP Protocol
@@ -199,6 +237,55 @@ The protocol can operate in one of two modes. The operational mode is determined
 The connection between the endpoints is terminated when either the terminal client or terminal server terminates the connection. No protocol-specific messages are exchanged to communicate that the endpoint is no longer present.
 ### Message Flows
 The two endpoints, the terminal client and the terminal server, first set up a connection, and then transfer the data as shown in the following figure.
+# UDP Connection and Data Transfer Sequence Diagram
+
+This diagram illustrates a communication sequence between a Terminal client and a Terminal server using a modified TCP-like handshake over UDP.
+
+## Participants
+
+- **Terminal client**: Initiates the connection and receives data.
+- **Terminal server**: Accepts the connection and sends data.
+
+## Communication Sequence
+
+The sequence is divided into two main phases:
+
+### 1. UDP Connection Initialization
+
+This phase establishes the connection between the client and server.
+
+- **Step 1**: Terminal client → Terminal server: `SYN`
+  - The client sends a SYN (synchronize) packet to initiate the connection.
+
+- **Step 2**: Terminal server → Terminal client: `SYN + ACK`
+  - The server responds with a SYN-ACK packet, acknowledging the client's SYN and synchronizing its own sequence number.
+
+- **Step 3**: Terminal client → Terminal server: `ACK + Coded Packet`
+  - The client sends an ACK (acknowledge) packet to confirm receipt of the server's SYN-ACK, along with the first data packet, which is coded.
+
+### 2. UDP Data Transfer
+
+This phase involves the actual transfer of data packets.
+
+- **Step 4**: Terminal client → Terminal server: `ACK + Coded Packet`
+  - The client sends another ACK along with a coded data packet. This indicates the client is ready to receive more data and is acknowledging the previous packet.
+
+- **Step 5**: Terminal server → Terminal client: `ACK`
+  - The server sends an ACK packet to acknowledge the receipt of the client's ACK + Coded Packet.
+
+## Grouped Phases
+
+The diagram uses curly braces to group the steps into logical phases:
+
+- **UDP connection initialization**: Includes Steps 1, 2, and 3.
+- **UDP data transfer**: Includes Steps 4 and 5.
+
+## Notes
+
+- The protocol uses `ACK` (acknowledge) to confirm receipt of packets.
+- The term "Coded Packet" suggests that data packets are encoded for transmission, possibly for error correction or security.
+- This protocol appears to be a custom or modified protocol that uses a TCP-like handshake over UDP, which is not standard for UDP (which is connectionless). This might be used in scenarios requiring reliable delivery over UDP.
+
 ![The UDP connection initialization and UDP data transfer message flow](images/MS-RDPEUDP-240423_image2.png)
 Figure 2: The UDP connection initialization and UDP data transfer message flow
 The following sections describe the two phases of the communication and the detailed data transfer.
@@ -210,9 +297,67 @@ All datagrams in this phase – the SYN, SYN+ACK, and ACK – are delivered reli
 If the UDP Transport Extension version negotiated in the UDP connection initialization phase is version 3 or higher (section 2.2.2.9), the UDP data transfer is defined in [MS-RDPEUDP2]. The UDP data transfer messages described in this document MUST be used only when the version negotiated in the UDP connection initialization phase is version 1 or version 2 (section 1.7).
 In this phase, which follows the UDP Connection Initialization (section 1.3.2.1) phase, the data generated by the users of this protocol is exchanged. This phase ends when either the connection is terminated by the user, or when an endpoint determines that the remote endpoint is no longer present.
 The terminal server (sender) and terminal client (receiver) exchange Coded Packets in this phase. A schematic diagram of the FEC engine is shown in the following diagram.
+# FEC Encoder Block Diagram
+
+This diagram illustrates the input and output structure of a Forward Error Correction (FEC) encoder.
+
+## Input Data
+
+The FEC encoder receives three input streams, labeled as follows:
+
+- `S₈`
+- `S₂`
+- `S₁`
+
+These inputs are shown as separate rectangular blocks on the left side of the diagram.
+
+## Encoder Module
+
+- **Component**: `FecEncoder`
+- **Function**: Processes the input streams to generate the output.
+- **Position**: Central block in the diagram, receiving inputs and producing outputs.
+
+## Output Data
+
+The encoder produces four output streams, labeled as follows:
+
+- `F₁-₃`
+- `S₈`
+- `S₂`
+- `S₁`
+
+These outputs are shown as separate rectangular blocks on the right side of the diagram.
+
+## Data Flow
+
+The diagram depicts a unidirectional flow:
+
+1. The three input streams (`S₈`, `S₂`, `S₁`) are fed into the `FecEncoder`.
+2. The encoder processes these inputs.
+3. The result is four output streams (`F₁-₃`, `S₈`, `S₂`, `S₁`).
+
+The output includes the original streams (`S₈`, `S₂`, `S₁`), indicating that they are preserved, along with a new stream (`F₁-₃`) which is likely the FEC parity data.
+
+## Summary Table
+
+| Component      | Type     | Description                     |
+|----------------|----------|---------------------------------|
+| `S₈`           | Input    | First input stream              |
+| `S₂`           | Input    | Second input stream             |
+| `S₁`           | Input    | Third input stream              |
+| `FecEncoder`   | Processor| Central processing unit         |
+| `F₁-₃`         | Output   | FEC parity or redundant data   |
+| `S₈`           | Output   | Preserved original stream      |
+| `S₂`           | Output   | Preserved original stream      |
+| `S₁`           | Output   | Preserved original stream      |
+
+This structure is typical for FEC systems where original data is transmitted along with redundant parity data to enable error recovery at the receiver.
+
 ![FEC engine](images/MS-RDPEUDP-240423_image3.png)
 Figure 3: FEC engine
 The Remote Desktop Protocol: UDP Transport Extension Protocol uses the FEC mechanism for recovery from packet losses. An FEC Packet is added to the data stream after processing a block of m Source Packets. Each FEC Packet carries redundant information regarding these Source Packets. This information can be used in case one of the m Source Packets is lost and needs to be recovered. A generic equation for generating an FEC Packet is listed as follows.
+F_{i-m}[n] = Σ_{i=1}^{m} c_i * S[n]
+
 ![Generic equation for an FEC Packet](images/MS-RDPEUDP-240423_image4.png)
 Figure 4: Generic equation for an FEC Packet
 The FEC Packets require no acknowledgments (section 3.1.1.4), and they are not retransmitted. The sender can either set the FEC block size to any value up to 255 or to not send any FEC Packets in the stream. Likewise, the receiver, upon a receipt of an FEC Packet, can ignore the FEC Packet and not use it for any decoding operations.
@@ -420,11 +565,15 @@ This section explains the operations involved in generating an FEC Packet. An FE
 ##### Finite Field Arithmetic
 A finite field is a finite set of numbers. All arithmetic operations performed on this field will yield a result that belongs to the same finite field. For example, a finite field of size 256 with numbers from 0 to 255 is defined. All the arithmetic operations (addition, subtraction, multiplication, and division) on this field will yield a result in the range of 0 to 255, thus belonging to the original finite field itself. Conventional arithmetic differs from finite field arithmetic as it operates on an infinite set of real numbers. For more details on finite fields, see [Lidl].
 All binary numbers belonging to a finite field (also known as a Galois field, GF(pn)), where p is a prime number and n is a positive integer, can be represented in a polynomial form and in a finite field with binary numbers (for example in GF(256)=GF(28)), where a is the coefficient of this equation with a value equal to zero or 1.
+a_{n-1} * X^{n-1} + a_{n-2} * X^{n-2} + ... + a_1 * X^1 + a_0
+
 ![Galois field and binary representation example](images/MS-RDPEUDP-240423_image5.png)
 Figure 5: Galois field and binary representation example
 ###### Addition and Subtraction
 Adding or subtracting two polynomials is done by grouping coefficients of the same order, similar to regular algebra. However, since this operation is performed in GF(28), the result is brought into the finite field by performing a modulo 2 operation on each of the coefficients in the polynomial representation.
 The addition operation over the finite field is logically equivalent to a XOR operation. Thus, adding or subtracting two polynomials means XORing them together, as described in the following figure.
+A + B = A - B = A ⊕ B
+
 ![Addition and subtraction example](images/MS-RDPEUDP-240423_image6.png)
 Figure 6: Addition and subtraction example
 In a finite field of GF(2n), such as GF(256), addition and subtraction are equivalent operations.
@@ -442,9 +591,34 @@ Multiplication in the finite field can be performed in one of the following two 
 - Using logarithms
 - Multiplying the two polynomials and reducing the result with an irreducible polynomial to bring it back in the finite field
 It is simpler to perform multiplications and divisions using logarithms, as it involves a table lookup for the log function, followed by an addition of the polynomials, followed by an exponent function.
+A * B = exp(log(A) + log(B)) % 2"
+
 ![Multiplication equation](images/MS-RDPEUDP-240423_image7.png)
 Figure 7: Multiplication equation
 Division is performed similarly using logarithms and exponentiation.
+# Mathematical Expression
+
+The image displays a single mathematical equation.
+
+## Equation
+
+$$
+\frac{A}{B} = \exp(\log(A) - \log(B)) \% 2^n
+$$
+
+## Components
+
+- **Left-hand side**: $\frac{A}{B}$ — the ratio of two variables A and B.
+- **Right-hand side**: 
+  - $\exp(\log(A) - \log(B))$ — the exponential of the difference of the logarithms of A and B.
+  - $\% 2^n$ — the result modulo $2^n$, where $n$ is a positive integer.
+
+## Notes
+
+- The equation appears to be a mathematical identity or formula.
+- The use of $\%$ for modulo operation is common in programming and mathematics.
+- The expression $\exp(\log(A) - \log(B))$ simplifies to $\frac{A}{B}$ for $A, B > 0$, assuming the logarithm is base $e$ (natural log). However, the modulo operation $\% 2^n$ is applied to the result, which is unusual for standard algebraic identities.
+
 ![Division equation](images/MS-RDPEUDP-240423_image8.png)
 Figure 8: Division equation
 Since the discrete logarithm of an element in the finite field is a regular integer, the addition in the exponent is a regular addition modulo 2n.
@@ -489,9 +663,45 @@ m_ffPoly2Exp[m_ffExp2Poly[i]] = (byte)i;
 Logarithms and exponents can be obtained by using the methods described previously to generate logarithms and exponent lookup tables.
 ##### FEC Encoding
 As described in section 1.3.2.2, an FEC Packet is added to the data stream after processing a block of Source Packets. The size of the FEC Packet is equal to the size of the largest Source Packet in the group. In the following representation, each Source Packet Sn contains at most k bytes. All the Source Packets with a size smaller than k are padded with bytes containing zero.
+# Mathematical Sets
+
+The image displays two mathematical sets defined using set notation.
+
+## Set Sₙ
+
+- **Name**: Sₙ
+- **Elements**: {bₙ₁, bₙ₂, bₙ₃, ..., bₙₖ}
+- **Description**: This set contains k elements, each labeled with an index that combines the subscript n with a sequential integer from 1 to k.
+- **Structure**: The elements follow a pattern where the index of each element is `n` followed by a subscript from 1 to k.
+
+## Set F₁
+
+- **Name**: F₁
+- **Elements**: {b_f₁, b_f₂, b_f₃, ..., b_fₖ}
+- **Description**: This set contains k elements, each labeled with an index that combines the subscript f with a sequential integer from 1 to k.
+- **Structure**: The elements follow a pattern where the index of each element is `f` followed by a subscript from 1 to k.
+
+## Comparison
+
+| Feature         | Sₙ                             | F₁                             |
+|-----------------|--------------------------------|--------------------------------|
+| Base Index      | n                              | f                              |
+| Element Pattern | bₙ₁, bₙ₂, ..., bₙₖ             | b_f₁, b_f₂, ..., b_fₖ         |
+| Number of Elements | k                            | k                              |
+| Index Range     | 1 to k                         | 1 to k                         |
+
+Both sets have the same number of elements (k), but they differ in the base index used for their elements (n for Sₙ and f for F₁).
+
 ![Source Packet and FEC Packet representation](images/MS-RDPEUDP-240423_image9.png)
 Figure 9: Source Packet and FEC Packet representation
 The FEC Packet is generated with the following equation.
+[bf¹  bf²  bf³  ...  bfk] = [c₁  c₂  c₃  ...  cₙ] * 
+                             [b₁₁ b₁₂ b₁₃ ... b₁k
+                              b₂₁ b₂₂ b₂₃ ... b₂k
+                              b₃₁ b₃₂ b₃₃ ... b₃k
+                              ...
+                              bn₁ bn₂ bn₃ ... bnk]
+
 ![FEC encoding](images/MS-RDPEUDP-240423_image10.png)
 Figure 10: FEC encoding
 The product of these two matrices will give us a row matrix, which is the FEC Packet of size 1 * k. The method in which the coefficients are generated is explained in the following pseudo-code example and in the following sections.
@@ -561,6 +771,20 @@ fecArr[i] = Mul(CoEffArray[j],FECGeneratorArray[j][i]) ^ fecArr[i];
 An FEC decoding operation is the reverse of the FEC encoding (section 3.1.1.6.2) operation. The FEC decoding operation solves the linear equation that is used to recover the lost Source Packets. Each FEC Packet can be used to recover only one Source Packet in the range covered by that FEC Packet.
 To decode, or recover a missing datagram using FEC, the following matrix is constructed where packet F1 is the FEC block for Source Packets S1 – Sn.
 For simplicity, assume n=5. If packet S4 is missing, it can be recovered by using the following matrix operation.
+[ S1 ]
+[ S2 ]
+[ S3 ]
+[ S5 ]
+[ F1 - 5 ]   =   [ 1  0  0  0  0 ]
+                [ 0  1  0  0  0 ]
+                [ 0  0  1  0  0 ]
+                [ 0  0  0  0  1 ]
+                [ c1 c2 c3 c4 c5 ]   *   [ S1 ]
+                                        [ S2 ]
+                                        [ S3 ]
+                                        [ S4 ]
+                                        [ S5 ]
+
 ![Matrix operation for FEC decoding](images/MS-RDPEUDP-240423_image11.png)
 Figure 11: Matrix operation for FEC decoding
 Here, matrix S’ contains an unknown term (S4) that needs to be computed. This can be done by converting Cd to an identity matrix using the Gauss-Jordan elimination. For more details on the Gauss-Jordan elimination, see [Press] section 2.1.
@@ -585,6 +809,8 @@ F15.m_pbPacket[i],CoEfficientArray[2]));
 printf("\n");
 ##### Selecting the Coefficients Matrix
 If the Source sequence numbers (section 3.1.1.2) for packets S1, S2, S3 … Sn are s1, s2, s3 … sn, the coefficient matrix is calculated as follows.
+[c1  c2  c3  ...  cn]
+
 ![Matrix coefficient calculation](images/MS-RDPEUDP-240423_image12.png)
 Figure 12: Matrix coefficient calculation
 The division uses finite field division as described in section 3.1.1.6.1.2. Note that since all the packets in an FEC Packet are sequential, s2=s1+1, s3=s1+2, …, sn=s1+(n-1).
@@ -661,6 +887,65 @@ The user of this protocol MUST be notified on receipt of a datagram when one end
 The user of this protocol can terminate a connection at any point in time. Datagrams SHOULD NOT be sent by the transport after the user has terminated the connection. All of the datagrams received after the connection termination MUST be ignored.
 ### Message Processing Events and Sequencing Rules
 The states of the protocol, divided into the terminal server states and the terminal client states, are illustrated in the following figure.
+# TCP Connection State Diagram: Terminal Server vs. Terminal Client
+
+This diagram illustrates the state transitions for TCP connection establishment and termination for two entities: a **Terminal server** and a **Terminal client**. Each follows a distinct path based on its role in the TCP handshake.
+
+---
+
+## Terminal Server State Diagram
+
+The server waits for incoming connections and initiates the listening state.
+
+### States
+
+- **Closed** (Initial state)
+- **Listen** (Waiting for incoming connection)
+- **SYN Received** (Received a SYN from a client)
+- **Established** (Connection fully established)
+
+### Transitions
+
+| Transition Trigger       | From State   | To State       |
+|--------------------------|--------------|----------------|
+| `Listen`                 | Closed       | Listen         |
+| `SYN/SYN+ACK`            | Listen       | SYN Received   |
+| `ACK`                    | SYN Received | Established     |
+| `Close`                  | Established  | Closed         |
+| `Close network connection` | Closed      | Termination (Final State) |
+
+---
+
+## Terminal Client State Diagram
+
+The client initiates the connection by sending a SYN.
+
+### States
+
+- **Closed** (Initial state)
+- **SYN Sent** (Sent SYN to server)
+- **Established** (Connection fully established)
+
+### Transitions
+
+| Transition Trigger       | From State   | To State       |
+|--------------------------|--------------|----------------|
+| `Connect/SYN`            | Closed       | SYN Sent       |
+| `SYN+ACK/ACK(+DATA)`     | SYN Sent     | Established     |
+| `Close`                  | Established  | Closed         |
+| `Close network connection` | Closed      | Termination (Final State) |
+
+---
+
+## Key Observations
+
+- **Symmetry**: Both diagrams follow the standard TCP 3-way handshake (SYN, SYN+ACK, ACK) but from different perspectives.
+- **Termination**: Both entities can terminate the connection by sending a `Close` command, returning to the `Closed` state. A `Close network connection` action leads to the final termination state (double circle).
+- **Role Difference**:
+  - The **server** starts in `Listen` after `Closed`, waiting for incoming connections.
+  - The **client** starts in `Closed`, then sends a `Connect/SYN` to initiate the connection.
+- **Established State**: Both reach `Established` after completing the handshake and can then send or receive data. From here
+
 ![State diagram for the terminal server and terminal client states](images/MS-RDPEUDP-240423_image13.png)
 Figure 13: State diagram for the terminal server and terminal client states
 The states are described as follows:

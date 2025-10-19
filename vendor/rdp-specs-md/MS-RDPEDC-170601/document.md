@@ -196,6 +196,36 @@ The protocol extensions described in this specification specify the following:
 ### Relationship to Update Orders PDU
 The Remote Desktop Protocol: Desktop Composition Virtual Channel Extension consists of a set of alternate secondary drawing orders supported by the Remote Desktop Protocol: Graphics Device Interface (GDI), as specified in [MS-RDPEGDI] sections 1.3.1.2.3 and 2.2.2.2.1.3.
 Alternate secondary drawing orders are wrapped in an Orders Update structure (as specified in [MS-RDPEGDI] section 2.2.2.1) or a Fast-Path Orders Update (as specified in [MS-RDPEGDI] section 2.2.2.2). The following figure shows the layering of the protocol stack with this wrapping.
+# Image Description: Header Field Layout
+
+The image displays a horizontal layout of four distinct fields, likely representing components of a data header or message format. Each field is presented in its own rectangular cell, arranged side-by-side.
+
+## Field Breakdown
+
+Each field is labeled with a specific identifier or name. The fields are:
+
+- **X.224 FastPath**
+- **TS_UPDATETYPE_ORDERS**
+- **AltSec Header**
+- **COMPOSE_DESK**
+
+## Visual Structure
+
+The fields are arranged in a single row, suggesting a sequential or concatenated structure. The visual presentation indicates that these components may be part of a larger protocol or message format, where each field occupies a defined position.
+
+| Field Name          | Description             |
+|---------------------|-------------------------|
+| X.224 FastPath      | Likely refers to a fast-path mechanism for X.224 protocol |
+| TS_UPDATETYPE_ORDERS| Indicates an update type related to orders |
+| AltSec Header       | Alternative security header |
+| COMPOSE_DESK        | Possibly related to composing a desk or workspace |
+
+## Notes
+
+- The fields are visually distinct, with clear boundaries.
+- The labels are centered within their respective cells.
+- The image does not include any additional context such as data types, lengths, or relationships beyond the visual arrangement.
+
 ![Update PDU packet objects](images/MS-RDPEDC-170601_image1.png)
 Figure 1: Update PDU packet objects
 The X.224 fast-path header can be replaced by the X.224 header and the MCS Send Data Indication header, as specified in [MS-RDPBCGR] section 2.2.8.
@@ -203,6 +233,61 @@ The X.224 fast-path header can be replaced by the X.224 header and the MCS Send 
 #### Desktop Composition Mode Management
 Desktop composition is an operational mode of the graphics subsystem. The graphics subsystem starts in the non-composed mode mode. It has to be brought into the composed mode.
 The following illustration shows the overall sequence involved in the drawing mode changes (starting and stopping composition, and switching from, or to, the composed desktop).
+# Sequence Diagram: Server-Client Interaction for Desktop Composition
+
+This sequence diagram illustrates the interaction between a Server and a Client regarding desktop composition state changes, specifically toggling between composition on and off, which involves desktop switch cycles.
+
+## Participants
+
+- **Server**: Initiates the sequence by sending messages to the Client.
+- **Client**: Receives and processes messages from the Server.
+
+## Message Flow
+
+The diagram shows a sequence of messages sent from the Server to the Client, grouped into two main phases:
+
+### Phase 1: Composition On
+
+- **Message**: `COMPDESKTOGGLE - COMPOSITION_ON`
+  - This message triggers the Client to enter composition mode.
+
+### Phase 2: Desktop Switch Cycle (First)
+
+- **Message**: `COMPDESKTOGGLE - DMW_DESK_LEAVE`
+  - The Client responds by leaving the current desktop.
+- **Message**: `COMPDESKTOGGLE - DMW_DESK_ENTER`
+  - The Client then enters a new desktop.
+
+> This sequence is labeled as a **Desktop Switch Cycle**.
+
+### Phase 3: Desktop Switch Cycle (Second)
+
+- **Message**: `COMPDESKTOGGLE - DMW_DESK_LEAVE`
+  - The Client leaves the current desktop again.
+- **Message**: `COMPDESKTOGGLE - DMW_DESK_ENTER`
+  - The Client enters a new desktop.
+
+> This sequence is also labeled as a **Desktop Switch Cycle**.
+
+### Phase 4: Composition Off
+
+- **Message**: `COMPDESKTOGGLE - COMPOSITION_OFF`
+  - This message triggers the Client to exit composition mode.
+
+## Groupings
+
+- **Desktop Switch Cycle**: A bracketed group encompassing the two `DMW_DESK_LEAVE` and `DMW_DESK_ENTER` message pairs.
+- **Composition Cycle**: A larger bracketed group encompassing both Desktop Switch Cycles and the `COMPOSITION_ON` and `COMPOSITION_OFF` messages.
+
+## Summary Table
+
+| Message Type             | Description                     | Triggered By          |
+|--------------------------|---------------------------------|------------------------|
+| `COMPDESKTOGGLE - COMPOSITION_ON` | Initiates composition mode     | Server                |
+| `COMPDESKTOGGLE - DMW_DESK_LEAVE` | Client leaves current desktop  | Server (during cycle) |
+| `COMPDESKTOGGLE - DMW_DESK_ENTER` | Client enters new desktop      | Server (during cycle) |
+| `COMPDESKTOGGLE - COMPOSITION_OFF` |
+
 ![Sequence of operations involving drawing mode changes](images/MS-RDPEDC-170601_image2.png)
 Figure 2: Sequence of operations involving drawing mode changes
 The Desktop Window Manager (DWM) signals to the compose desktop mediator that it is entering or leaving the composed mode drawing mode with the COMPOSITION_ON and COMPOSITION_OFF events. After the DWM enters the composed mode drawing mode, it can temporarily leave and re-enter the desktop that is currently being composed.
@@ -212,11 +297,104 @@ The implementation of the DWM transition for composed mode and desktop mode is i
 Logical surface and redirection surface are two types of objects used by the Desktop Window Manager. The objects are allocated on the server, and their handles are sent to the client and used by the compositor on the client to access the surface data and properties from the surface manager proxy.
 The protocol extension specified here is responsible for remoting the handle values to the client. The remote protocol keeps the lifetime and association of the proxy redirection objects on the client in sync with their corresponding redirection surface on the server.
 The following illustration shows an overview of the object lifetime and association when the desktop is in a composed mode.
+# Sequence Diagram: Server-Client Interaction for Surface Composition
+
+This sequence diagram illustrates the interaction between a Server and a Client, focusing on the lifecycle of logical surfaces and the role of surface redirection in a composition system.
+
+## Overview
+
+The diagram depicts a sequence of messages exchanged between the Server and Client, organized into three distinct phases or cycles:
+
+1. **Redir Surface Cycle**
+2. **Logical Surface Cycle**
+3. **Composition Cycle**
+
+These cycles are grouped by a large right curly brace, indicating they are part of the overall composition process.
+
+## Message Flow
+
+The following messages are exchanged in sequence:
+
+- **COMPDESKTOGGLE - Composition_ON** → Initiates composition mode.
+- **COMPDESK_LSURFACE - Create - hLSurf1** → Creates a logical surface.
+- **COMPDESK_SURFOBJ - Create - hSurf1** → Creates a surface object associated with hLSurf1.
+- **COMPDESK_ASSOC_Attach - hLSurf1, hSurf1** → Attaches the surface object to the logical surface.
+- **COMPDESK_ASSOC_Detach - hLSurf1, hSurf1** → Detaches the surface object from the logical surface.
+- **COMPDESK_SURFOBJ - Delete - hSurf1** → Deletes the surface object.
+- **COMPDESK_ASSOC_Attach - hLSurf1, hSurf2** → Attaches a new surface object (hSurf2) to the same logical surface.
+- **COMPDESK_ASSOC_Detach - hLSurf1, hSurf2** → Detaches the new surface object.
+- **COMPDESK_SURFOBJ - Delete - hLSurf2** → Deletes the surface object (note: likely a typo, should be hSurf2).
+- **COMPDESK_LSURFACE - Delete - hLSurf1** → Deletes the logical surface.
+- **COMPDESKTOGGLE - Composition_OFF** → Deactivates composition mode.
+
+## Cycles Breakdown
+
+### Redir Surface Cycle
+
+This cycle includes the initial creation and deletion of surface objects (`hSurf1` and `hSurf2`) and their attachment/detachment from the logical surface (`hLSurf1`). It is enclosed in a curly brace labeled "Redir Surface Cycle".
+
+### Logical Surface Cycle
+
+This cycle involves the creation and deletion of the logical surface (`hLSurf1`) and the attachment/detachment of surface objects to it
+
 ![Logical surface and redirection surface management](images/MS-RDPEDC-170601_image3.png)
 Figure 3: Logical surface and redirection surface management
 #### Drawing Operations Management
 After a logical surface and its associated redirection surface are created, the redirection surface is targeted by primary, secondary, and alternate secondary drawing orders, as specified in section 1.3.1.2 of [MS-RDPEGDI]. The SWITCH_SURFOBJ message is sent when a drawing order targets a different redirection surface than the previous one.
 The following illustration shows the overall sequence of drawing operations on a redirection surface.
+# Sequence Diagram: Logical Surface Cycle
+
+This sequence diagram illustrates the interaction between a Server and a Client during a "Logical Surface Cycle," which encompasses the creation, usage, and deletion of redirected surfaces.
+
+## Overview
+
+The diagram shows a vertical timeline of messages exchanged between the Server (left) and the Client (right). The entire process is grouped into three main phases:
+
+1. **Redir Surface Creation**
+2. **Drawing Cycle**
+3. **Redir Surface Deletion**
+
+Each phase is visually grouped with a curly brace and labeled accordingly.
+
+## Phase 1: Redir Surface Creation
+
+This phase involves the creation of a redirected surface and its association.
+
+- `COMPDESK_LSURFACE - Create - hLSurf1`
+  - The Server sends a message to create a logical surface, returning handle `hLSurf1`.
+- `COMPDESK_SURFOBJ - Create - hSurf1`
+  - The Server creates a surface object, returning handle `hSurf1`.
+- `COMPDESK_ASSOC-Attach - hLSurf1, hSurf1`
+  - The Server attaches the logical surface (`hLSurf1`) to the surface object (`hSurf1`).
+
+## Phase 2: Drawing Cycle
+
+This phase involves rendering operations and a final flush.
+
+- `COMPDESK_SWITCH_SURFOBJ - hSurf1`
+  - The Server switches to the surface object `hSurf1` for drawing.
+- `Drawing Orders (not part of this document)`
+  - This represents drawing commands, which are noted as outside the scope of this document.
+- `COMPDESK_FLUSH_COMPOSEONCE`
+  - The Server flushes and composes the drawing operations.
+
+## Phase 3: Redir Surface Deletion
+
+This phase involves detaching and deleting the surface components.
+
+- `COMPDESK_ASSOC-Detach - hLSurf1, hSurf1`
+  - The Server detaches the logical surface from the surface object.
+- `COMPDESK_SURFOBJ - Delete - hSurf1`
+  - The Server deletes the surface object `hSurf1`.
+- `COMPDESK_LSURFACE - Delete - hLSurf1`
+  - The Server deletes the logical surface `hLSurf1`.
+
+## Message Flow Summary
+
+| Message | Direction | Description |
+|---------|-----------|-------------|
+| `COMPDESK_LSURFACE - Create - hLSurf1` | Server → Client | Creates a logical surface |
+
 ![Sequence of drawing operations on a redirection surface](images/MS-RDPEDC-170601_image4.png)
 Figure 4: Sequence of drawing operations on a redirection surface
 Drawing to a redirection surface can happen only after a redirection surface is created and is attached to a logical surface.

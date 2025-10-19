@@ -258,6 +258,52 @@ Because this protocol can redirect a USB device, the implementer has to provide 
 - Flash drive: Alternative methods for redirecting the drive, such as the one described in [MS-RDPEFS]; might or might not be more successful because that protocol is optimized for drives.
 The examples can become complicated if composite devices are behind one USB device, because there are several different devices that can be used. As a result there isn't one definitive answer to what method can be used; as a result, this protocol is not trying to enforce any decision. The implementer of this protocol can consider enough provisions to give the user flexibility to choose whether or not to redirect a device, and can attempt to prevent the user from losing control of a USB device that the user doesn't want to be redirected. Examples of such provisions are: group policies, notifications, User Interface for selecting the right device, and so on.
 The following diagram describes the event sequences in relation to the hardware USB device and the USB driver stack on the server.
+# USB Device Lifecycle Sequence Diagram
+
+This sequence diagram illustrates the interaction between a USB hardware device, client and server protocols, and the USB driver stack during device plug-in and unplugging events.
+
+## Participants
+
+- **USB hardware device**: The physical USB device that connects and disconnects.
+- **Client protocol**: The client-side protocol layer that manages device communication.
+- **Server protocol**: The server-side protocol layer that handles device communication and interacts with the driver stack.
+- **USB driver stack**: The low-level driver component that manages USB device communication with the operating system.
+
+## Sequence of Events
+
+### Device Plugged In
+
+1. **Device plugged in** → Triggered by the physical connection of the USB device.
+2. **Add virtual channel message** → Sent from Client protocol to Server protocol.
+3. **Channel Create message** → Sent from Server protocol to Client protocol.
+4. **Channel Create message** → Sent from Client protocol to Server protocol.
+5. **Add Device message** → Sent from Client protocol to Server protocol.
+6. **Create driver stack** → Sent from Server protocol to USB driver stack.
+7. **I/O request** → Sent from Client protocol to Server protocol.
+8. **I/O response** → Sent from Server protocol to Client protocol.
+
+### Device Unplugged
+
+1. **Device unplugged** → Triggered by the physical disconnection of the USB device.
+2. **Channel close** → Sent from Client protocol to Server protocol.
+3. **Destroy driver stack** → Sent from Server protocol to USB driver stack.
+
+## Communication Flow
+
+| Event | Sender | Receiver | Description |
+|-------|--------|----------|-------------|
+| Device plugged in | USB hardware device | Client protocol | Initiates device connection |
+| Add virtual channel message | Client protocol | Server protocol | Requests virtual channel setup |
+| Channel Create message | Server protocol | Client protocol | Confirms channel creation |
+| Channel Create message | Client protocol | Server protocol | Client acknowledges channel creation |
+| Add Device message | Client protocol | Server protocol | Registers the device |
+| Create driver stack | Server protocol | USB driver stack | Initializes driver for device communication |
+| I/O request | Client protocol | Server protocol | Client requests I/O operation |
+| I/O response | Server protocol | Client protocol | Server returns I/O result |
+| Device unplugged | USB hardware device | Client protocol | Initiates device disconnection |
+| Channel close | Client protocol | Server protocol | Closes communication channel |
+| Destroy driver stack | Server protocol |
+
 ![USB stack flow](images/MS-RDPEUSB-240423_image1.png)
 Figure 1: USB stack flow
 When a USB device is plugged in, the client sends to the server the Add Virtual Channel  Message as described in section 1.3.1.2. The server in response sends the Channel Create Message described in section 2.2.5.1 and waits for the same message to arrive from the client. The server then creates a USB driver stack that will represent the device to the system. Immediately after the client has sent the Channel Create Message, the client then sends the Add Device Message as described in section 1.3.1.2. After that point, the server and the client are ready to exchange I/O packets as described in section 1.3.1.3.
@@ -269,14 +315,149 @@ New device sequence: The client notifies the server about the arrival of a new d
 I/O sequence: The server sends USB packets to the client and the client forwards the USB packets to the physical device and sends back the results after the physical device reassembles the packets.
 #### Channel Setup Sequence
 The Remote Desktop Protocol: USB Devices Virtual Channel Extension uses multiple channels within a single named dynamic virtual channel. There is one control channel and one channel for each of the USB devices.  The goal of this sequence is to set up the identifiers for the channel and to exchange the platform and version capabilities.
+# Sequence Diagram: Server-Client Interaction
+
+This sequence diagram illustrates a communication flow between a Server and a Client, showing the exchange of messages in a specific order.
+
+## Participants
+
+- **Server**: Initiates the communication and responds to the Client.
+- **Client**: Responds to the Server and sends acknowledgments.
+
+## Message Flow
+
+The diagram depicts a four-step interaction:
+
+1. **Exchange Capabilities Request**
+   - Sent from the Server to the Client.
+   - Purpose: To initiate a capability exchange.
+
+2. **Exchange Capabilities Respond message**
+   - Sent from the Client to the Server.
+   - Purpose: To respond to the capability request.
+
+3. **Channel Created message**
+   - Sent from the Server to the Client.
+   - Purpose: To notify the Client that a channel has been created.
+
+4. **Channel Created message**
+   - Sent from the Client to the Server.
+   - Purpose: To acknowledge receipt of the channel creation notification.
+
+## Message Exchange Summary
+
+| Step | Message Name                      | Direction       | Sender    | Receiver  |
+|------|-----------------------------------|-----------------|-----------|-----------|
+| 1    | Exchange Capabilities Request     | Server → Client | Server    | Client    |
+| 2    | Exchange Capabilities Respond     | Client → Server | Client    | Server    |
+| 3    | Channel Created message           | Server → Client | Server    | Client    |
+| 4    | Channel Created message           | Client → Server | Client    | Server    |
+
+## Diagram Structure
+
+- The diagram uses vertical lifelines to represent the Server and Client.
+- Horizontal arrows indicate messages exchanged between the two participants.
+- The arrows show the direction of message flow and the sequence of events.
+
 ![Channel setup sequence](images/MS-RDPEUSB-240423_image2.png)
 Figure 2: Channel setup sequence
 #### New Device Sequence
 The client uses the new device sequence to notify the server about a new device. It first notifies the server to create a new instance of the USB Redirection virtual channel. Once the new virtual channel is created, a new device message is sent to the server via the new virtual channel. The device is recognized based on the HardwareIds field of Add device message (section 2.2.4.2).
+# Sequence Diagram Overview
+
+This image displays two separate sequence diagrams, each showing a communication exchange between a Client and a Server.
+
+## Diagram 1: Add Virtual Channel
+
+- **Participants:**
+  - Client
+  - Server
+
+- **Message Flow:**
+  - The Client sends an "Add Virtual Channel message" to the Server.
+  - The arrow indicates the direction of the message from Client to Server.
+
+## Diagram 2: Add Device
+
+- **Participants:**
+  - Client
+  - Server
+
+- **Message Flow:**
+  - The Client sends an "Add Device message" to the Server.
+  - The arrow indicates the direction of the message from Client to Server.
+
+## Structural Notes
+
+- Each diagram uses a standard sequence diagram format with vertical lifelines for each participant.
+- The lifelines are represented as dashed vertical lines extending from the participant boxes.
+- Messages are depicted as horizontal arrows with labels indicating the message type.
+- The two diagrams are presented side-by-side, suggesting they represent distinct but related communication scenarios.
+
 ![New device sequence](images/MS-RDPEUSB-240423_image3.png)
 Figure 3: New device sequence
 #### I/O Sequence
 The server uses the I/O sequence to send I/O requests to the client.  The server can send multiple I/O requests to the client without first waiting for the previously sent requests to be completed first.
+# Sequence Diagram: Server-Client Interaction
+
+This sequence diagram illustrates a series of message exchanges between a Server and a Client, detailing a communication protocol involving device queries, data transfers, and request cancellation.
+
+## Participants
+
+- **Server**: Initiates queries and requests, receives responses and completion messages.
+- **Client**: Responds to queries, executes transfer requests, and sends cancellation requests.
+
+## Message Flow
+
+The diagram depicts a sequence of 9 messages exchanged between the Server and Client in a specific order:
+
+1. **Query Device Text message**
+   - Direction: Server → Client
+   - Purpose: Server requests textual information about a device from the Client.
+
+2. **Query Device Text Respond message**
+   - Direction: Client → Server
+   - Purpose: Client responds to the Server with the requested device text information.
+
+3. **Transfer In Request message**
+   - Direction: Server → Client
+   - Purpose: Server requests the Client to initiate a data transfer.
+
+4. **URB Completion message**
+   - Direction: Client → Server
+   - Purpose: Client notifies the Server that the previous transfer request has completed.
+
+5. **Transfer In Request message**
+   - Direction: Server → Client
+   - Purpose: Server sends another data transfer request to the Client.
+
+6. **Transfer In Request message**
+   - Direction: Server → Client
+   - Purpose: Server sends a third data transfer request to the Client.
+
+7. **URB Completion message**
+   - Direction: Client → Server
+   - Purpose: Client notifies the Server that the second transfer request has completed.
+
+8. **Cancel Request message**
+   - Direction: Server → Client
+   - Purpose: Server requests the Client to cancel an ongoing or pending operation.
+
+9. **URB Completion message**
+   - Direction: Client → Server
+   - Purpose: Client notifies the Server that the cancellation request has been processed or the associated operation has completed.
+
+## Summary Table
+
+| Message Type                  | Direction     | Description                                 |
+|------------------------------|---------------|---------------------------------------------|
+| Query Device Text message    | Server → Client | Request for device text information         |
+| Query Device Text Respond    | Client → Server | Response containing device text             |
+| Transfer In Request message  | Server → Client | Request to initiate data transfer           |
+| URB Completion message       | Client → Server | Notification that a transfer is complete    |
+| Cancel Request message       | Server → Client | Request to cancel an ongoing operation      |
+| URB Completion message       | Client → Server
+
 ![I/O sequence](images/MS-RDPEUSB-240423_image4.png)
 Figure 4: I/O sequence
 ## Relationship to Other Protocols
@@ -1080,6 +1261,47 @@ In response to the INTERNAL_IO_CONTROL message, an IOCONTROL_COMPLETION message 
 # Protocol Details
 ## Common Details
 The following state diagram illustrates the state transitions that both the client and the server go through.
+# State Diagram: Device Connection and I/O Flow
+
+This diagram illustrates the state transitions for a device connection and I/O process, likely for a virtualized or networked device system.
+
+## States
+
+The diagram contains the following states, represented as rounded rectangles:
+
+- **Start State**: A solid black circle, indicating the initial state.
+- **Capability exchange**: The first operational state after initialization.
+- **Ready**: The main operational state for device readiness.
+- **New device**: A state for handling newly added devices.
+- **Device I/O**: A state for performing input/output operations on a device.
+- **End State**: A solid black circle with a white border, indicating termination.
+
+## Transitions
+
+The following transitions define how the system moves between states:
+
+| From State       | Trigger / Action              | To State      |
+|------------------|-------------------------------|---------------|
+| Start State      | / Channel connected           | Capability exchange |
+| Capability exchange | / Exchange completed      | Ready         |
+| Ready            | / Add virtual channel         | New device    |
+| Ready            | / Disconnect                  | End State     |
+| New device       | / Add device                  | Device I/O    |
+| Device I/O       | / Device disconnect           | Ready         |
+
+## Flow Description
+
+1. The process begins at the **Start State**.
+2. Upon **Channel connected**, it transitions to **Capability exchange**.
+3. After **Exchange completed**, it moves to the **Ready** state.
+4. From **Ready**, two possible paths exist:
+   - If **Disconnect** is triggered, the process ends.
+   - If **Add virtual channel** is triggered, it moves to **New device**.
+5. In **New device**, upon **Add device**, it proceeds to **Device I/O**.
+6. After **Device I/O**, if **Device disconnect** occurs, it returns to the **Ready** state, allowing for continued operation or further device management.
+
+This state machine describes a lifecycle for managing device connections, including capability negotiation, device addition, I/O operations, and graceful disconnection.
+
 ![Client and server state transitions](images/MS-RDPEUSB-240423_image5.png)
 Figure 5: Client and server state transitions
 Channel-connected event: This event signifies that the underlying transport channel is connected, as specified in section 2.1.

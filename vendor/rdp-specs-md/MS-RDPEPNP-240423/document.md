@@ -237,11 +237,131 @@ The Remote Desktop Protocol: Plug and Play Devices Virtual Channel Extension con
 - Plug and Play (PNP) Device Input/Output (I/O)
 ### PNP Device Info Subprotocol
 The PNP Device Info Subprotocol specifies the communication between the terminal server client and the terminal server component that handles the creation and removal of remote devices on the server side. This subprotocol is used to create remote device instances on the server machine that correspond to the physical devices on the client machine. The following illustration shows the PNP Device Info Subprotocol message sequence. This subprotocol uses a dynamic virtual channel named PNPDR for communication between client and server.
+# Sequence Diagram: Server-Client Interaction
+
+This sequence diagram illustrates the communication flow between a Server and a Client, detailing the steps involved in initialization, authentication, and device management.
+
+## Participants
+
+- **Server**: Initiates communication and responds to client messages.
+- **Client**: Sends messages to the server and receives responses.
+
+## Communication Flow
+
+The interaction is broken down into two main phases, each grouped with a descriptive label.
+
+### Phase 1: Versioning and Initialization
+
+This phase establishes compatibility and sets up the connection.
+
+1. **Server Version / Capabilities Message**
+   - Sent from Server to Client.
+   - Purpose: Inform the client about the server's version and capabilities.
+
+2. **Client Version / Capabilities Response**
+   - Sent from Client to Server.
+   - Purpose: Respond with the client's version and capabilities.
+
+### Phase 2: Device Addition/Removal
+
+This phase handles the management of devices connected to the client.
+
+1. **Authenticated Client Message**
+   - Sent from Server to Client.
+   - Purpose: Indicates that the client has been successfully authenticated.
+
+2. **Client Device Additions Message**
+   - Sent from Client to Server.
+   - Purpose: Notify the server of newly added devices.
+
+3. **Client Device Removal Message**
+   - Sent from Client to Server.
+   - Purpose: Notify the server of devices that have been removed.
+
+## Message Summary Table
+
+| Message Type                      | Direction       | Sender   | Receiver | Purpose                                  |
+|----------------------------------|-----------------|----------|----------|------------------------------------------|
+| Server Version / Capabilities Message | Server → Client | Server   | Client   | Inform client of server version/capabilities |
+| Client Version / Capabilities Response | Client → Server | Client   | Server   | Respond with client version/capabilities   |
+| Authenticated Client Message     | Server → Client | Server   | Client   | Confirm client authentication             |
+| Client Device Additions Message  | Client → Server | Client   | Server   | Notify of device additions               |
+| Client Device Removal Message    | Client → Server | Client   | Server   | Notify of device removals                |
+
+## Groupings
+
+The diagram uses curly braces `{}` to group related messages under descriptive labels:
+
+- **Versioning and initialization**: Covers the first two messages.
+- **Device Addition/Removal**: Covers the last three messages.
+
+This structure helps to visualize the logical phases of the interaction.
+
 ![PNP Device Info Subprotocol message sequence](images/MS-RDPEPNP-240423_image1.png)
 Figure 1: PNP Device Info Subprotocol message sequence
 This subprotocol consists of a versioning and capabilities negotiation phase, in addition to a device addition and removal phase. The terminal client sends the device information to the terminal server, and the terminal server creates the remote device instances that represent the physical devices.
 ### PNP Device I/O Subprotocol
 The PNP Device I/O Subprotocol specifies the communication between the terminal client and the remote devices on the terminal server, for handling I/O requests. This subprotocol is used to redirect the I/O calls from applications on the terminal server side to a device driver on the terminal client side. The following illustration shows a typical PNP Device I/O Subprotocol message sequence. This subprotocol uses a dynamic virtual channel named FileRedirectorChannel for communication between client and server.
+# Sequence Diagram: Server-Client Communication
+
+This sequence diagram illustrates the communication protocol between a Server and a Client, detailing the exchange of messages for establishing capabilities and performing device I/O operations.
+
+## Participants
+
+- **Server**: Initiates and responds to requests from the Client.
+- **Client**: Sends requests to the Server and receives replies.
+
+## Communication Phases
+
+### Phase 1: Version/Capabilities Exchange
+
+This initial phase establishes the communication parameters between the Server and Client.
+
+- **Server → Client**: `Capabilities Request`
+- **Client → Server**: `Capabilities Reply`
+
+> *Note: This exchange is labeled "Version/Capabilities" in the diagram.*
+
+### Phase 2: Device I/O Operations
+
+This phase encompasses a series of requests and replies for performing input/output operations on a device.
+
+- **Server → Client**: `CreateFile Request`
+- **Client → Server**: `CreateFile Reply`
+
+- **Server → Client**: `Read Request`
+- **Client → Server**: `Read Reply`
+
+- **Server → Client**: `Write Request`
+- **Client → Server**: `Write Reply`
+
+> *Note: This group of operations is labeled "Device IO" in the diagram.*
+
+- **Server → Client**: `IoControl Request`
+- **Client → Server**: `IoControl Reply`
+
+- **Server → Client**: `Custom Event Message`
+- **Server → Client**: `Specific IO Cancel Request`
+
+## Message Flow Summary
+
+| Direction      | Message Type             | Purpose                          |
+|----------------|--------------------------|----------------------------------|
+| Server → Client| Capabilities Request     | Request server capabilities      |
+| Client → Server| Capabilities Reply       | Respond with capabilities        |
+| Server → Client| CreateFile Request       | Request to create a file         |
+| Client → Server| CreateFile Reply         | Confirm file creation            |
+| Server → Client| Read Request             | Request to read data            |
+| Client → Server| Read Reply               | Return read data                |
+| Server → Client| Write Request            | Request to write data           |
+| Client → Server| Write Reply              | Confirm write operation         |
+| Server → Client| IoControl Request       | Request device control operation|
+| Client → Server| IoControl Reply          | Confirm control operation       |
+| Server → Client| Custom Event Message     | Send custom event notification  |
+| Server → Client| Specific IO Cancel Request | Request to cancel specific I/O |
+
+The diagram shows a clear request-reply pattern for most operations, indicating a synchronous communication
+
 ![PNP Device I/O Subprotocol message sequence](images/MS-RDPEPNP-240423_image2.png)
 Figure 2: PNP Device I/O Subprotocol message sequence
 For devices redirected using the PNP Device Info Subprotocol, I/O redirection takes place using the PNP Device I/O Subprotocol. The server creates a new subchannel within the FileRedirectorChannel main channel for each CreateFile Request. Subsequent I/O operations related to the file created are passed on this subchannel. The server sends the I/O requests to the client on behalf of applications running on the server. The client completes the I/O requests and passes the results back to the server.
