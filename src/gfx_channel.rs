@@ -43,6 +43,8 @@ pub struct GfxDvcProcessor {
     channel_id: Option<u32>,
     /// zGFX decompressor (stateful)
     zgfx: ZgfxDecompressor,
+    /// UDP transport active (when true, ignore TCP GFX data)
+    udp_active: bool,
 }
 
 impl GfxDvcProcessor {
@@ -54,12 +56,20 @@ impl GfxDvcProcessor {
             client,
             channel_id: None,
             zgfx: ZgfxDecompressor::new(),
+            udp_active: false,
         }
     }
 
     /// Update the event sender (must be called before processing GFX frames)
     pub fn set_event_sender(&mut self, event_sender: Box<dyn crate::rdp::RdpEventSender>) {
         self.client.ctx.set_event_sender(event_sender);
+    }
+
+    /// Enable UDP transport mode (TCP GFX data will be ignored)
+    pub fn enable_udp_mode(&mut self) {
+        use tracing::info;
+        info!("🔄 GFX: Switching to UDP transport mode (TCP data will be ignored)");
+        self.udp_active = true;
     }
 
     /// Process UDP data containing H.264 frames
@@ -159,6 +169,17 @@ impl DvcProcessor for GfxDvcProcessor {
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
         use tracing::info;
+        
+        // If UDP is active, ignore TCP GFX data
+        if self.udp_active {
+            info!(
+                "⏭️ RDPEGFX: Ignoring {} bytes on TCP channel {} (UDP mode active)",
+                payload.len(),
+                channel_id
+            );
+            return Ok(Vec::new());
+        }
+        
         info!(
             "📥 RDPEGFX: Received {} bytes on channel {}",
             payload.len(),
@@ -196,24 +217,10 @@ impl DvcProcessor for GfxDvcProcessor {
         }
 
         // Process PDUs
-        match self.client.process_pdu_stream(&decompressed) {
-            Ok(_) => {},
-            Err(e) => {
-                info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
-                
-                // Check if this looks like UDP data on TCP channel (after multitransport)
-                if decompressed.len() >= 2 {
-                    let possible_cmd_id = u16::from_le_bytes([decompressed[0], decompressed[1]]);
-                    if possible_cmd_id > 0x0020 {
-                        info!("⚠️ RDPEGFX: Ignoring likely UDP-routed data on TCP channel (cmd_id=0x{:04X})", possible_cmd_id);
-                        info!("   This is expected after multitransport UDP establishment");
-                        return Ok(Vec::new());
-                    }
-                }
-                
-                return Err(ironrdp_pdu::pdu_other_err!("GFX PDU processing failed"));
-            }
-        }
+        self.client.process_pdu_stream(&decompressed).map_err(|e| {
+            info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
+            ironrdp_pdu::pdu_other_err!("GFX PDU processing failed")
+        })?;
 
         // Get any outgoing messages (acknowledgements, etc.)
         let messages = self.client.ctx.take_outgoing_messages();

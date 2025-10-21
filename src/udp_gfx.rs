@@ -24,12 +24,13 @@ impl UdpGfxChannel {
     /// Create a new UDP-enabled GFX channel
     pub async fn new(
         server_addr: SocketAddr,
+        server_name: String,
         correlation_id: Option<CorrelationId>,
     ) -> Result<Self> {
         info!("Creating UDP GFX channel for server {}", server_addr);
 
         let (transport_tx, transport_rx) =
-            create_video_udp_transport(server_addr, correlation_id).await?;
+            create_video_udp_transport(server_addr, correlation_id, server_name).await?;
 
         Ok(Self {
             transport_tx,
@@ -48,6 +49,10 @@ impl UdpGfxChannel {
                     info!("✅ UDP connection established");
                     self.connected = true;
                     return Ok(());
+                }
+                UdpTransportEvent::TunnelEstablished => {
+                    info!("🔐 MS-RDPEMT tunnel established");
+                    // Tunnel establishment is good, but wait for Connected event
                 }
                 UdpTransportEvent::Disconnected(reason) => {
                     warn!("UDP connection failed: {}", reason);
@@ -90,6 +95,10 @@ impl UdpGfxChannel {
                 // Already connected
                 None
             }
+            Ok(UdpTransportEvent::TunnelEstablished) => {
+                // Tunnel established - good for data flow
+                None
+            }
             Err(_) => None,
         }
     }
@@ -119,6 +128,7 @@ impl Drop for UdpGfxChannel {
 pub async fn example_udp_gfx_integration() -> Result<()> {
     // 1. Parse server address
     let server_addr: SocketAddr = "192.168.1.100:3389".parse()?;
+    let server_name = "192.168.1.100".to_string();
 
     // 2. Generate a correlation ID for multitransport
     // In a real implementation, this would be negotiated during RDP connection
@@ -127,7 +137,7 @@ pub async fn example_udp_gfx_integration() -> Result<()> {
     };
 
     // 3. Create UDP GFX channel
-    let mut udp_channel = UdpGfxChannel::new(server_addr, Some(correlation_id)).await?;
+    let mut udp_channel = UdpGfxChannel::new(server_addr, server_name, Some(correlation_id)).await?;
 
     // 4. Wait for connection
     udp_channel.wait_for_connection().await?;
@@ -158,7 +168,8 @@ mod tests {
     #[ignore] // Requires a real RDP server
     async fn test_udp_gfx_channel() {
         let server_addr: SocketAddr = "127.0.0.1:3389".parse().unwrap();
-        let result = UdpGfxChannel::new(server_addr, None).await;
+        let server_name = "127.0.0.1".to_string();
+        let result = UdpGfxChannel::new(server_addr, server_name, None).await;
         // Would succeed if server is available
         assert!(result.is_ok() || result.is_err());
     }
