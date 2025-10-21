@@ -78,6 +78,13 @@ impl DrdynvcClient {
         self.dynamic_channels.get_by_type_id(TypeId::of::<T>())
     }
 
+    pub fn get_dvc_by_type_id_mut<T>(&mut self) -> Option<&mut DynamicVirtualChannel>
+    where
+        T: DvcProcessor,
+    {
+        self.dynamic_channels.get_by_type_id_mut(TypeId::of::<T>())
+    }
+
     pub fn get_dvc_by_channel_id(&self, channel_id: u32) -> Option<&DynamicVirtualChannel> {
         self.dynamic_channels.get_by_channel_id(channel_id)
     }

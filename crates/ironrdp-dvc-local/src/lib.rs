@@ -138,6 +138,10 @@ impl DynamicVirtualChannel {
         self.channel_processor.as_any().downcast_ref()
     }
 
+    pub fn channel_processor_downcast_mut<T: DvcProcessor>(&mut self) -> Option<&mut T> {
+        self.channel_processor.as_any_mut().downcast_mut()
+    }
+
     fn start(&mut self) -> PduResult<Vec<DvcMessage>> {
         if let Some(channel_id) = self.channel_id {
             self.channel_processor.start(channel_id)
@@ -209,6 +213,12 @@ impl DynamicChannelSet {
         self.type_id_to_name
             .get(&type_id)
             .and_then(|name| self.channels.get(name))
+    }
+
+    fn get_by_type_id_mut(&mut self, type_id: TypeId) -> Option<&mut DynamicVirtualChannel> {
+        self.type_id_to_name
+            .get(&type_id)
+            .and_then(|name| self.channels.get_mut(name))
     }
 
     fn get_by_channel_name(&self, name: &DynamicChannelName) -> Option<&DynamicVirtualChannel> {

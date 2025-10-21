@@ -2,12 +2,10 @@
 //!
 //! This module bridges IronRDP's DVC system with our RDPEGFX implementation.
 
-use anyhow::Result;
 use ironrdp_core::AsAny;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
 use ironrdp_gfx::GfxClient;
 use ironrdp_pdu::PduResult;
-use tracing::{debug, trace};
 
 use crate::gfx::GfxState;
 
@@ -53,6 +51,62 @@ impl GfxDvcProcessor {
             client,
             channel_id: None,
         }
+    }
+
+    /// Process UDP data containing H.264 frames
+    ///
+    /// This method handles RDPEGFX data received via UDP transport (multitransport).
+    /// The data may be zGFX compressed and contains GFX PDUs with H.264-encoded frames.
+    pub fn process_udp_data(&mut self, data: &[u8]) -> PduResult<Vec<DvcMessage>> {
+        use tracing::info;
+
+        info!("📦 RDPEGFX via UDP: Processing {} bytes", data.len());
+
+        // Try to decompress with zGFX first
+        // UDP packets may be compressed or uncompressed depending on server settings
+        let decompressed = match zgfx::decompress(data) {
+            Ok(decompressed) => {
+                info!(
+                    "📦 RDPEGFX via UDP: zGFX decompressed {} -> {} bytes",
+                    data.len(),
+                    decompressed.len()
+                );
+                decompressed
+            }
+            Err(_) => {
+                // If decompression fails, try processing as uncompressed
+                info!(
+                    "📦 RDPEGFX via UDP: Processing as uncompressed ({} bytes)",
+                    data.len()
+                );
+                data.to_vec()
+            }
+        };
+
+        // Process GFX PDUs
+        self.client.process_pdu_stream(&decompressed).map_err(|e| {
+            info!("❌ RDPEGFX via UDP: PDU processing failed: {:?}", e);
+            ironrdp_pdu::pdu_other_err!("GFX UDP PDU processing failed")
+        })?;
+
+        // Get any outgoing messages (acknowledgements, etc.)
+        let messages = self.client.ctx.take_outgoing_messages();
+        if !messages.is_empty() {
+            info!(
+                "📤 RDPEGFX via UDP: Sending {} response messages ({} bytes)",
+                messages.len(),
+                messages.iter().map(|m| m.len()).sum::<usize>()
+            );
+        }
+
+        // Wrap responses in zGFX packets for DVC transmission
+        Ok(messages
+            .into_iter()
+            .map(|data| {
+                let packet = Self::wrap_zgfx_packet(&data);
+                Box::new(GfxDvcMessage { data: packet }) as DvcMessage
+            })
+            .collect())
     }
 
     /// Wrap raw RDPEGFX payload in a zGFX segmented packet
@@ -120,9 +174,10 @@ impl DvcProcessor for GfxDvcProcessor {
             channel_id
         );
 
-        // Decompress with zGFX
-        let decompressed = zgfx::decompress(payload).map_err(|_e| {
-            info!("❌ RDPEGFX: zGFX decompression failed");
+        // Decompress with zGFX (preserving error details in log)
+        let decompressed = zgfx::decompress(payload).map_err(|e| {
+            // Log detailed error information for debugging
+            info!("❌ RDPEGFX: zGFX decompression failed: {:?}", e);
             ironrdp_pdu::pdu_other_err!("GFX decompress failed")
         })?;
 

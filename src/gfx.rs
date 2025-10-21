@@ -4,13 +4,18 @@
 //! the client to receive and render high-quality graphics from the server.
 
 use anyhow::{Context as _, Result, ensure};
-use ironrdp_gfx::pdu::{MonitorDefinition, Rectangle};
-use ironrdp_gfx::{GfxClient, GfxContext, codec};
+use ironrdp_gfx::pdu::{MonitorDefinition, Point16, Rectangle};
+use ironrdp_gfx::{GfxContext, codec};
 #[cfg(feature = "h264")]
 use ironrdp_h264::{AvcKind, FfmpegDecoder, H264Decoder};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use tracing::{debug, trace, warn};
+
+/// Maximum surface dimension (8K resolution)
+const MAX_SURFACE_DIM: u16 = 8192;
+/// Maximum total surface pixels (8K × 8K)
+const MAX_SURFACE_PIXELS: usize = 8192 * 8192;
 
 use crate::rdp::{RdpEventSender, RdpOutputEvent};
 use core::num::NonZeroU16;
@@ -24,6 +29,14 @@ struct GfxSurface {
     pixel_format: u8,
     /// Buffer for decoded frames (BGRA format)
     buffer: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedBitmap {
+    key: u64,
+    width: u16,
+    height: u16,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +112,8 @@ pub struct GfxState {
     window_mappings: HashMap<u64, WindowMapping>,
     /// Active progressive codec contexts
     active_codec_contexts: HashSet<(u16, u32)>,
+    /// Bitmap cache entries indexed by slot
+    bitmap_cache: HashMap<u16, CachedBitmap>,
     /// Event sender for UI updates
     event_sender: Box<dyn RdpEventSender>,
     /// Outgoing message buffer
@@ -133,6 +148,7 @@ impl GfxState {
             surface_output_mappings: Vec::new(),
             window_mappings: HashMap::new(),
             active_codec_contexts: HashSet::new(),
+            bitmap_cache: HashMap::new(),
             event_sender,
             outgoing_buffer: Vec::new(),
         })
@@ -167,11 +183,31 @@ impl GfxContext for GfxState {
             surface_id, width, height, pixel_format
         );
 
+        // Validate surface dimensions to prevent DoS via huge allocations
+        if width > MAX_SURFACE_DIM || height > MAX_SURFACE_DIM {
+            anyhow::bail!(
+                "Surface dimensions too large: {}x{} (max: {}x{})",
+                width,
+                height,
+                MAX_SURFACE_DIM,
+                MAX_SURFACE_DIM
+            );
+        }
+
+        let pixels = (width as usize) * (height as usize);
+        if pixels > MAX_SURFACE_PIXELS {
+            anyhow::bail!(
+                "Surface area too large: {} pixels (max: {})",
+                pixels,
+                MAX_SURFACE_PIXELS
+            );
+        }
+
         // Delete old surface if it exists (protocol allows reuse)
         self.surfaces.remove(&surface_id);
 
         // Create new surface with BGRA buffer
-        let buffer_size = (width as usize) * (height as usize) * 4; // BGRA = 4 bytes per pixel
+        let buffer_size = pixels * 4; // BGRA = 4 bytes per pixel
         let surface = GfxSurface {
             id: surface_id,
             width,
@@ -401,6 +437,186 @@ impl GfxContext for GfxState {
         Ok(())
     }
 
+    fn on_surface_to_surface(
+        &mut self,
+        source_surface_id: u16,
+        destination_surface_id: u16,
+        source_rect: Rectangle,
+        dest_points: &[Point16],
+    ) -> Result<()> {
+        trace!(
+            "GFX surface to surface: src={} dst={} points={}",
+            source_surface_id,
+            destination_surface_id,
+            dest_points.len()
+        );
+
+        if dest_points.is_empty() {
+            return Ok(());
+        }
+
+        let region_width = usize::from(source_rect.width());
+        let region_height = usize::from(source_rect.height());
+
+        if region_width == 0 || region_height == 0 {
+            anyhow::bail!("SurfaceToSurface with zero-sized region");
+        }
+
+        if source_surface_id == destination_surface_id {
+            let surface = self
+                .surfaces
+                .get_mut(&source_surface_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown surface: {}", source_surface_id))?;
+
+            Self::validate_rect_within_surface(surface, &source_rect)?;
+            let region = Self::extract_surface_region(surface, &source_rect)?;
+
+            for point in dest_points {
+                let (dest_x, dest_y) =
+                    Self::ensure_region_fits(surface, *point, region_width, region_height)?;
+                Self::write_region_to_surface(
+                    surface,
+                    dest_x,
+                    dest_y,
+                    region_width,
+                    region_height,
+                    &region,
+                )?;
+            }
+
+            return Ok(());
+        }
+
+        let region = {
+            let source_surface = self
+                .surfaces
+                .get(&source_surface_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown source surface: {}", source_surface_id))?;
+            Self::validate_rect_within_surface(source_surface, &source_rect)?;
+            Self::extract_surface_region(source_surface, &source_rect)?
+        };
+        let dest_surface = self
+            .surfaces
+            .get_mut(&destination_surface_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Unknown destination surface: {}", destination_surface_id)
+            })?;
+
+        for point in dest_points {
+            let (dest_x, dest_y) =
+                Self::ensure_region_fits(dest_surface, *point, region_width, region_height)?;
+            Self::write_region_to_surface(
+                dest_surface,
+                dest_x,
+                dest_y,
+                region_width,
+                region_height,
+                &region,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn on_surface_to_cache(
+        &mut self,
+        surface_id: u16,
+        cache_key: u64,
+        cache_slot: u16,
+        source_rect: Rectangle,
+    ) -> Result<()> {
+        trace!(
+            "GFX surface to cache: surface={} slot={} key=0x{:016X}",
+            surface_id, cache_slot, cache_key
+        );
+
+        let surface = self
+            .surfaces
+            .get(&surface_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown surface: {}", surface_id))?;
+
+        Self::validate_rect_within_surface(surface, &source_rect)?;
+        let data = Self::extract_surface_region(surface, &source_rect)?;
+
+        let cached = CachedBitmap {
+            key: cache_key,
+            width: source_rect.width(),
+            height: source_rect.height(),
+            data,
+        };
+
+        self.bitmap_cache.insert(cache_slot, cached);
+        Ok(())
+    }
+
+    fn on_cache_to_surface(
+        &mut self,
+        cache_slot: u16,
+        surface_id: u16,
+        dest_points: &[Point16],
+    ) -> Result<()> {
+        trace!(
+            "GFX cache to surface: slot={} surface={} points={}",
+            cache_slot,
+            surface_id,
+            dest_points.len()
+        );
+
+        if dest_points.is_empty() {
+            return Ok(());
+        }
+
+        let cached = self
+            .bitmap_cache
+            .get(&cache_slot)
+            .ok_or_else(|| anyhow::anyhow!("Unknown bitmap cache slot: {}", cache_slot))?;
+
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown surface: {}", surface_id))?;
+
+        let region_width = usize::from(cached.width);
+        let region_height = usize::from(cached.height);
+
+        if cached.data.len() < region_width * region_height * 4 {
+            anyhow::bail!(
+                "Cached bitmap data too small: have {}, expected {}",
+                cached.data.len(),
+                region_width * region_height * 4
+            );
+        }
+
+        for point in dest_points {
+            let (dest_x, dest_y) =
+                Self::ensure_region_fits(surface, *point, region_width, region_height)?;
+            Self::write_region_to_surface(
+                surface,
+                dest_x,
+                dest_y,
+                region_width,
+                region_height,
+                &cached.data,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn on_evict_cache_entry(&mut self, cache_slot: u16) -> Result<()> {
+        trace!("GFX evict cache slot {}", cache_slot);
+        self.bitmap_cache.remove(&cache_slot);
+        Ok(())
+    }
+
+    fn on_cache_import_reply(&mut self, imported_slots: &[u16]) -> Result<()> {
+        trace!(
+            "GFX cache import reply received: {} slots",
+            imported_slots.len()
+        );
+        Ok(())
+    }
+
     fn on_delete_encoding_context(&mut self, surface_id: u16, codec_context_id: u32) -> Result<()> {
         if self
             .active_codec_contexts
@@ -615,12 +831,28 @@ impl GfxState {
             let dst_x = dest_rect.left as usize;
             let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
-            if dst_offset + rect_width * 4 <= surface.buffer.len()
-                && src_offset + rect_width * 4 <= frame_data.len()
-            {
-                surface.buffer[dst_offset..dst_offset + rect_width * 4]
-                    .copy_from_slice(&frame_data[src_offset..src_offset + rect_width * 4]);
+            // Fail on bounds violations instead of silently skipping
+            if dst_offset + rect_width * 4 > surface.buffer.len() {
+                anyhow::bail!(
+                    "Blit destination out of bounds: line={}, offset={}, size={}, buffer={}",
+                    y,
+                    dst_offset,
+                    rect_width * 4,
+                    surface.buffer.len()
+                );
             }
+            if src_offset + rect_width * 4 > frame_data.len() {
+                anyhow::bail!(
+                    "Blit source out of bounds: line={}, offset={}, size={}, frame={}",
+                    y,
+                    src_offset,
+                    rect_width * 4,
+                    frame_data.len()
+                );
+            }
+
+            surface.buffer[dst_offset..dst_offset + rect_width * 4]
+                .copy_from_slice(&frame_data[src_offset..src_offset + rect_width * 4]);
         }
 
         Ok(())
@@ -651,10 +883,19 @@ impl GfxState {
             let dst_x = dest_rect.left as usize;
             let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
-            if dst_offset + rect_width * 4 <= surface.buffer.len() {
-                surface.buffer[dst_offset..dst_offset + rect_width * 4]
-                    .copy_from_slice(&data[src_offset..src_offset + rect_width * 4]);
+            // Fail on bounds violations instead of silently skipping
+            if dst_offset + rect_width * 4 > surface.buffer.len() {
+                anyhow::bail!(
+                    "Blit destination out of bounds: line={}, offset={}, size={}, buffer={}",
+                    y,
+                    dst_offset,
+                    rect_width * 4,
+                    surface.buffer.len()
+                );
             }
+
+            surface.buffer[dst_offset..dst_offset + rect_width * 4]
+                .copy_from_slice(&data[src_offset..src_offset + rect_width * 4]);
         }
 
         Ok(())
@@ -684,6 +925,127 @@ impl GfxState {
                     surface.buffer[offset..offset + 4].copy_from_slice(&pixel);
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn validate_rect_within_surface(surface: &GfxSurface, rect: &Rectangle) -> Result<()> {
+        ensure!(
+            rect.right <= surface.width,
+            "Rectangle right bound {} exceeds surface width {}",
+            rect.right,
+            surface.width
+        );
+        ensure!(
+            rect.bottom <= surface.height,
+            "Rectangle bottom bound {} exceeds surface height {}",
+            rect.bottom,
+            surface.height
+        );
+        Ok(())
+    }
+
+    fn extract_surface_region(surface: &GfxSurface, rect: &Rectangle) -> Result<Vec<u8>> {
+        let width = usize::from(rect.width());
+        let height = usize::from(rect.height());
+
+        if width == 0 || height == 0 {
+            anyhow::bail!("Cannot extract zero-sized surface region");
+        }
+
+        let surface_width = usize::from(surface.width);
+        let mut region = Vec::with_capacity(width * height * 4);
+
+        for y in 0..height {
+            let src_y = usize::from(rect.top) + y;
+            let src_x = usize::from(rect.left);
+            let offset = (src_y * surface_width + src_x) * 4;
+            let end = offset + width * 4;
+
+            if end > surface.buffer.len() {
+                anyhow::bail!(
+                    "Surface region out of bounds: line={}, offset={}, size={}, buffer={}",
+                    y,
+                    offset,
+                    width * 4,
+                    surface.buffer.len()
+                );
+            }
+
+            region.extend_from_slice(&surface.buffer[offset..end]);
+        }
+
+        Ok(region)
+    }
+
+    fn ensure_region_fits(
+        surface: &GfxSurface,
+        point: Point16,
+        width: usize,
+        height: usize,
+    ) -> Result<(usize, usize)> {
+        ensure!(point.x >= 0 && point.y >= 0, "Negative destination point");
+
+        let x = point.x as usize;
+        let y = point.y as usize;
+        let surface_width = usize::from(surface.width);
+        let surface_height = usize::from(surface.height);
+
+        ensure!(
+            x + width <= surface_width,
+            "Destination region exceeds surface width (x={} width={} surface={})",
+            x,
+            width,
+            surface_width
+        );
+        ensure!(
+            y + height <= surface_height,
+            "Destination region exceeds surface height (y={} height={} surface={})",
+            y,
+            height,
+            surface_height
+        );
+
+        Ok((x, y))
+    }
+
+    fn write_region_to_surface(
+        surface: &mut GfxSurface,
+        dest_x: usize,
+        dest_y: usize,
+        width: usize,
+        height: usize,
+        data: &[u8],
+    ) -> Result<()> {
+        let row_bytes = width * 4;
+        let expected_size = row_bytes * height;
+
+        ensure!(
+            data.len() >= expected_size,
+            "Not enough data to write region: expected {}, got {}",
+            expected_size,
+            data.len()
+        );
+
+        let surface_width = usize::from(surface.width);
+
+        for y in 0..height {
+            let dst_offset = ((dest_y + y) * surface_width + dest_x) * 4;
+            let src_offset = y * row_bytes;
+
+            if dst_offset + row_bytes > surface.buffer.len() {
+                anyhow::bail!(
+                    "Destination write out of bounds: line={}, offset={}, size={}, buffer={}",
+                    y,
+                    dst_offset,
+                    row_bytes,
+                    surface.buffer.len()
+                );
+            }
+
+            surface.buffer[dst_offset..dst_offset + row_bytes]
+                .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
         }
 
         Ok(())
