@@ -196,10 +196,24 @@ impl DvcProcessor for GfxDvcProcessor {
         }
 
         // Process PDUs
-        self.client.process_pdu_stream(&decompressed).map_err(|e| {
-            info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
-            ironrdp_pdu::pdu_other_err!("GFX PDU processing failed")
-        })?;
+        match self.client.process_pdu_stream(&decompressed) {
+            Ok(_) => {},
+            Err(e) => {
+                info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
+                
+                // Check if this looks like UDP data on TCP channel (after multitransport)
+                if decompressed.len() >= 2 {
+                    let possible_cmd_id = u16::from_le_bytes([decompressed[0], decompressed[1]]);
+                    if possible_cmd_id > 0x0020 {
+                        info!("⚠️ RDPEGFX: Ignoring likely UDP-routed data on TCP channel (cmd_id=0x{:04X})", possible_cmd_id);
+                        info!("   This is expected after multitransport UDP establishment");
+                        return Ok(Vec::new());
+                    }
+                }
+                
+                return Err(ironrdp_pdu::pdu_other_err!("GFX PDU processing failed"));
+            }
+        }
 
         // Get any outgoing messages (acknowledgements, etc.)
         let messages = self.client.ctx.take_outgoing_messages();

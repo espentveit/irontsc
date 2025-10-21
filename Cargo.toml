@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/clearcodec",
     "crates/drdynvc",
     "crates/zgfx",
     "crates/ironrdp-gfx",
@@ -210,6 +211,7 @@ adw = { version = "0.8.0", package = "libadwaita", features = ["v1_6"] }
 arboard = "3.6.1"
 
 # RDPEGFX + H.264 support
+clearcodec = { path = "crates/clearcodec" }
 drdynvc = { path = "crates/drdynvc" }
 zgfx = { path = "crates/zgfx" }
 ironrdp-gfx = { path = "crates/ironrdp-gfx" }
@@ -227,7 +229,8 @@ sha2 = "0.10"
 ironrdp-connector = { path = "crates/ironrdp-connector-local" }
 
 [features]
-default = []
+default = ["gfx"]
+gfx = []
 h264 = ["ironrdp-h264", "ironrdp-gfx/h264"]
 video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264", "ironrdp-gfx/h264"]
 
