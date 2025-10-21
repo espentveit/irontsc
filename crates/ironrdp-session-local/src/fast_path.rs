@@ -5,6 +5,7 @@ use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_graphics::pointer::{DecodedPointer, PointerBitmapTarget};
 use ironrdp_graphics::rdp6::BitmapStreamDecoder;
 use ironrdp_graphics::rle::RlePixelFormat;
+use ironrdp_pdu::basic_output::orders::DrawingOrder;
 use ironrdp_pdu::codecs::rfx::FrameAcknowledgePdu;
 use ironrdp_pdu::fast_path::{FastPathHeader, FastPathUpdate, FastPathUpdatePdu, Fragmentation};
 use ironrdp_pdu::geometry::{InclusiveRectangle, Rectangle as _};
@@ -26,6 +27,7 @@ pub enum UpdateKind {
     PointerHidden,
     PointerPosition { x: u16, y: u16 },
     PointerBitmap(Arc<DecodedPointer>),
+    Orders(Vec<DrawingOrder>),
 }
 
 pub struct Processor {
@@ -92,6 +94,12 @@ impl Processor {
                 let update_region =
                     self.process_surface_commands(image, output, surface_commands)?;
                 processor_updates.push(UpdateKind::Region(update_region));
+            }
+            Ok(FastPathUpdate::Orders(orders)) => {
+                trace!("Received Drawing Orders: {} pieces", orders.len());
+                // Desktop Composition orders are handled by returning them to the caller
+                // The application will process them through DesktopCompositionHandler
+                processor_updates.push(UpdateKind::Orders(orders));
             }
             Ok(FastPathUpdate::Bitmap(bitmap_update)) => {
                 trace!("Received bitmap update");

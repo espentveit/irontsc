@@ -16,11 +16,11 @@ doctest = false
 # test = false
 
 [features]
-default = []
-std = ["alloc", "ironrdp-error/std", "ironrdp-core/std"]
-alloc = ["ironrdp-core/alloc", "ironrdp-error/alloc"]
+default = ["std"]
+alloc = ["ironrdp-core/alloc"]
+std = ["ironrdp-core/std", "alloc"]
 qoi = []
-qoiz = ["qoi"]
+qoiz = ["qoi", "zstd"]
 
 [dependencies]
 bitflags = "2.9"
@@ -42,6 +42,7 @@ num-traits = "0.2"
 sha1 = "0.10"
 x509-cert = { version = "0.2", default-features = false, features = ["std"] }
 pkcs1 = "0.7"
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 expect-test = "1"

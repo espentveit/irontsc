@@ -294,12 +294,12 @@ fn create_client_confirm_active(
 ) -> rdp::capability_sets::ClientConfirmActive {
     use ironrdp_pdu::rdp::capability_sets::{
         client_codecs_capabilities, Bitmap, BitmapCache, BitmapDrawingFlags, Brush,
-        CacheDefinition, CacheEntry, ClientConfirmActive, CmdFlags, DemandActive, FrameAcknowledge,
-        General, GeneralExtraFlags, GlyphCache, GlyphSupportLevel, Input, InputFlags, LargePointer,
-        LargePointerSupportFlags, MultifragmentUpdate, OffscreenBitmapCache, Order, OrderFlags,
-        OrderSupportExFlags, Pointer, Sound, SoundFlags, SupportLevel, SurfaceCommands,
-        VirtualChannel, VirtualChannelFlags, BITMAP_CACHE_ENTRIES_NUM, GLYPH_CACHE_NUM,
-        SERVER_CHANNEL_ID,
+        CacheDefinition, CacheEntry, ClientConfirmActive, CmdFlags, DemandActive,
+        DesktopComposition, FrameAcknowledge, General, GeneralExtraFlags, GlyphCache,
+        GlyphSupportLevel, Input, InputFlags, LargePointer, LargePointerSupportFlags,
+        MultifragmentUpdate, OffscreenBitmapCache, Order, OrderFlags, OrderSupportExFlags, Pointer,
+        Sound, SoundFlags, SupportLevel, SurfaceCommands, VirtualChannel, VirtualChannelFlags,
+        BITMAP_CACHE_ENTRIES_NUM, GLYPH_CACHE_NUM, SERVER_CHANNEL_ID,
     };
 
     server_capability_sets
@@ -410,6 +410,7 @@ fn create_client_confirm_active(
             // https://github.com/Devolutions/IronRDP/issues/447
             max_unacknowledged_frame_count: 20,
         }),
+        CapabilitySet::DesktopComposition(DesktopComposition::supported()),
     ]);
 
     if !server_capability_sets

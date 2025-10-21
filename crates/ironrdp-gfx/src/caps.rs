@@ -209,4 +209,29 @@ mod tests {
             .expect("V8.1 capability set missing");
         assert_eq!(v81.flags & cap_flags::AVC_DISABLED, 0);
     }
+
+    #[test]
+    fn capability_set_serialization_matches_expected_layout() {
+        let caps = CapabilitySet::default_sets(false, false, false);
+        let first = &caps[0];
+        let bytes = first.to_bytes();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            cap_version::V8
+        );
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 4);
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            first.flags
+        );
+
+        let cap101 = caps
+            .iter()
+            .find(|c| c.version == cap_version::V101)
+            .unwrap();
+        let bytes101 = cap101.to_bytes();
+        assert_eq!(bytes101.len(), 24);
+        assert_eq!(u32::from_le_bytes(bytes101[4..8].try_into().unwrap()), 16);
+    }
 }

@@ -6,6 +6,7 @@
 
 mod macros;
 
+pub mod desktop_composition;
 pub mod fast_path;
 pub mod image;
 pub mod legacy;

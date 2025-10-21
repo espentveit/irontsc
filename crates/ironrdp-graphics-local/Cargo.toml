@@ -20,6 +20,8 @@ byteorder = "1.5" # TODO: remove
 lazy_static = "1.4"
 num-derive = "0.3"
 num-traits = "0.2"
+thiserror = "2.0"
+tracing = "0.1"
 yuv = { version = "0.8", features = ["rdp"] }
 
 [dev-dependencies]
