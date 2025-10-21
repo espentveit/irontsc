@@ -3,13 +3,13 @@
 use crate::caps::{self, CapabilitySet};
 use crate::codec;
 use crate::pdu::*;
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use bytes::Buf;
 use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 /// Maximum number of PDUs to process in a single stream to prevent DoS
-const MAX_PDUS_PER_STREAM: usize = 100;
+const MAX_PDUS_PER_STREAM: usize = 0; // 0 = unlimited
 
 /// Callback interface for GFX events
 pub trait GfxContext {
@@ -241,7 +241,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
         while !stream.is_empty() {
             // Enforce PDU count limit to prevent DoS via many tiny PDUs
             pdu_count += 1;
-            if pdu_count > MAX_PDUS_PER_STREAM {
+            if MAX_PDUS_PER_STREAM != 0 && pdu_count > MAX_PDUS_PER_STREAM {
                 bail!(
                     "Too many PDUs in stream: {} (max: {})",
                     pdu_count,
@@ -318,9 +318,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
             trace!(
                 "Processed {:?} PDU at offset {}, length {}",
-                header.cmd_id,
-                start_pos,
-                header.pdu_length
+                header.cmd_id, start_pos, header.pdu_length
             );
         }
 
@@ -351,8 +349,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         trace!(
             "START_FRAME: id={}, timestamp={}",
-            frame.frame_id,
-            frame.timestamp
+            frame.frame_id, frame.timestamp
         );
 
         self.current_frame = Some(FrameState {
@@ -514,9 +511,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         trace!(
             "SURFACE_TO_CACHE: surface={} cache_slot={} key=0x{:016X}",
-            cmd.surface_id,
-            cmd.cache_slot,
-            cmd.cache_key
+            cmd.surface_id, cmd.cache_slot, cmd.cache_key
         );
 
         self.ctx.on_surface_to_cache(
@@ -565,8 +560,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         trace!(
             "DELETE_ENCODING_CONTEXT: surface={}, context={}",
-            cmd.surface_id,
-            cmd.codec_context_id
+            cmd.surface_id, cmd.codec_context_id
         );
 
         self.ctx
@@ -592,9 +586,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         trace!(
             "MAP_SURFACE_TO_OUTPUT: surface={} origin=({}, {})",
-            cmd.surface_id,
-            cmd.output_origin_x,
-            cmd.output_origin_y
+            cmd.surface_id, cmd.output_origin_x, cmd.output_origin_y
         );
 
         self.ctx
@@ -627,10 +619,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         trace!(
             "MAP_SURFACE_TO_WINDOW: surface={} window=0x{:016X} mapped={}x{}",
-            cmd.surface_id,
-            cmd.window_id,
-            cmd.mapped_width,
-            cmd.mapped_height
+            cmd.surface_id, cmd.window_id, cmd.mapped_width, cmd.mapped_height
         );
 
         self.ctx.on_map_surface_to_window(
@@ -684,9 +673,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         trace!(
             "Sending FRAME_ACKNOWLEDGE: frame_id={}, total_decoded={}, queue_depth=0x{:08X}",
-            frame_id,
-            self.total_frames_decoded,
-            queue_depth
+            frame_id, self.total_frames_decoded, queue_depth
         );
 
         self.ctx.send(&ack.to_bytes())
@@ -709,8 +696,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         trace!(
             "Sending QOE_FRAME_ACKNOWLEDGE: frame_id={}, time_diff={}ms",
-            frame_state.frame_id,
-            time_diff_se
+            frame_state.frame_id, time_diff_se
         );
 
         self.ctx.send(&qoe.to_bytes())
