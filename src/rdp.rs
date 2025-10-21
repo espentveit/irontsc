@@ -17,12 +17,15 @@ use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::graphics::pointer::DecodedPointer;
 use ironrdp::pdu::PduResult;
+use ironrdp::pdu::basic_output::fast_path::FastPathUpdate;
+use ironrdp::pdu::basic_output::orders::DrawingOrder;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
+use ironrdp::session::desktop_composition::DesktopCompositionHandler;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
@@ -1703,6 +1706,10 @@ async fn active_session<T: RdpEventSender>(
 
     let mut active_stage = ActiveStage::new(connection_result);
 
+    // Initialize Desktop Composition handler with output dimensions
+    let mut desktop_comp_handler =
+        DesktopCompositionHandler::new(image.width() as u32, image.height() as u32);
+
     let mut last_frame_dimensions = (image.width(), image.height());
     let mut frame_ready = false;
 
@@ -2184,6 +2191,37 @@ async fn active_session<T: RdpEventSender>(
                         .map_err(|_| {
                             session::general_err!("failed to send pointer bitmap event")
                         })?;
+                }
+                ActiveStageOutput::Orders(orders) => {
+                    // Process Desktop Composition orders through our handler
+                    for order in orders {
+                        if let DrawingOrder::DesktopComposition(comp_order) = order {
+                            desktop_comp_handler
+                                .process_order(&comp_order)
+                                .map_err(|e| session::custom_err!("Desktop Composition", e))?;
+                        }
+                    }
+
+                    // Check if we need to flush and send composed output
+                    if let Some(output) = desktop_comp_handler.flush() {
+                        let width = NonZeroU16::new(output.width as u16).ok_or_else(|| {
+                            session::general_err!("compositor output width is zero")
+                        })?;
+                        let height = NonZeroU16::new(output.height as u16).ok_or_else(|| {
+                            session::general_err!("compositor output height is zero")
+                        })?;
+
+                        event_loop_proxy
+                            .send_event(RdpOutputEvent::Image {
+                                buffer: output.data.clone(),
+                                width,
+                                height,
+                                region: None,
+                            })
+                            .map_err(|_| {
+                                session::general_err!("failed to send compositor image event")
+                            })?;
+                    }
                 }
                 ActiveStageOutput::DeactivateAll(mut connection_activation) => {
                     // Execute the Deactivation-Reactivation Sequence:

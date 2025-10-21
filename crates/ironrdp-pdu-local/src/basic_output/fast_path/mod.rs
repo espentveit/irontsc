@@ -11,6 +11,7 @@ use num_derive::FromPrimitive;
 use num_traits::FromPrimitive as _;
 
 use super::bitmap::BitmapUpdateData;
+use super::orders::DrawingOrder;
 use super::pointer::PointerUpdateData;
 use super::surface_commands::{SurfaceCommand, SURFACE_COMMAND_HEADER_SIZE};
 use crate::per;
@@ -223,6 +224,7 @@ impl<'de> Decode<'de> for FastPathUpdatePdu<'de> {
 /// TS_FP_UPDATE data
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FastPathUpdate<'a> {
+    Orders(Vec<DrawingOrder>),
     SurfaceCommands(Vec<SurfaceCommand<'a>>),
     Bitmap(BitmapUpdateData<'a>),
     Pointer(PointerUpdateData<'a>),
@@ -241,6 +243,14 @@ impl<'a> FastPathUpdate<'a> {
         code: UpdateCode,
     ) -> DecodeResult<Self> {
         match code {
+            UpdateCode::Orders => {
+                // Decode drawing orders (including Desktop Composition)
+                let remaining_data = src.remaining();
+                let orders = DrawingOrder::decode_orders_update(remaining_data)?;
+                // Consume all the data we just decoded
+                src.read_slice(remaining_data.len());
+                Ok(Self::Orders(orders))
+            }
             UpdateCode::SurfaceCommands => {
                 let mut commands = Vec::with_capacity(1);
                 while src.len() >= SURFACE_COMMAND_HEADER_SIZE {
@@ -277,6 +287,7 @@ impl<'a> FastPathUpdate<'a> {
 
     pub fn as_short_name(&self) -> &str {
         match self {
+            Self::Orders(_) => "Orders",
             Self::SurfaceCommands(_) => "Surface Commands",
             Self::Bitmap(_) => "Bitmap",
             Self::Pointer(_) => "Pointer",
@@ -289,6 +300,11 @@ impl Encode for FastPathUpdate<'_> {
         ensure_size!(in: dst, size: self.size());
 
         match self {
+            Self::Orders(orders) => {
+                for order in orders {
+                    order.encode(dst)?;
+                }
+            }
             Self::SurfaceCommands(commands) => {
                 for command in commands {
                     command.encode(dst)?;
@@ -317,6 +333,7 @@ impl Encode for FastPathUpdate<'_> {
 
     fn size(&self) -> usize {
         match self {
+            Self::Orders(orders) => orders.iter().map(|o| o.size()).sum::<usize>(),
             Self::SurfaceCommands(commands) => commands.iter().map(|c| c.size()).sum::<usize>(),
             Self::Bitmap(bitmap) => bitmap.size(),
             Self::Pointer(pointer) => match pointer {
@@ -362,6 +379,7 @@ impl UpdateCode {
 impl From<&FastPathUpdate<'_>> for UpdateCode {
     fn from(update: &FastPathUpdate<'_>) -> Self {
         match update {
+            FastPathUpdate::Orders(_) => Self::Orders,
             FastPathUpdate::SurfaceCommands(_) => Self::SurfaceCommands,
             FastPathUpdate::Bitmap(_) => Self::Bitmap,
             FastPathUpdate::Pointer(action) => match action {

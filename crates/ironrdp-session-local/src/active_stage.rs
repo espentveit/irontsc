@@ -6,6 +6,7 @@ use ironrdp_core::WriteBuf;
 use ironrdp_displaycontrol::client::DisplayControlClient;
 use ironrdp_dvc::{DrdynvcClient, DvcProcessor, DynamicVirtualChannel};
 use ironrdp_graphics::pointer::DecodedPointer;
+use ironrdp_pdu::basic_output::orders::DrawingOrder;
 use ironrdp_pdu::geometry::InclusiveRectangle;
 use ironrdp_pdu::input::fast_path::{FastPathInput, FastPathInputEvent};
 use ironrdp_pdu::rdp::headers::ShareDataPdu;
@@ -145,6 +146,9 @@ impl ActiveStage {
                 UpdateKind::PointerBitmap(pointer) => {
                     stage_outputs.push(ActiveStageOutput::PointerBitmap(pointer));
                 }
+                UpdateKind::Orders(orders) => {
+                    stage_outputs.push(ActiveStageOutput::Orders(orders));
+                }
             }
         }
 
@@ -272,6 +276,7 @@ pub enum ActiveStageOutput {
     PointerHidden,
     PointerPosition { x: u16, y: u16 },
     PointerBitmap(Arc<DecodedPointer>),
+    Orders(Vec<DrawingOrder>),
     Terminate(GracefulDisconnectReason),
     DeactivateAll(Box<ConnectionActivationSequence>),
 }

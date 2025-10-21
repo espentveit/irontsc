@@ -26,7 +26,7 @@ pub mod utf16;
 pub mod utils;
 pub mod x224;
 
-pub(crate) mod basic_output;
+pub mod basic_output;
 pub(crate) mod ber;
 pub(crate) mod crypto;
 pub(crate) mod per;

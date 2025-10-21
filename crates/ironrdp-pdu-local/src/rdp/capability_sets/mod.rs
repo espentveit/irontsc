@@ -15,6 +15,7 @@ mod bitmap;
 mod bitmap_cache;
 mod bitmap_codecs;
 mod brush;
+mod desktop_composition;
 mod frame_acknowledge;
 mod general;
 mod glyph_cache;
@@ -39,6 +40,7 @@ pub use self::bitmap_codecs::{
     CODEC_ID_REMOTEFX,
 };
 pub use self::brush::{Brush, SupportLevel};
+pub use self::desktop_composition::DesktopComposition;
 pub use self::frame_acknowledge::FrameAcknowledge;
 pub use self::general::{
     General, GeneralExtraFlags, MajorPlatformType, MinorPlatformType, PROTOCOL_VER,
@@ -270,7 +272,7 @@ pub enum CapabilitySet {
     Share(Vec<u8>),
     Font(Vec<u8>),
     BitmapCacheHostSupport(Vec<u8>),
-    DesktopComposition(Vec<u8>),
+    DesktopComposition(DesktopComposition),
     MultiFragmentUpdate(MultifragmentUpdate),
     LargePointer(LargePointer),
     SurfaceCommands(SurfaceCommands),
@@ -458,6 +460,16 @@ impl Encode for CapabilitySet {
                 )?);
                 capset.encode(dst)?;
             }
+            CapabilitySet::DesktopComposition(capset) => {
+                dst.write_u16(CapabilitySetType::DesktopComposition.as_u16());
+                dst.write_u16(cast_length!(
+                    "len",
+                    capset.size()
+                        + CAPABILITY_SET_TYPE_FIELD_SIZE
+                        + CAPABILITY_SET_LENGTH_FIELD_SIZE
+                )?);
+                capset.encode(dst)?;
+            }
             CapabilitySet::FrameAcknowledge(capset) => {
                 dst.write_u16(CapabilitySetType::FrameAcknowledge.as_u16());
                 dst.write_u16(cast_length!(
@@ -478,9 +490,6 @@ impl Encode for CapabilitySet {
                     CapabilitySet::Font(buffer) => (CapabilitySetType::Font, buffer),
                     CapabilitySet::BitmapCacheHostSupport(buffer) => {
                         (CapabilitySetType::BitmapCacheHostSupport, buffer)
-                    }
-                    CapabilitySet::DesktopComposition(buffer) => {
-                        (CapabilitySetType::DesktopComposition, buffer)
                     }
                     CapabilitySet::ColorCache(buffer) => (CapabilitySetType::ColorCache, buffer),
                     CapabilitySet::DrawNineGridCache(buffer) => {
@@ -528,13 +537,13 @@ impl Encode for CapabilitySet {
                 CapabilitySet::BitmapCodecs(capset) => capset.size(),
                 CapabilitySet::MultiFragmentUpdate(capset) => capset.size(),
                 CapabilitySet::LargePointer(capset) => capset.size(),
+                CapabilitySet::DesktopComposition(capset) => capset.size(),
                 CapabilitySet::FrameAcknowledge(capset) => capset.size(),
                 CapabilitySet::Control(buffer)
                 | CapabilitySet::WindowActivation(buffer)
                 | CapabilitySet::Share(buffer)
                 | CapabilitySet::Font(buffer)
                 | CapabilitySet::BitmapCacheHostSupport(buffer)
-                | CapabilitySet::DesktopComposition(buffer)
                 | CapabilitySet::ColorCache(buffer)
                 | CapabilitySet::DrawNineGridCache(buffer)
                 | CapabilitySet::DrawGdiPlus(buffer)
@@ -612,9 +621,9 @@ impl<'de> Decode<'de> for CapabilitySet {
             CapabilitySetType::BitmapCacheHostSupport => Ok(CapabilitySet::BitmapCacheHostSupport(
                 capability_set_buffer.into(),
             )),
-            CapabilitySetType::DesktopComposition => Ok(CapabilitySet::DesktopComposition(
-                capability_set_buffer.into(),
-            )),
+            CapabilitySetType::DesktopComposition => Ok(CapabilitySet::DesktopComposition(decode(
+                capability_set_buffer,
+            )?)),
             CapabilitySetType::MultiFragmentUpdate => Ok(CapabilitySet::MultiFragmentUpdate(
                 decode(capability_set_buffer)?,
             )),
