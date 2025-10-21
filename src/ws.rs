@@ -1,8 +1,7 @@
 // WebSocket compatibility layer - currently disabled
 // TODO: Implement when ironrdp-async exposes required types publicly
 
-use bytes::Bytes;
-use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
+use futures_util::{Sink, Stream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite;
 

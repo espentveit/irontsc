@@ -8,6 +8,9 @@ use bytes::Buf;
 use std::time::Instant;
 use tracing::{debug, trace, warn};
 
+/// Maximum number of PDUs to process in a single stream to prevent DoS
+const MAX_PDUS_PER_STREAM: usize = 100;
+
 /// Callback interface for GFX events
 pub trait GfxContext {
     /// Send data over the GFX dynamic channel (will be ZGFX compressed by caller)
@@ -58,6 +61,38 @@ pub trait GfxContext {
         fill_pixel: Color32,
         fill_rects: &[Rectangle],
     ) -> Result<()>;
+
+    /// Called to copy bitmap data between surfaces
+    fn on_surface_to_surface(
+        &mut self,
+        source_surface_id: u16,
+        destination_surface_id: u16,
+        source_rect: Rectangle,
+        dest_points: &[Point16],
+    ) -> Result<()>;
+
+    /// Called to store bitmap data from a surface into the cache
+    fn on_surface_to_cache(
+        &mut self,
+        surface_id: u16,
+        cache_key: u64,
+        cache_slot: u16,
+        source_rect: Rectangle,
+    ) -> Result<()>;
+
+    /// Called to copy bitmap data from the cache to a surface
+    fn on_cache_to_surface(
+        &mut self,
+        cache_slot: u16,
+        surface_id: u16,
+        dest_points: &[Point16],
+    ) -> Result<()>;
+
+    /// Called when the server evicts a cache entry
+    fn on_evict_cache_entry(&mut self, cache_slot: u16) -> Result<()>;
+
+    /// Called when the server confirms persistent cache imports
+    fn on_cache_import_reply(&mut self, imported_slots: &[u16]) -> Result<()>;
 
     /// Called when the server deletes a progressive codec context
     fn on_delete_encoding_context(&mut self, surface_id: u16, codec_context_id: u32) -> Result<()>;
@@ -201,8 +236,19 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
     /// Process a stream of PDUs (already ZGFX decompressed)
     pub fn process_pdu_stream(&mut self, data: &[u8]) -> Result<()> {
         let mut stream = data;
+        let mut pdu_count = 0;
 
         while !stream.is_empty() {
+            // Enforce PDU count limit to prevent DoS via many tiny PDUs
+            pdu_count += 1;
+            if pdu_count > MAX_PDUS_PER_STREAM {
+                bail!(
+                    "Too many PDUs in stream: {} (max: {})",
+                    pdu_count,
+                    MAX_PDUS_PER_STREAM
+                );
+            }
+
             let start_pos = data.len() - stream.len();
 
             // Parse header
@@ -236,6 +282,10 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
                 CmdId::WireToSurface1 => self.handle_wire_to_surface_1(&mut body_stream)?,
                 CmdId::WireToSurface2 => self.handle_wire_to_surface_2(&mut body_stream)?,
                 CmdId::SolidFill => self.handle_solid_fill(&mut body_stream)?,
+                CmdId::SurfaceToSurface => self.handle_surface_to_surface(&mut body_stream)?,
+                CmdId::SurfaceToCache => self.handle_surface_to_cache(&mut body_stream)?,
+                CmdId::CacheToSurface => self.handle_cache_to_surface(&mut body_stream)?,
+                CmdId::EvictCacheEntry => self.handle_evict_cache_entry(&mut body_stream)?,
                 CmdId::DeleteEncodingContext => {
                     self.handle_delete_encoding_context(&mut body_stream)?
                 }
@@ -248,6 +298,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
                 CmdId::MapSurfaceToScaledWindow => {
                     self.handle_map_surface_to_scaled_window(&mut body_stream)?
                 }
+                CmdId::CacheImportReply => self.handle_cache_import_reply(&mut body_stream)?,
                 _ => {
                     warn!("Unhandled RDPEGFX command: {:?}", header.cmd_id);
                 }
@@ -438,6 +489,75 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         self.ctx
             .on_solid_fill(cmd.surface_id, cmd.fill_pixel, &cmd.fill_rects)
+    }
+
+    fn handle_surface_to_surface(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = SurfaceToSurface::parse(data)?;
+
+        trace!(
+            "SURFACE_TO_SURFACE: src={} dst={} dest_points={}",
+            cmd.source_surface_id,
+            cmd.destination_surface_id,
+            cmd.dest_points.len()
+        );
+
+        self.ctx.on_surface_to_surface(
+            cmd.source_surface_id,
+            cmd.destination_surface_id,
+            cmd.source_rect,
+            &cmd.dest_points,
+        )
+    }
+
+    fn handle_surface_to_cache(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = SurfaceToCache::parse(data)?;
+
+        trace!(
+            "SURFACE_TO_CACHE: surface={} cache_slot={} key=0x{:016X}",
+            cmd.surface_id,
+            cmd.cache_slot,
+            cmd.cache_key
+        );
+
+        self.ctx.on_surface_to_cache(
+            cmd.surface_id,
+            cmd.cache_key,
+            cmd.cache_slot,
+            cmd.source_rect,
+        )
+    }
+
+    fn handle_cache_to_surface(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = CacheToSurface::parse(data)?;
+
+        trace!(
+            "CACHE_TO_SURFACE: cache_slot={} surface={} dest_points={}",
+            cmd.cache_slot,
+            cmd.surface_id,
+            cmd.dest_points.len()
+        );
+
+        self.ctx
+            .on_cache_to_surface(cmd.cache_slot, cmd.surface_id, &cmd.dest_points)
+    }
+
+    fn handle_evict_cache_entry(&mut self, data: &mut &[u8]) -> Result<()> {
+        let cmd = EvictCacheEntry::parse(data)?;
+
+        trace!("EVICT_CACHE_ENTRY: slot={}", cmd.cache_slot);
+
+        self.ctx.on_evict_cache_entry(cmd.cache_slot)
+    }
+
+    fn handle_cache_import_reply(&mut self, data: &mut &[u8]) -> Result<()> {
+        let reply = CacheImportReply::parse(data)?;
+
+        trace!(
+            "CACHE_IMPORT_REPLY: imported_slots={:?}",
+            reply.imported_slots
+        );
+
+        self.ctx.on_cache_import_reply(&reply.imported_slots)
     }
 
     fn handle_delete_encoding_context(&mut self, data: &mut &[u8]) -> Result<()> {

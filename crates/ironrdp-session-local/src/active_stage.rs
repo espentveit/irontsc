@@ -190,6 +190,10 @@ impl ActiveStage {
         self.x224_processor.get_dvc::<T>()
     }
 
+    pub fn get_dvc_mut<T: DvcProcessor + 'static>(&mut self) -> Option<&mut DynamicVirtualChannel> {
+        self.x224_processor.get_dvc_mut::<T>()
+    }
+
     pub fn get_dvc_by_channel_id(&mut self, channel_id: u32) -> Option<&DynamicVirtualChannel> {
         self.x224_processor.get_dvc_by_channel_id(channel_id)
     }

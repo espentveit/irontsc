@@ -11,7 +11,6 @@ use ironrdp_udp::{
 };
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 use tracing::{debug, error, info, trace, warn};
 
 /// UDP transport configuration
@@ -212,6 +211,26 @@ impl UdpTransportManager {
                         }
                     }
 
+                    // Check for completed FEC blocks and send FEC packets
+                    if let Ok(Some(fec_packet)) = self.connection.check_fec_block() {
+                        if let Err(e) = self.socket.send(&fec_packet).await {
+                            error!("Failed to send FEC packet: {}", e);
+                        } else {
+                            trace!("Sent FEC packet ({} bytes)", fec_packet.len());
+                        }
+                    }
+
+                    // Check if keepalive is needed
+                    if self.connection.needs_keepalive() {
+                        if let Ok(ack_packet) = self.connection.create_ack() {
+                            if let Err(e) = self.socket.send(&ack_packet).await {
+                                warn!("Failed to send keepalive ACK: {}", e);
+                            } else {
+                                trace!("Sent keepalive ACK ({} bytes)", ack_packet.len());
+                            }
+                        }
+                    }
+
                     // Check connection state
                     if self.connection.state() == ConnectionState::Terminated {
                         warn!("UDP connection terminated due to max retransmits");
@@ -317,6 +336,16 @@ impl UdpTransportManager {
             .context("Failed to send packet")?;
 
         trace!("Sent source packet ({} bytes)", packet.len());
+
+        // Check if FEC block is complete and send FEC packet
+        if let Ok(Some(fec_packet)) = self.connection.check_fec_block() {
+            self.socket
+                .send(&fec_packet)
+                .await
+                .context("Failed to send FEC packet")?;
+            debug!("Sent FEC packet ({} bytes)", fec_packet.len());
+        }
+
         Ok(())
     }
 }

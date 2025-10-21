@@ -27,7 +27,7 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
 };
-use ironrdp::svc::SvcMessage;
+use ironrdp::svc::{ChannelFlags, SvcMessage};
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
 use ironrdp_connector::legacy;
 use ironrdp_core::impl_as_any;
@@ -52,6 +52,13 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+// Import UDP transport manager for proper integration
+use crate::gfx_channel::GfxDvcProcessor;
+use crate::udp_transport::{
+    UdpTransportCommand, UdpTransportConfig, UdpTransportEvent, UdpTransportManager,
+};
+use ironrdp_udp::TransportMode;
 
 use crate::config::{Config, Destination, RDCleanPathConfig};
 use anyhow::Context as _;
@@ -447,6 +454,49 @@ async fn connect(
     }
 
     Ok((connection_result, upgraded_framed, client_addr))
+}
+
+/// Establish UDP transport using the transport manager
+/// Returns (command_sender, event_receiver) for controlling the UDP transport
+async fn establish_udp_transport(
+    destination: Destination,
+    client_addr: SocketAddr,
+    correlation_id: [u8; 16],
+    use_lossy_mode: bool,
+) -> anyhow::Result<(
+    mpsc::UnboundedSender<UdpTransportCommand>,
+    mpsc::UnboundedReceiver<UdpTransportEvent>,
+)> {
+    info!("🔌 Establishing UDP transport for {}", destination.name());
+
+    let server_addr = SocketAddr::new(destination.name().parse()?, destination.port());
+
+    let config = UdpTransportConfig {
+        server_addr,
+        local_addr: SocketAddr::new(client_addr.ip(), 0),
+        mode: if use_lossy_mode {
+            TransportMode::Lossy
+        } else {
+            TransportMode::Reliable
+        },
+        enable_fec: true,
+        protocol_version: UdpProtocolVersion::V2,
+        mtu: 1232,
+    };
+
+    let corr_id = CorrelationId::new(correlation_id);
+    let (manager, command_tx, event_rx) = UdpTransportManager::new(config, Some(corr_id)).await?;
+
+    // Spawn the transport manager task
+    tokio::spawn(async move {
+        if let Err(e) = manager.run().await {
+            error!("UDP transport manager error: {}", e);
+        }
+    });
+
+    info!("✅ UDP transport manager created and running");
+
+    Ok((command_tx, event_rx))
 }
 
 async fn try_establish_rdpudp(
@@ -1661,6 +1711,10 @@ async fn active_session<T: RdpEventSender>(
     // Each request_id represents a separate UDP transport channel
     let mut multitransport_requests: HashMap<u32, MultitransportHandshakeContext> = HashMap::new();
 
+    // UDP transport channels (established when multitransport is requested)
+    let mut udp_command_tx: Option<mpsc::UnboundedSender<UdpTransportCommand>> = None;
+    let mut udp_event_rx: Option<mpsc::UnboundedReceiver<UdpTransportEvent>> = None;
+
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
             frame = reader.read_pdu() => {
@@ -1795,38 +1849,40 @@ async fn active_session<T: RdpEventSender>(
                             // CRITICAL FIX: Working client sends UDP SYN ~1.5ms after TCP ACK
                             info!("🚀 Starting UDP handshake for request_id={}...", request_id);
 
-                            // Spawn UDP handshake in background with minimal delay
+                            // Establish UDP transport using transport manager
                             let dest_clone = destination.clone();
                             let addr_clone = client_addr;
                             let req_id = request_id;
                             let protocol = request_info.protocol;
                             let use_lossy = matches!(protocol, MultitransportProtocol::UdpFecLossy);
-                            tokio::spawn(async move {
-                                // Wait 2ms to allow TCP ACK to be sent
-                                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
 
-                                info!(
-                                    "🚀 Sending UDP SYN for request_id={} with v3 authentication (2ms after TCP ACK)...",
-                                    req_id
-                                );
-                                info!("   Protocol: {:?}, Lossy mode: {}", protocol, use_lossy);
-                                match establish_rdpudp(dest_clone, addr_clone, Some(corr_id), Some(cookie_hash), use_lossy).await {
-                                    Ok(_udp_socket) => {
-                                        info!(
-                                            "✅ UDP multitransport established successfully for request_id={}!",
-                                            req_id
-                                        );
-                                        // TODO: Integrate UDP socket with GFX channel
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "❌ Failed to establish UDP multitransport for request_id={}: {:?}",
-                                            req_id,
-                                            e
-                                        );
-                                    }
+                            // Wait 2ms to allow TCP ACK to be sent
+                            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+                            info!(
+                                "🚀 Establishing UDP transport for request_id={} (protocol: {:?}, lossy: {})",
+                                req_id, protocol, use_lossy
+                            );
+
+                            match establish_udp_transport(dest_clone, addr_clone, corr_id, use_lossy).await {
+                                Ok((cmd_tx, evt_rx)) => {
+                                    info!(
+                                        "✅ UDP transport established successfully for request_id={}!",
+                                        req_id
+                                    );
+                                    info!("   UDP transport manager running with keepalive and FEC");
+
+                                    // Store the channels for use in the session loop
+                                    udp_command_tx = Some(cmd_tx);
+                                    udp_event_rx = Some(evt_rx);
                                 }
-                            });
+                                Err(e) => {
+                                    error!(
+                                        "❌ Failed to establish UDP transport for request_id={}: {:?}",
+                                        req_id, e
+                                    );
+                                }
+                            }
                         } else {
                             warn!(
                                 "⚠️  Multitransport requested but no correlation_id available for request_id={}",
@@ -1873,6 +1929,82 @@ async fn active_session<T: RdpEventSender>(
                         //  FOR NOW: Accept ANY error during active session and continue
                         // This allows UDP timeout errors and unknown PDU types to not crash the session
                         warn!("⚠️  Accepting error and continuing (UDP may have timed out or unknown PDU received)");
+                        vec![]
+                    }
+                }
+            }
+            // Handle UDP transport events
+            udp_event = async {
+                match &mut udp_event_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match udp_event {
+                    Some(UdpTransportEvent::Connected) => {
+                        info!("✅ UDP transport connected!");
+                        vec![]
+                    }
+                    Some(UdpTransportEvent::DataReceived(data)) => {
+                        debug!("📦 Received {} bytes via UDP", data.len());
+
+                        // Route UDP data to GFX processor via DVC
+                        if let Some(dvc) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
+                            // Get the channel ID for the GFX channel
+                            let channel_id = dvc.channel_id();
+
+                            if let Some(gfx) = dvc.channel_processor_downcast_mut::<GfxDvcProcessor>() {
+                                match gfx.process_udp_data(&data) {
+                                    Ok(dvc_messages) => {
+                                        if !dvc_messages.is_empty() {
+                                            debug!("✅ Processed UDP GFX data, sending {} response messages via DVC", dvc_messages.len());
+
+                                            // Convert DVC messages to SVC messages
+                                            if let Some(channel_id) = channel_id {
+                                                match ironrdp_dvc::encode_dvc_messages(
+                                                    channel_id,
+                                                    dvc_messages,
+                                                    ChannelFlags::empty()
+                                                ) {
+                                                    Ok(svc_messages) => {
+                                                        let frame = active_stage.encode_dvc_messages(svc_messages)?;
+                                                        vec![ActiveStageOutput::ResponseFrame(frame)]
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("⚠️  Failed to encode DVC messages: {:?}", e);
+                                                        vec![]
+                                                    }
+                                                }
+                                            } else {
+                                                warn!("⚠️  GFX channel not open, discarding response messages");
+                                                vec![]
+                                            }
+                                        } else {
+                                            vec![]
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️  Failed to process UDP GFX data: {:?}", e);
+                                        vec![]
+                                    }
+                                }
+                            } else {
+                                trace!("GFX DVC processor downcast failed");
+                                vec![]
+                            }
+                        } else {
+                            trace!("GFX DVC not available, discarding {} UDP bytes", data.len());
+                            vec![]
+                        }
+                    }
+                    Some(UdpTransportEvent::Disconnected(reason)) => {
+                        warn!("⚠️  UDP transport disconnected: {}", reason);
+                        udp_event_rx = None;
+                        udp_command_tx = None;
+                        vec![]
+                    }
+                    None => {
+                        // UDP event receiver closed
                         vec![]
                     }
                 }

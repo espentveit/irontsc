@@ -94,6 +94,11 @@ impl Processor {
             .get_dvc_by_type_id::<T>()
     }
 
+    pub fn get_dvc_mut<T: DvcProcessor + 'static>(&mut self) -> Option<&mut DynamicVirtualChannel> {
+        self.get_svc_processor_mut::<DrdynvcClient>()?
+            .get_dvc_by_type_id_mut::<T>()
+    }
+
     pub fn get_dvc_by_channel_id(&self, channel_id: u32) -> Option<&DynamicVirtualChannel> {
         self.get_svc_processor::<DrdynvcClient>()?
             .get_dvc_by_channel_id(channel_id)

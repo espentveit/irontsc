@@ -5,7 +5,6 @@
 use anyhow::{Context as _, Result};
 use ironrdp_udp::CorrelationId;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 

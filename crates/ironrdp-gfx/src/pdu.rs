@@ -102,6 +102,26 @@ impl Header {
     }
 }
 
+/// Point16 (4 bytes)
+#[derive(Debug, Clone, Copy)]
+pub struct Point16 {
+    pub x: i16,
+    pub y: i16,
+}
+
+impl Point16 {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 4 {
+            bail!("Not enough data for Point16");
+        }
+
+        Ok(Self {
+            x: data.get_i16_le(),
+            y: data.get_i16_le(),
+        })
+    }
+}
+
 /// Rectangle (8 bytes)
 #[derive(Debug, Clone, Copy)]
 pub struct Rectangle {
@@ -399,6 +419,7 @@ impl SolidFill {
 pub struct CapsConfirm {
     pub version: u32,
     pub flags: u32,
+    pub extra_data: Vec<u8>,
 }
 
 impl CapsConfirm {
@@ -408,15 +429,35 @@ impl CapsConfirm {
         }
 
         let version = data.get_u32_le();
-        let length = data.get_u32_le();
+        let length = data.get_u32_le() as usize;
 
-        if length != 4 {
+        if length < 4 {
             bail!("Invalid CapsConfirm length: {}", length);
         }
 
-        let flags = data.get_u32_le();
+        if data.len() < length {
+            bail!(
+                "CapsConfirm payload truncated: need {}, have {}",
+                length,
+                data.len()
+            );
+        }
 
-        Ok(Self { version, flags })
+        let flags = data.get_u32_le();
+        let extra_len = length - 4;
+        let extra_data = if extra_len > 0 {
+            let extra = data[..extra_len].to_vec();
+            data.advance(extra_len);
+            extra
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self {
+            version,
+            flags,
+            extra_data,
+        })
     }
 }
 
@@ -518,6 +559,8 @@ pub struct ResetGraphics {
 }
 
 impl ResetGraphics {
+    const BODY_SIZE: usize = 332;
+
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
         if data.len() < 12 {
             bail!("Not enough data for ResetGraphics");
@@ -525,9 +568,36 @@ impl ResetGraphics {
 
         let original_len = data.len();
 
+        if original_len != Self::BODY_SIZE {
+            bail!(
+                "RESET_GRAPHICS body must be {} bytes, got {}",
+                Self::BODY_SIZE,
+                original_len
+            );
+        }
+
         let width = data.get_u32_le();
         let height = data.get_u32_le();
         let monitor_count = data.get_u32_le() as usize;
+
+        if width == 0 || height == 0 {
+            bail!("RESET_GRAPHICS dimensions must be non-zero");
+        }
+
+        if width > 32766 || height > 32766 {
+            bail!(
+                "RESET_GRAPHICS dimensions exceed spec limit: {}x{}",
+                width,
+                height
+            );
+        }
+
+        if monitor_count > 16 {
+            bail!(
+                "RESET_GRAPHICS monitor count exceeds spec limit: {}",
+                monitor_count
+            );
+        }
 
         if data.len() < monitor_count.saturating_mul(20) {
             bail!("Not enough data for monitor definitions");
@@ -553,6 +623,153 @@ impl ResetGraphics {
             height,
             monitors,
         })
+    }
+}
+
+/// SURFACE_TO_SURFACE PDU
+#[derive(Debug, Clone)]
+pub struct SurfaceToSurface {
+    pub source_surface_id: u16,
+    pub destination_surface_id: u16,
+    pub source_rect: Rectangle,
+    pub dest_points: Vec<Point16>,
+}
+
+impl SurfaceToSurface {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 14 {
+            bail!("Not enough data for SurfaceToSurface");
+        }
+
+        let source_surface_id = data.get_u16_le();
+        let destination_surface_id = data.get_u16_le();
+        let source_rect = Rectangle::parse(data)?;
+        let dest_points_count = data.get_u16_le() as usize;
+
+        if data.len() < dest_points_count.saturating_mul(4) {
+            bail!("Not enough data for destination points");
+        }
+
+        let mut dest_points = Vec::with_capacity(dest_points_count);
+        for _ in 0..dest_points_count {
+            dest_points.push(Point16::parse(data)?);
+        }
+
+        Ok(Self {
+            source_surface_id,
+            destination_surface_id,
+            source_rect,
+            dest_points,
+        })
+    }
+}
+
+/// SURFACE_TO_CACHE PDU
+#[derive(Debug, Clone)]
+pub struct SurfaceToCache {
+    pub surface_id: u16,
+    pub cache_key: u64,
+    pub cache_slot: u16,
+    pub source_rect: Rectangle,
+}
+
+impl SurfaceToCache {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 20 {
+            bail!("Not enough data for SurfaceToCache");
+        }
+
+        let surface_id = data.get_u16_le();
+        let cache_key = data.get_u64_le();
+        let cache_slot = data.get_u16_le();
+        let source_rect = Rectangle::parse(data)?;
+
+        Ok(Self {
+            surface_id,
+            cache_key,
+            cache_slot,
+            source_rect,
+        })
+    }
+}
+
+/// CACHE_TO_SURFACE PDU
+#[derive(Debug, Clone)]
+pub struct CacheToSurface {
+    pub cache_slot: u16,
+    pub surface_id: u16,
+    pub dest_points: Vec<Point16>,
+}
+
+impl CacheToSurface {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 6 {
+            bail!("Not enough data for CacheToSurface");
+        }
+
+        let cache_slot = data.get_u16_le();
+        let surface_id = data.get_u16_le();
+        let dest_points_count = data.get_u16_le() as usize;
+
+        if data.len() < dest_points_count.saturating_mul(4) {
+            bail!("Not enough data for destination points");
+        }
+
+        let mut dest_points = Vec::with_capacity(dest_points_count);
+        for _ in 0..dest_points_count {
+            dest_points.push(Point16::parse(data)?);
+        }
+
+        Ok(Self {
+            cache_slot,
+            surface_id,
+            dest_points,
+        })
+    }
+}
+
+/// EVICT_CACHE_ENTRY PDU
+#[derive(Debug, Clone)]
+pub struct EvictCacheEntry {
+    pub cache_slot: u16,
+}
+
+impl EvictCacheEntry {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 2 {
+            bail!("Not enough data for EvictCacheEntry");
+        }
+
+        Ok(Self {
+            cache_slot: data.get_u16_le(),
+        })
+    }
+}
+
+/// CACHE_IMPORT_REPLY PDU (Server → Client)
+#[derive(Debug, Clone)]
+pub struct CacheImportReply {
+    pub imported_slots: Vec<u16>,
+}
+
+impl CacheImportReply {
+    pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        if data.len() < 2 {
+            bail!("Not enough data for CacheImportReply");
+        }
+
+        let count = data.get_u16_le() as usize;
+
+        if data.len() < count.saturating_mul(2) {
+            bail!("Not enough data for cache slots in CacheImportReply");
+        }
+
+        let mut imported_slots = Vec::with_capacity(count);
+        for _ in 0..count {
+            imported_slots.push(data.get_u16_le());
+        }
+
+        Ok(Self { imported_slots })
     }
 }
 

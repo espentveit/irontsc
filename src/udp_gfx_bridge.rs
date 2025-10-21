@@ -8,6 +8,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
+// Import UDP packet types for proper parsing
+use ironrdp_udp::SourcePacket;
+
 /// H.264 video frame received via UDP
 #[derive(Debug, Clone)]
 pub struct UdpVideoFrame {
@@ -33,7 +36,7 @@ async fn udp_video_receiver_task(
     frame_tx: mpsc::UnboundedSender<UdpVideoFrame>,
 ) {
     let mut buffer = vec![0u8; 65536]; // Max UDP packet size
-    let mut sequence_counter = 0u32;
+    let mut expected_sequence = 0u32;
 
     info!("🎥 UDP video receiver task started");
 
@@ -47,33 +50,30 @@ async fn udp_video_receiver_task(
 
                 trace!("📦 Received UDP packet: {} bytes", n);
 
-                // Parse RDPUDP packet structure
-                if n < 4 {
-                    warn!("UDP packet too small: {} bytes", n);
-                    continue;
-                }
+                // Parse RDPUDP packet using proper packet decoder
+                match SourcePacket::decode(&buffer[..n]) {
+                    Ok(packet) => {
+                        let seq = packet.sequence_number();
+                        let payload = &packet.data;
 
-                // Basic RDPUDP header parsing
-                // Header format:
-                // Byte 0: Packet type and flags
-                // Byte 1-3: Sequence number (24-bit)
-                let packet_type = buffer[0] & 0xF0;
-                let flags = buffer[0] & 0x0F;
+                        trace!(
+                            "UDP SOURCE packet decoded - seq: {}, payload: {} bytes",
+                            seq,
+                            payload.len()
+                        );
 
-                trace!(
-                    "UDP packet - type: 0x{:02X}, flags: 0x{:X}, size: {}",
-                    packet_type, flags, n
-                );
-
-                // Check if this is a SOURCE packet (0x40) containing data
-                if packet_type == 0x40 {
-                    // Extract payload after RDPUDP header
-                    // The header size varies, but typically 4-8 bytes
-                    // For simplicity, we'll assume a minimal header
-                    let payload_start = 4;
-
-                    if n > payload_start {
-                        let payload = &buffer[payload_start..n];
+                        // Detect sequence gaps for packet loss tracking
+                        if seq != expected_sequence {
+                            let gap = seq.wrapping_sub(expected_sequence);
+                            if gap < 1000 {
+                                // Reasonable gap check
+                                warn!(
+                                    "⚠️  Sequence gap detected: expected {}, got {} (lost {} packets)",
+                                    expected_sequence, seq, gap
+                                );
+                            }
+                        }
+                        expected_sequence = seq.wrapping_add(1);
 
                         // Check if this looks like H.264 data (NAL unit)
                         // H.264 NAL units typically start with 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01
@@ -90,52 +90,37 @@ async fn udp_video_receiver_task(
                             debug!(
                                 "📹 Received H.264 frame via UDP: {} bytes (seq: {})",
                                 payload.len(),
-                                sequence_counter
+                                seq
                             );
-
-                            let frame = UdpVideoFrame {
-                                data: payload.to_vec(),
-                                sequence_number: sequence_counter,
-                                timestamp: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as u64,
-                            };
-
-                            if let Err(e) = frame_tx.send(frame) {
-                                error!("Failed to send video frame to GFX processor: {}", e);
-                                break;
-                            }
-
-                            sequence_counter = sequence_counter.wrapping_add(1);
                         } else {
-                            // Non-H.264 payload, might be RDPGFX PDU
                             trace!(
-                                "Received non-H.264 payload via UDP: {} bytes",
-                                payload.len()
+                                "Received non-H.264 payload via UDP: {} bytes (seq: {})",
+                                payload.len(),
+                                seq
                             );
+                        }
 
-                            // Still send it to GFX processor for handling
-                            let frame = UdpVideoFrame {
-                                data: payload.to_vec(),
-                                sequence_number: sequence_counter,
-                                timestamp: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as u64,
-                            };
+                        let frame = UdpVideoFrame {
+                            data: payload.to_vec(),
+                            sequence_number: seq,
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64,
+                        };
 
-                            if let Err(e) = frame_tx.send(frame) {
-                                error!("Failed to send data to GFX processor: {}", e);
-                                break;
-                            }
-
-                            sequence_counter = sequence_counter.wrapping_add(1);
+                        if let Err(e) = frame_tx.send(frame) {
+                            error!("Failed to send frame to GFX processor: {}", e);
+                            break;
                         }
                     }
-                } else {
-                    // Other packet types (ACK, FEC, etc.)
-                    trace!("Received non-data UDP packet type: 0x{:02X}", packet_type);
+                    Err(e) => {
+                        // Not a source packet, might be ACK or FEC packet
+                        trace!(
+                            "Failed to decode as SOURCE packet: {} (might be ACK/FEC)",
+                            e
+                        );
+                    }
                 }
             }
             Err(e) => {

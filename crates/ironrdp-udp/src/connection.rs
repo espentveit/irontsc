@@ -341,6 +341,51 @@ impl UdpConnection {
         Ok(encoded)
     }
 
+    /// Check if FEC block is complete and generate FEC packet if needed
+    /// Returns Some(fec_packet_bytes) if a FEC packet should be sent
+    pub fn check_fec_block(&mut self) -> UdpResult<Option<Vec<u8>>> {
+        if !self.config.enable_fec {
+            return Ok(None);
+        }
+
+        if self.source_packets_in_block.len() < self.config.fec_block_size as usize {
+            return Ok(None);
+        }
+
+        // Generate FEC packet for the completed block
+        let fec_index = 0u8; // Could support multiple FEC packets per block in future
+        let fec_data = self
+            .fec_codec
+            .encode(&self.source_packets_in_block, fec_index);
+
+        // Create FEC packet header
+        let base_sequence = self
+            .next_send_sequence
+            .wrapping_sub(self.source_packets_in_block.len() as u32);
+        let fec_header = crate::payload::FecPayloadHeader::new(
+            base_sequence,
+            0, // sn_source_start: index of first packet in block (0 for first packet)
+            self.source_packets_in_block.len() as u8, // urange: number of source packets
+            fec_index,
+        );
+
+        let ack_vector = self.build_ack_vector()?;
+
+        let fec_packet = crate::packet::FecPacket::new(
+            self.last_ack_received,
+            self.config.receive_window_size,
+            fec_header,
+            fec_data,
+            ack_vector,
+            None,
+        )?;
+
+        // Clear the block for next round
+        self.source_packets_in_block.clear();
+
+        Ok(Some(fec_packet.encode()))
+    }
+
     /// Process received source packet
     pub fn process_source_packet(&mut self, bytes: &[u8]) -> UdpResult<Vec<Vec<u8>>> {
         let packet = SourcePacket::decode(bytes)?;
