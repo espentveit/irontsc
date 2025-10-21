@@ -148,7 +148,7 @@ impl DvcPipeProxyFactory {
 
 pub type WriteDvcMessageFn = Box<dyn Fn(u32, SvcMessage) -> PduResult<()> + Send + 'static>;
 
-pub struct RdpClient<T: RdpEventSender> {
+pub struct RdpClient<T: RdpEventSender + Clone> {
     pub config: Config,
     pub event_loop_proxy: T,
     pub input_event_receiver: mpsc::UnboundedReceiver<RdpInputEvent>,
@@ -156,7 +156,7 @@ pub struct RdpClient<T: RdpEventSender> {
     pub dvc_pipe_proxy_factory: DvcPipeProxyFactory,
 }
 
-impl<T: RdpEventSender> RdpClient<T> {
+impl<T: RdpEventSender + Clone> RdpClient<T> {
     pub async fn run(mut self) {
         loop {
             let (connection_result, framed, client_addr) =
@@ -1685,7 +1685,7 @@ fn encode_multitransport_response_frame(
     Ok(buf.filled().to_vec())
 }
 
-async fn active_session<T: RdpEventSender>(
+async fn active_session<T: RdpEventSender + Clone>(
     framed: UpgradedFramed,
     connection_result: ConnectionResult,
     event_loop_proxy: &T,
@@ -1705,6 +1705,17 @@ async fn active_session<T: RdpEventSender>(
     let message_channel_id = connection_result.message_channel_id;
 
     let mut active_stage = ActiveStage::new(connection_result);
+
+    // Set the event sender on GFX processor now that we have the real event loop proxy
+    {
+        use crate::gfx_channel::GfxDvcProcessor;
+        if let Some(dvc) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
+            if let Some(gfx_processor) = dvc.channel_processor_downcast_mut::<GfxDvcProcessor>() {
+                info!("🔌 Connecting GFX event sender to UI");
+                gfx_processor.set_event_sender(Box::new(event_loop_proxy.clone()));
+            }
+        }
+    }
 
     // Initialize Desktop Composition handler with output dimensions
     let mut desktop_comp_handler =
