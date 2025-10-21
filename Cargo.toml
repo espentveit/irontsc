@@ -227,8 +227,8 @@ ironrdp-connector = { path = "crates/ironrdp-connector-local" }
 
 [features]
 default = []
-h264 = ["ironrdp-h264"]
-video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264"]
+h264 = ["ironrdp-h264", "ironrdp-gfx/h264"]
+video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264", "ironrdp-gfx/h264"]
 
 [patch."https://github.com/Devolutions/IronRDP"]
 ironrdp = { path = "crates/ironrdp-local" }

@@ -91,6 +91,14 @@ impl CapabilitySet {
             // if we advertise it in the 8.1 block, so only set the positive capability here.
             flags_81 |= cap_flags::AVC420_ENABLED;
         }
+
+        // Validate V8.1 flag combinations per spec (MS-RDPEGFX 2.2.3.2)
+        // Valid combinations are: THINCLIENT, SMALL_CACHE,
+        // SMALL_CACHE|AVC420_ENABLED, SMALL_CACHE|AVC420_ENABLED|THINCLIENT
+        if thin_client && small_cache && !avc420_enabled {
+            info!("⚠️  V8.1: THINCLIENT + SMALL_CACHE without AVC420_ENABLED is not a valid spec combination");
+        }
+
         caps.push(Self::new(cap_version::V81, flags_81));
 
         // RDP 10.x capability sets mirror the behavior of Windows and FreeRDP clients.
@@ -112,16 +120,23 @@ impl CapabilitySet {
 
         caps.push(Self::new(cap_version::V102, caps10_flags));
 
+        // V10.3 spec (MS-RDPEGFX 2.2.3.6) states: "Selection of this capability set
+        // implies that the bitmap cache MUST be constrained to 16MB in size"
+        // Remove SMALL_CACHE flag as it's redundant and may confuse some servers.
         let flags_103 = caps10_flags & !cap_flags::SMALL_CACHE;
         caps.push(Self::new(cap_version::V103, flags_103));
 
         caps.push(Self::new(cap_version::V104, caps10_flags));
 
-        if scaling_supported {
-            caps.push(Self::new(cap_version::V105, caps10_flags));
-            caps.push(Self::new(cap_version::V106, caps10_flags));
-            caps.push(Self::new(cap_version::V106_ERR, caps10_flags));
+        // Always advertise V10.5 and V10.6 for maximum compatibility.
+        // Use SCALEDMAP_DISABLE flag when scaling is not supported.
+        let mut flags_105_106 = caps10_flags;
+        if !scaling_supported {
+            flags_105_106 |= cap_flags::SCALEDMAP_DISABLE;
         }
+        caps.push(Self::new(cap_version::V105, flags_105_106));
+        caps.push(Self::new(cap_version::V106, flags_105_106));
+        caps.push(Self::new(cap_version::V106_ERR, flags_105_106));
 
         let mut flags_107 = caps10_flags;
         if !scaling_supported {

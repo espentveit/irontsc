@@ -726,3 +726,331 @@ fn default_capability_sets(small_cache: bool) -> Vec<CapabilitySet> {
 fn default_capability_sets(small_cache: bool) -> Vec<CapabilitySet> {
     CapabilitySet::default_sets(small_cache, false, false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mock GfxContext for testing
+    struct MockGfxContext {
+        messages: Vec<Vec<u8>>,
+    }
+
+    impl MockGfxContext {
+        fn new() -> Self {
+            Self {
+                messages: Vec::new(),
+            }
+        }
+
+        fn take_outgoing_messages(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.messages)
+        }
+    }
+
+    impl GfxContext for MockGfxContext {
+        fn send(&mut self, data: &[u8]) -> Result<()> {
+            self.messages.push(data.to_vec());
+            Ok(())
+        }
+
+        fn on_create_surface(
+            &mut self,
+            _surface_id: u16,
+            _width: u16,
+            _height: u16,
+            _pixel_format: u8,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_delete_surface(&mut self, _surface_id: u16) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_start_frame(&mut self, _frame_id: u32, _timestamp: u32) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_end_frame(&mut self, _frame_id: u32) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_surface_command(
+            &mut self,
+            _surface_id: u16,
+            _codec_id: u16,
+            _pixel_format: u8,
+            _dest_rect: Rectangle,
+            _bitmap_data: &[u8],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_surface_command_full(
+            &mut self,
+            _surface_id: u16,
+            _codec_id: u16,
+            _codec_context_id: u32,
+            _pixel_format: u8,
+            _bitmap_data: &[u8],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_solid_fill(
+            &mut self,
+            _surface_id: u16,
+            _fill_pixel: Color32,
+            _fill_rects: &[Rectangle],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_surface_to_surface(
+            &mut self,
+            _source_surface_id: u16,
+            _destination_surface_id: u16,
+            _source_rect: Rectangle,
+            _dest_points: &[Point16],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_surface_to_cache(
+            &mut self,
+            _surface_id: u16,
+            _cache_key: u64,
+            _cache_slot: u16,
+            _source_rect: Rectangle,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_cache_to_surface(
+            &mut self,
+            _cache_slot: u16,
+            _surface_id: u16,
+            _dest_points: &[Point16],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_evict_cache_entry(&mut self, _cache_slot: u16) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_cache_import_reply(&mut self, _imported_slots: &[u16]) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_delete_encoding_context(
+            &mut self,
+            _surface_id: u16,
+            _codec_context_id: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_reset_graphics(
+            &mut self,
+            _width: u32,
+            _height: u32,
+            _monitors: &[MonitorDefinition],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_map_surface_to_output(
+            &mut self,
+            _surface_id: u16,
+            _output_origin_x: u32,
+            _output_origin_y: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_map_surface_to_scaled_output(
+            &mut self,
+            _surface_id: u16,
+            _output_origin_x: u32,
+            _output_origin_y: u32,
+            _target_width: u32,
+            _target_height: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_map_surface_to_window(
+            &mut self,
+            _surface_id: u16,
+            _window_id: u64,
+            _mapped_width: u32,
+            _mapped_height: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_map_surface_to_scaled_window(
+            &mut self,
+            _surface_id: u16,
+            _window_id: u64,
+            _mapped_width: u32,
+            _mapped_height: u32,
+            _target_width: u32,
+            _target_height: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_caps_confirm_v8_processing() {
+        let ctx = MockGfxContext::new();
+        let mut client = GfxClient::new(ctx, false, false);
+
+        // Construct a CAPS_CONFIRM PDU for V8 (0x00080004)
+        let mut caps_confirm_data = Vec::new();
+        caps_confirm_data.extend_from_slice(&caps::cap_version::V8.to_le_bytes()); // version
+        caps_confirm_data.extend_from_slice(&4u32.to_le_bytes()); // capsDataLength
+        caps_confirm_data.extend_from_slice(&0u32.to_le_bytes()); // flags
+
+        // Process the CAPS_CONFIRM
+        let result = client.handle_caps_confirm(&mut caps_confirm_data.as_slice());
+        assert!(result.is_ok(), "CAPS_CONFIRM processing should succeed");
+
+        // Verify capability version was stored
+        assert_eq!(
+            client.cap_version(),
+            Some(caps::cap_version::V8),
+            "Capability version should be V8"
+        );
+
+        // Verify capability flags were stored
+        assert_eq!(client.cap_flags, 0, "Flags should be 0 for V8");
+
+        // Verify QoE acks are disabled for V8 (< V10)
+        assert!(
+            !client.send_qoe_acks,
+            "QoE acknowledgements should be disabled for V8"
+        );
+    }
+
+    #[test]
+    fn test_caps_confirm_v10_processing() {
+        let ctx = MockGfxContext::new();
+        let mut client = GfxClient::new(ctx, false, false);
+
+        // Construct a CAPS_CONFIRM PDU for V10 (0x000A0002)
+        let flags = caps::cap_flags::AVC_DISABLED;
+        let mut caps_confirm_data = Vec::new();
+        caps_confirm_data.extend_from_slice(&caps::cap_version::V10.to_le_bytes()); // version
+        caps_confirm_data.extend_from_slice(&4u32.to_le_bytes()); // capsDataLength
+        caps_confirm_data.extend_from_slice(&flags.to_le_bytes()); // flags
+
+        // Process the CAPS_CONFIRM
+        let result = client.handle_caps_confirm(&mut caps_confirm_data.as_slice());
+        assert!(result.is_ok(), "CAPS_CONFIRM processing should succeed");
+
+        // Verify capability version was stored
+        assert_eq!(
+            client.cap_version(),
+            Some(caps::cap_version::V10),
+            "Capability version should be V10"
+        );
+
+        // Verify capability flags were stored
+        assert_eq!(
+            client.cap_flags, flags,
+            "Flags should match the AVC_DISABLED flag"
+        );
+
+        // Verify QoE acks are enabled for V10+
+        assert!(
+            client.send_qoe_acks,
+            "QoE acknowledgements should be enabled for V10+"
+        );
+    }
+
+    #[test]
+    fn test_caps_confirm_v107_with_flags() {
+        let ctx = MockGfxContext::new();
+        let mut client = GfxClient::new(ctx, false, false);
+
+        // Construct a CAPS_CONFIRM PDU for V10.7 with multiple flags
+        let flags = caps::cap_flags::AVC_DISABLED | caps::cap_flags::SCALEDMAP_DISABLE;
+        let mut caps_confirm_data = Vec::new();
+        caps_confirm_data.extend_from_slice(&caps::cap_version::V107.to_le_bytes()); // version
+        caps_confirm_data.extend_from_slice(&4u32.to_le_bytes()); // capsDataLength
+        caps_confirm_data.extend_from_slice(&flags.to_le_bytes()); // flags
+
+        // Process the CAPS_CONFIRM
+        let result = client.handle_caps_confirm(&mut caps_confirm_data.as_slice());
+        assert!(result.is_ok(), "CAPS_CONFIRM processing should succeed");
+
+        // Verify capability version was stored
+        assert_eq!(
+            client.cap_version(),
+            Some(caps::cap_version::V107),
+            "Capability version should be V10.7"
+        );
+
+        // Verify all flags were stored correctly
+        assert_eq!(
+            client.cap_flags, flags,
+            "Flags should include both AVC_DISABLED and SCALEDMAP_DISABLE"
+        );
+        assert_eq!(
+            client.cap_flags & caps::cap_flags::AVC_DISABLED,
+            caps::cap_flags::AVC_DISABLED,
+            "AVC_DISABLED flag should be set"
+        );
+        assert_eq!(
+            client.cap_flags & caps::cap_flags::SCALEDMAP_DISABLE,
+            caps::cap_flags::SCALEDMAP_DISABLE,
+            "SCALEDMAP_DISABLE flag should be set"
+        );
+
+        // Verify QoE acks are enabled for V10.7
+        assert!(
+            client.send_qoe_acks,
+            "QoE acknowledgements should be enabled for V10.7"
+        );
+    }
+
+    #[test]
+    fn test_caps_confirm_qoe_boundary() {
+        // Test that QoE is disabled for V8.1 (< V10)
+        let ctx = MockGfxContext::new();
+        let mut client = GfxClient::new(ctx, false, false);
+
+        let mut caps_confirm_data = Vec::new();
+        caps_confirm_data.extend_from_slice(&caps::cap_version::V81.to_le_bytes());
+        caps_confirm_data.extend_from_slice(&4u32.to_le_bytes());
+        caps_confirm_data.extend_from_slice(&0u32.to_le_bytes());
+
+        client
+            .handle_caps_confirm(&mut caps_confirm_data.as_slice())
+            .unwrap();
+
+        assert!(!client.send_qoe_acks, "QoE should be disabled for V8.1");
+
+        // Test that QoE is enabled exactly at V10
+        let ctx2 = MockGfxContext::new();
+        let mut client2 = GfxClient::new(ctx2, false, false);
+
+        let mut caps_confirm_data2 = Vec::new();
+        caps_confirm_data2.extend_from_slice(&caps::cap_version::V10.to_le_bytes());
+        caps_confirm_data2.extend_from_slice(&4u32.to_le_bytes());
+        caps_confirm_data2.extend_from_slice(&0u32.to_le_bytes());
+
+        client2
+            .handle_caps_confirm(&mut caps_confirm_data2.as_slice())
+            .unwrap();
+
+        assert!(
+            client2.send_qoe_acks,
+            "QoE should be enabled exactly at V10"
+        );
+    }
+}
