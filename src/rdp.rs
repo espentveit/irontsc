@@ -466,6 +466,8 @@ async fn establish_udp_transport(
     client_addr: SocketAddr,
     correlation_id: [u8; 16],
     use_lossy_mode: bool,
+    request_id: Option<u32>,
+    security_cookie: Option<[u8; 16]>,
 ) -> anyhow::Result<(
     mpsc::UnboundedSender<UdpTransportCommand>,
     mpsc::UnboundedReceiver<UdpTransportEvent>,
@@ -473,6 +475,7 @@ async fn establish_udp_transport(
     info!("🔌 Establishing UDP transport for {}", destination.name());
 
     let server_addr = SocketAddr::new(destination.name().parse()?, destination.port());
+    let server_name = destination.name().to_string();
 
     let config = UdpTransportConfig {
         server_addr,
@@ -488,7 +491,13 @@ async fn establish_udp_transport(
     };
 
     let corr_id = CorrelationId::new(correlation_id);
-    let (manager, command_tx, event_rx) = UdpTransportManager::new(config, Some(corr_id)).await?;
+    let (mut manager, command_tx, event_rx) = UdpTransportManager::new(config, Some(corr_id), server_name).await?;
+
+    // Set MS-RDPEMT tunnel parameters if provided
+    if let (Some(req_id), Some(cookie)) = (request_id, security_cookie) {
+        info!("🔐 Setting MS-RDPEMT tunnel params: request_id={}", req_id);
+        manager.set_tunnel_params(req_id, cookie);
+    }
 
     // Spawn the transport manager task
     tokio::spawn(async move {
@@ -1730,8 +1739,8 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut multitransport_requests: HashMap<u32, MultitransportHandshakeContext> = HashMap::new();
 
     // UDP transport channels (established when multitransport is requested)
-    let mut udp_command_tx: Option<mpsc::UnboundedSender<UdpTransportCommand>> = None;
-    let mut udp_event_rx: Option<mpsc::UnboundedReceiver<UdpTransportEvent>> = None;
+    // Store ALL transports, not just one! Multiple may be active simultaneously.
+    let mut udp_transports: Vec<mpsc::UnboundedReceiver<UdpTransportEvent>> = Vec::new();
 
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
@@ -1867,6 +1876,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                             // CRITICAL FIX: Working client sends UDP SYN ~1.5ms after TCP ACK
                             info!("🚀 Starting UDP handshake for request_id={}...", request_id);
 
+                            // Enable UDP mode IMMEDIATELY to prevent TCP/UDP collision
+                            // (TCP GFX data may arrive before UDP handshake completes)
+                            if let Some(dvc) = active_stage.get_dvc_mut::<crate::gfx_channel::GfxDvcProcessor>() {
+                                if let Some(gfx) = dvc.channel_processor_downcast_mut::<crate::gfx_channel::GfxDvcProcessor>() {
+                                    gfx.enable_udp_mode();
+                                }
+                            }
+
                             // Establish UDP transport using transport manager
                             let dest_clone = destination.clone();
                             let addr_clone = client_addr;
@@ -1882,7 +1899,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 req_id, protocol, use_lossy
                             );
 
-                            match establish_udp_transport(dest_clone, addr_clone, corr_id, use_lossy).await {
+                            match establish_udp_transport(
+                                dest_clone, 
+                                addr_clone, 
+                                corr_id, 
+                                use_lossy,
+                                Some(req_id),
+                                Some(request_info.security_cookie)
+                            ).await {
                                 Ok((cmd_tx, evt_rx)) => {
                                     info!(
                                         "✅ UDP transport established successfully for request_id={}!",
@@ -1890,9 +1914,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                                     );
                                     info!("   UDP transport manager running with keepalive and FEC");
 
-                                    // Store the channels for use in the session loop
-                                    udp_command_tx = Some(cmd_tx);
-                                    udp_event_rx = Some(evt_rx);
+                                    // Store ALL transports - multiple can be active simultaneously
+                                    info!(
+                                        "📌 Storing UDP transport #{} for request_id={}",
+                                        udp_transports.len() + 1,
+                                        req_id
+                                    );
+                                    udp_transports.push(evt_rx);
+                                    // Note: We don't store cmd_tx - currently unused
                                 }
                                 Err(e) => {
                                     error!(
@@ -1951,20 +1980,43 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                 }
             }
-            // Handle UDP transport events
+            // Handle UDP transport events from ALL active transports
+            // Poll all transports and process whichever has data first
             udp_event = async {
-                match &mut udp_event_rx {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
+                if udp_transports.is_empty() {
+                    // No transports yet - wait forever
+                    std::future::pending::<Option<(usize, UdpTransportEvent)>>().await
+                } else {
+                    // Poll all transports simultaneously using select_all
+                    use futures_util::stream::StreamExt;
+                    
+                    // Create futures for all transports
+                    let mut futures = udp_transports
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(idx, rx)| async move {
+                            match rx.recv().await {
+                                Some(event) => Some((idx, event)),
+                                None => None,
+                            }
+                        })
+                        .collect::<futures_util::stream::FuturesUnordered<_>>();
+                    
+                    // Wait for the first one to complete
+                    futures.next().await.flatten()
                 }
             } => {
                 match udp_event {
-                    Some(UdpTransportEvent::Connected) => {
-                        info!("✅ UDP transport connected!");
+                    Some((transport_idx, UdpTransportEvent::Connected)) => {
+                        info!("✅ UDP transport #{} connected!", transport_idx + 1);
                         vec![]
                     }
-                    Some(UdpTransportEvent::DataReceived(data)) => {
-                        debug!("📦 Received {} bytes via UDP", data.len());
+                    Some((transport_idx, UdpTransportEvent::TunnelEstablished)) => {
+                        info!("🔐 MS-RDPEMT tunnel established on transport #{}", transport_idx + 1);
+                        vec![]
+                    }
+                    Some((transport_idx, UdpTransportEvent::DataReceived(data))) => {
+                        info!("📦 Received {} bytes via UDP on transport #{}", data.len(), transport_idx + 1);
 
                         // Route UDP data to GFX processor via DVC
                         if let Some(dvc) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
@@ -2015,14 +2067,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                             vec![]
                         }
                     }
-                    Some(UdpTransportEvent::Disconnected(reason)) => {
-                        warn!("⚠️  UDP transport disconnected: {}", reason);
-                        udp_event_rx = None;
-                        udp_command_tx = None;
+                    Some((transport_idx, UdpTransportEvent::Disconnected(reason))) => {
+                        warn!("⚠️  UDP transport #{} disconnected: {}", transport_idx + 1, reason);
+                        // Note: We don't remove the transport from the vec
+                        // It will just keep returning None
                         vec![]
                     }
                     None => {
-                        // UDP event receiver closed
+                        // All UDP event receivers closed or no data available
                         vec![]
                     }
                 }
