@@ -101,23 +101,8 @@ impl GfxDvcProcessor {
 
         Ok(messages
             .into_iter()
-            .map(|data| {
-                let packet = Self::wrap_zgfx_packet(&data);
-                Box::new(GfxDvcMessage { data: packet }) as DvcMessage
-            })
+            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
             .collect())
-    }
-
-    /// Wrap raw RDPEGFX payload in a zGFX segmented packet
-    fn wrap_zgfx_packet(payload: &[u8]) -> Vec<u8> {
-        const DESCRIPTOR_SINGLE: u8 = 0xE0; // ZGFX_SEGMENTED_SINGLE
-        const HEADER_RDP8_UNCOMPRESSED: u8 = 0x04; // RDP8 stream, uncompressed
-
-        let mut packet = Vec::with_capacity(payload.len() + 2);
-        packet.push(DESCRIPTOR_SINGLE);
-        packet.push(HEADER_RDP8_UNCOMPRESSED);
-        packet.extend_from_slice(payload);
-        packet
     }
 }
 
@@ -162,10 +147,7 @@ impl DvcProcessor for GfxDvcProcessor {
         }
         Ok(messages
             .into_iter()
-            .map(|data| {
-                let packet = Self::wrap_zgfx_packet(&data);
-                Box::new(GfxDvcMessage { data: packet }) as DvcMessage
-            })
+            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
             .collect())
     }
 
@@ -214,10 +196,7 @@ impl DvcProcessor for GfxDvcProcessor {
         }
         Ok(messages
             .into_iter()
-            .map(|data| {
-                let packet = Self::wrap_zgfx_packet(&data);
-                Box::new(GfxDvcMessage { data: packet }) as DvcMessage
-            })
+            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
             .collect())
     }
 
@@ -233,7 +212,6 @@ mod tests {
     use super::*;
     use crate::gfx::GfxState;
     use crate::rdp::{RdpEventSender, RdpOutputEvent};
-    use zgfx;
 
     struct NoopSender;
 
@@ -262,20 +240,14 @@ mod tests {
         use ironrdp_gfx::pdu::CmdId as GfxCmdId;
         use ironrdp_gfx::pdu::Header;
 
-        // Outgoing messages must be zGFX wrapped (single segment)
-        assert_eq!(original[0], 0xE0, "Missing zGFX segmented header");
-        assert_eq!(original[1], 0x04, "Unexpected zGFX flags byte");
-
-        let decompressed = zgfx::decompress(&original).expect("decompress zGFX payload");
-
         // Validate header parses correctly
-        let mut payload = &decompressed[..];
+        let mut payload = &original[..];
         let header = Header::parse(&mut payload).expect("parse header");
         assert_eq!(header.cmd_id, GfxCmdId::CapsAdvertise);
         assert_eq!(header.flags, 0);
-        assert_eq!(header.pdu_length as usize, decompressed.len());
+        assert_eq!(header.pdu_length as usize, original.len());
 
-        // Remaining data should start with caps set count
+        // Remaining data should start with caps set count (8 capability sets)
         let count = u16::from_le_bytes([payload[0], payload[1]]);
         assert_eq!(count, 8);
     }
