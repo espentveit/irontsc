@@ -207,18 +207,39 @@ impl UdpTransportManager {
         let socket_clone = self.socket.clone();
         let adapter_clone = adapter.clone();
         let server_addr = self.server_addr;
+        let local_addr = self.socket.local_addr().ok();
         let feeder_task = tokio::spawn(async move {
+            info!("TLS feeder task: started (local={:?}, server={})", local_addr, server_addr);
             let mut buf = vec![0u8; 65536];
             // Feed packets for up to 10 seconds
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let mut packet_count = 0;
+            let mut timeout_count = 0;
             while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout(Duration::from_millis(100), socket_clone.recv_from(&mut buf)).await {
                     Ok(Ok((len, addr))) if addr == server_addr => {
-                        let _ = adapter_clone.feed_packet(&buf[..len]).await;
+                        packet_count += 1;
+                        info!("TLS feeder task: received packet #{} ({} bytes from {})", packet_count, len, addr);
+                        if let Err(e) = adapter_clone.feed_packet(&buf[..len]).await {
+                            warn!("TLS feeder task: feed_packet error: {}", e);
+                        }
                     }
-                    _ => {}
+                    Ok(Ok((len, addr))) => {
+                        info!("TLS feeder task: ignoring packet from wrong address {} ({} bytes, expected {})", addr, len, server_addr);
+                    }
+                    Ok(Err(e)) => {
+                        warn!("TLS feeder task: recv_from error: {}", e);
+                    }
+                    Err(_) => {
+                        // Timeout - continue loop
+                        timeout_count += 1;
+                        if timeout_count % 10 == 0 {
+                            debug!("TLS feeder task: {} timeouts so far", timeout_count);
+                        }
+                    }
                 }
             }
+            info!("TLS feeder task: finished, processed {} packets ({} timeouts)", packet_count, timeout_count);
         });
         
         // Perform TLS handshake
