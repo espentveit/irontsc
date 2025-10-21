@@ -57,6 +57,11 @@ impl GfxDvcProcessor {
         }
     }
 
+    /// Update the event sender (must be called before processing GFX frames)
+    pub fn set_event_sender(&mut self, event_sender: Box<dyn crate::rdp::RdpEventSender>) {
+        self.client.ctx.set_event_sender(event_sender);
+    }
+
     /// Process UDP data containing H.264 frames
     ///
     /// This method handles RDPEGFX data received via UDP transport (multitransport).

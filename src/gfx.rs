@@ -4,6 +4,7 @@
 //! the client to receive and render high-quality graphics from the server.
 
 use anyhow::{Context as _, Result, ensure};
+use clearcodec::ClearCodec;
 use ironrdp_gfx::pdu::{MonitorDefinition, Point16, Rectangle};
 use ironrdp_gfx::{GfxContext, codec};
 #[cfg(feature = "h264")]
@@ -99,6 +100,8 @@ unsafe impl Send for SendFfmpegDecoder {}
 
 /// GFX client state
 pub struct GfxState {
+    /// ClearCodec decoder
+    clearcodec_decoder: ClearCodec,
     /// H.264 decoder (optional, requires h264 feature)
     #[cfg(feature = "h264")]
     h264_decoder: SendFfmpegDecoder,
@@ -141,6 +144,7 @@ impl GfxState {
         info!("⚠️ RDPEGFX GfxState initialized WITHOUT H.264 support");
 
         Ok(Self {
+            clearcodec_decoder: ClearCodec::new(),
             #[cfg(feature = "h264")]
             h264_decoder,
             surfaces: HashMap::new(),
@@ -152,6 +156,11 @@ impl GfxState {
             event_sender,
             outgoing_buffer: Vec::new(),
         })
+    }
+
+    /// Replace the event sender (useful for switching from dummy to real sender after connection)
+    pub fn set_event_sender(&mut self, event_sender: Box<dyn RdpEventSender>) {
+        self.event_sender = event_sender;
     }
 
     /// Get pending outgoing messages and clear the buffer
@@ -313,6 +322,24 @@ impl GfxContext for GfxState {
             .ok_or_else(|| anyhow::anyhow!("Unknown surface: {}", surface_id))?;
 
         match codec_id {
+            codec::codec_id::CLEARCODEC => {
+                info!(
+                    "🧹 Decoding ClearCodec frame ({} bytes)...",
+                    bitmap_data.len()
+                );
+                
+                // Decode ClearCodec
+                let width = dest_rect.width() as u32;
+                let height = dest_rect.height() as u32;
+                let mut decoded_buffer = vec![0u8; (width * height * 4) as usize];
+                
+                self.clearcodec_decoder
+                    .decompress(bitmap_data, width, height, &mut decoded_buffer)
+                    .context("Failed to decode ClearCodec frame")?;
+                
+                info!("✅ ClearCodec decode complete, blitting to surface");
+                Self::blit_raw_to_surface(surface, &dest_rect, &decoded_buffer)?;
+            }
             #[cfg(feature = "h264")]
             codec::codec_id::AVC420 => {
                 info!(
@@ -371,6 +398,31 @@ impl GfxContext for GfxState {
                     codec_id,
                     codec::codec_name(codec_id)
                 );
+            }
+        }
+
+        // Send update to UI if we have surface mappings and graphics output
+        // This handles cases where END_FRAME might not be sent immediately
+        if self.graphics_output.is_some() && !self.surface_output_mappings.is_empty() {
+            // Check if this surface is mapped to output
+            if self.surface_output_mappings.iter().any(|m| m.surface_id == surface_id) {
+                info!("📺 Updating graphics output with decoded surface {}", surface_id);
+                let output = self.graphics_output.as_mut().unwrap();
+                output.clear();
+                for mapping in &self.surface_output_mappings {
+                    if let Some(surf) = self.surfaces.get(&mapping.surface_id) {
+                        Self::blit_surface_to_output(output, surf, mapping)?;
+                    }
+                }
+                // Send output to UI after blitting is complete
+                let output_ref = self.graphics_output.as_ref().unwrap();
+                self.send_graphics_output_to_ui(output_ref)?;
+            }
+        } else {
+            // Fallback: send surface directly if no graphics output composition
+            info!("📺 Sending surface {} directly to UI", surface_id);
+            if let Some(surf) = self.surfaces.get(&surface_id) {
+                self.send_surface_to_ui(surf)?;
             }
         }
 
@@ -1058,6 +1110,14 @@ impl GfxState {
         let height = NonZeroU16::new(surface.height)
             .ok_or_else(|| anyhow::anyhow!("Surface height is zero"))?;
 
+        use tracing::info;
+        info!(
+            "🖼️ Sending surface to UI: {}x{} ({} bytes)",
+            width,
+            height,
+            surface.buffer.len()
+        );
+
         self.event_sender
             .send_event(RdpOutputEvent::Image {
                 buffer: surface.buffer.clone(),
@@ -1075,6 +1135,14 @@ impl GfxState {
             .ok_or_else(|| anyhow::anyhow!("Graphics output width is zero"))?;
         let height = NonZeroU16::new(output.height)
             .ok_or_else(|| anyhow::anyhow!("Graphics output height is zero"))?;
+
+        use tracing::info;
+        info!(
+            "🖼️ Sending graphics output to UI: {}x{} ({} bytes)",
+            width,
+            height,
+            output.buffer.len()
+        );
 
         self.event_sender
             .send_event(RdpOutputEvent::Image {

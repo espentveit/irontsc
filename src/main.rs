@@ -1134,6 +1134,14 @@ impl GtkRdpWidget {
     }
 
     fn update_image(&self, buffer: Vec<u8>, width: u16, height: u16, region: Option<ImageRegion>) {
+        tracing::debug!(
+            "📸 update_image called: {}x{} ({} bytes) region={:?}",
+            width,
+            height,
+            buffer.len(),
+            region
+        );
+        
         if width == 0 || height == 0 {
             self.cancel_pending_upload();
             self.picture
@@ -1271,8 +1279,10 @@ impl GtkRdpWidget {
             *upload_source.borrow_mut() = None;
 
             if let Some(pending) = pending {
+                tracing::debug!("⏰ Idle callback: uploading framebuffer");
                 widget.upload_framebuffer(pending.width, pending.height);
                 widget.root.queue_draw();
+                tracing::debug!("⏰ Idle callback: queue_draw called");
             }
 
             ControlFlow::Break
@@ -1289,6 +1299,8 @@ impl GtkRdpWidget {
     }
 
     fn upload_framebuffer(&self, width: u16, height: u16) {
+        tracing::debug!("🖼️ upload_framebuffer called: {}x{}", width, height);
+        
         let stride = width as usize * 4;
         let frame_len = stride * height as usize;
         let bytes = {
@@ -1330,6 +1342,7 @@ impl GtkRdpWidget {
         );
 
         self.picture.set_paintable(Some(&texture));
+        tracing::debug!("✅ Texture uploaded and set on picture widget");
     }
 
     fn surface_fractional_scale(surface: &gdk::Surface) -> f64 {
@@ -1476,6 +1489,7 @@ impl Drop for FrameBytes {
 }
 
 // Adapter for RDP event loop proxy to work with GTK's glib MainContext
+#[derive(Clone)]
 struct RdpEventLoopProxy {
     sender: tokio::sync::mpsc::UnboundedSender<RdpOutputEvent>,
 }
@@ -1789,6 +1803,13 @@ fn create_remote_desktop_window(
                     height,
                     region,
                 } => {
+                    tracing::info!(
+                        "🎨 GTK: Received Image event: {}x{} ({} bytes) region={:?}",
+                        width.get(),
+                        height.get(),
+                        buffer.len(),
+                        region
+                    );
                     rdp_widget_events.update_image(buffer, width.get(), height.get(), region);
                     let mut last_size = last_frame_size_clone.borrow_mut();
                     let new_size = (width.get(), height.get());
