@@ -49,33 +49,40 @@ impl UdpStreamAdapter {
     /// Feed a received UDP packet to the stream adapter
     /// This should be called by the main loop when a packet is received
     pub async fn feed_packet(&self, packet: &[u8]) -> io::Result<()> {
+        tracing::info!("feed_packet: {} bytes, first 16 bytes: {:02x?}", packet.len(), &packet[..packet.len().min(16)]);
         // Try to process as source packet (data)
         let mut conn = self.connection.lock().await;
         match conn.process_source_packet(packet) {
-            Ok(datas) if !datas.is_empty() => {
-                // Add all data to read queue
-                let mut st = self.state.lock().await;
-                for data in datas {
-                    st.read_queue.extend(data);
+            Ok(datas) => {
+                tracing::info!("process_source_packet OK: {} payloads", datas.len());
+                if !datas.is_empty() {
+                    // Add all data to read queue
+                    let mut st = self.state.lock().await;
+                    for data in &datas {
+                        tracing::info!("adding {} bytes to queue", data.len());
+                        st.read_queue.extend(data);
+                    }
+                    tracing::info!("queue total: {} bytes", st.read_queue.len());
+                    // Wake up any pending read
+                    if let Some(waker) = st.read_waker.take() {
+                        tracing::info!("waking pending read");
+                        waker.wake();
+                    }
                 }
-                // Wake up any pending read
-                if let Some(waker) = st.read_waker.take() {
-                    waker.wake();
-                }
-                Ok(())
-            }
-            Ok(_) => {
-                // Packet buffered (out of order) - not an error
                 Ok(())
             }
             Err(e) => {
+                tracing::info!("process_source_packet ERR: {}", e);
                 // Try as ACK packet
-                if let Err(_) = conn.process_ack_packet(packet) {
-                    // Not a data packet or ACK - might be for main loop to handle
-                    Err(io::Error::new(io::ErrorKind::InvalidData, format!("Invalid packet: {}", e)))
-                } else {
-                    // Successfully processed as ACK
-                    Ok(())
+                match conn.process_ack_packet(packet) {
+                    Ok(()) => {
+                        tracing::info!("processed as ACK");
+                        Ok(())
+                    }
+                    Err(e2) => {
+                        tracing::warn!("invalid packet: src={}, ack={}", e, e2);
+                        Err(io::Error::new(io::ErrorKind::InvalidData, format!("Invalid packet: {}", e)))
+                    }
                 }
             }
         }
@@ -138,14 +145,19 @@ impl AsyncWrite for UdpStreamAdapter {
         let data = buf.to_vec();
         let len = data.len();
         let waker = cx.waker().clone();
+        let data_preview = data[..len.min(16)].to_vec();
 
         // Spawn task to send data
         tokio::spawn(async move {
+            tracing::info!("poll_write: sending {} bytes TLS data, first 16: {:02x?}", len, data_preview);
             let mut conn = connection.lock().await;
             match conn.send_data(data) {
                 Ok(packet) => {
+                    tracing::info!("poll_write: wrapped into {} byte RDPEUDP packet, first 16: {:02x?}", packet.len(), &packet[..packet.len().min(16)]);
                     if let Err(e) = socket.send(&packet).await {
                         tracing::error!("UDP stream adapter send error: {}", e);
+                    } else {
+                        tracing::info!("poll_write: packet sent successfully");
                     }
                 }
                 Err(e) => {
