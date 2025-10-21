@@ -213,6 +213,7 @@ arboard = "3.6.1"
 drdynvc = { path = "crates/drdynvc" }
 zgfx = { path = "crates/zgfx" }
 ironrdp-gfx = { path = "crates/ironrdp-gfx" }
+ironrdp-graphics = { path = "crates/ironrdp-graphics-local" }
 ironrdp-h264 = { path = "crates/ironrdp-h264", optional = true }
 ironrdp-dvc = { path = "crates/ironrdp-dvc-local" }
 ironrdp-pdu = { path = "crates/ironrdp-pdu-local" }

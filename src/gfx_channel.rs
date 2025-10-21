@@ -5,6 +5,7 @@
 use ironrdp_core::AsAny;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
 use ironrdp_gfx::GfxClient;
+use ironrdp_graphics::zgfx::{Decompressor as ZgfxDecompressor, ZgfxError};
 use ironrdp_pdu::PduResult;
 
 use crate::gfx::GfxState;
@@ -40,6 +41,8 @@ pub struct GfxDvcProcessor {
     client: GfxClient<GfxState>,
     /// Current channel ID (set when channel opens)
     channel_id: Option<u32>,
+    /// zGFX decompressor (stateful)
+    zgfx: ZgfxDecompressor,
 }
 
 impl GfxDvcProcessor {
@@ -50,6 +53,7 @@ impl GfxDvcProcessor {
         Self {
             client,
             channel_id: None,
+            zgfx: ZgfxDecompressor::new(),
         }
     }
 
@@ -64,24 +68,21 @@ impl GfxDvcProcessor {
 
         // Try to decompress with zGFX first
         // UDP packets may be compressed or uncompressed depending on server settings
-        let decompressed = match zgfx::decompress(data) {
-            Ok(decompressed) => {
-                info!(
-                    "📦 RDPEGFX via UDP: zGFX decompressed {} -> {} bytes",
-                    data.len(),
-                    decompressed.len()
-                );
-                decompressed
-            }
-            Err(_) => {
-                // If decompression fails, try processing as uncompressed
-                info!(
-                    "📦 RDPEGFX via UDP: Processing as uncompressed ({} bytes)",
-                    data.len()
-                );
-                data.to_vec()
-            }
-        };
+        let mut decompressed = Vec::new();
+        let zgfx_result = self.zgfx.decompress(data, &mut decompressed);
+        if let Err(err) = zgfx_result {
+            info!(
+                "📦 RDPEGFX via UDP: zGFX decompress failed ({err:?}), treating as raw ({} bytes)",
+                data.len()
+            );
+            decompressed = data.to_vec();
+        } else {
+            info!(
+                "📦 RDPEGFX via UDP: zGFX decompressed {} -> {} bytes",
+                data.len(),
+                decompressed.len()
+            );
+        }
 
         // Process GFX PDUs
         self.client.process_pdu_stream(&decompressed).map_err(|e| {
@@ -160,17 +161,34 @@ impl DvcProcessor for GfxDvcProcessor {
         );
 
         // Decompress with zGFX (preserving error details in log)
-        let decompressed = zgfx::decompress(payload).map_err(|e| {
-            // Log detailed error information for debugging
-            info!("❌ RDPEGFX: zGFX decompression failed: {:?}", e);
-            ironrdp_pdu::pdu_other_err!("GFX decompress failed")
-        })?;
-
         info!(
-            "📦 RDPEGFX: Decompressed {} -> {} bytes",
+            "📦 RDPEGFX: processing payload len={} bytes (first: {:02X?})",
             payload.len(),
-            decompressed.len()
+            &payload[..payload.len().min(16)]
         );
+
+        let mut decompressed = Vec::new();
+        match self.zgfx.decompress(payload, &mut decompressed) {
+            Ok(_) => {
+                info!(
+                    "📦 RDPEGFX: Decompressed {} -> {} bytes (first: {:02X?})",
+                    payload.len(),
+                    decompressed.len(),
+                    &decompressed[..decompressed.len().min(16)]
+                );
+            }
+            Err(ZgfxError::InvalidSegmentedDescriptor) => {
+                info!(
+                    "📦 RDPEGFX: Payload not segmented/compressed, using raw ({} bytes)",
+                    payload.len()
+                );
+                decompressed = payload.to_vec();
+            }
+            Err(err) => {
+                info!("❌ RDPEGFX: zGFX decompression failed: {:?}", err);
+                return Err(ironrdp_pdu::pdu_other_err!("GFX decompress failed"));
+            }
+        }
 
         // Process PDUs
         self.client.process_pdu_stream(&decompressed).map_err(|e| {
