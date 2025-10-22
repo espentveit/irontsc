@@ -9,7 +9,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
 // Import UDP packet types for proper parsing
-use ironrdp_udp::{SourcePacket, UdpProtocolVersion};
+use ironrdp_udp::{
+    AckVectorElement, AckVectorHeader, SourcePacket, UdpError, UdpProtocolVersion,
+    VectorElementState,
+};
 
 /// H.264 video frame received via UDP
 #[derive(Debug, Clone)]
@@ -20,11 +23,16 @@ pub struct UdpVideoFrame {
 }
 
 /// Creates a UDP-to-GFX bridge that receives UDP packets and extracts video frames
-pub fn create_udp_gfx_bridge(socket: Arc<UdpSocket>) -> mpsc::UnboundedReceiver<UdpVideoFrame> {
+///
+/// * `protocol_version` - protocol version negotiated during the RDPUDP handshake (MS-RDPEUDP2)
+pub fn create_udp_gfx_bridge(
+    socket: Arc<UdpSocket>,
+    protocol_version: UdpProtocolVersion,
+) -> mpsc::UnboundedReceiver<UdpVideoFrame> {
     let (tx, rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        udp_video_receiver_task(socket, tx).await;
+        udp_video_receiver_task(socket, protocol_version, tx).await;
     });
 
     rx
@@ -33,12 +41,16 @@ pub fn create_udp_gfx_bridge(socket: Arc<UdpSocket>) -> mpsc::UnboundedReceiver<
 /// Background task that receives UDP packets and extracts H.264 frames
 async fn udp_video_receiver_task(
     socket: Arc<UdpSocket>,
+    protocol_version: UdpProtocolVersion,
     frame_tx: mpsc::UnboundedSender<UdpVideoFrame>,
 ) {
     let mut buffer = vec![0u8; 65536]; // Max UDP packet size
     let mut expected_sequence = 0u32;
 
-    info!("🎥 UDP video receiver task started");
+    info!(
+        "🎥 UDP video receiver task started with negotiated protocol {}",
+        protocol_version
+    );
 
     loop {
         match socket.recv(&mut buffer).await {
@@ -51,7 +63,7 @@ async fn udp_video_receiver_task(
                 trace!("📦 Received UDP packet: {} bytes", n);
 
                 // Parse RDPUDP packet using proper packet decoder
-                match SourcePacket::decode(&buffer[..n], UdpProtocolVersion::V1) {
+                match decode_source_packet(&buffer[..n], protocol_version) {
                     Ok(packet) => {
                         let seq = packet.sequence_number();
                         let payload = &packet.data;
@@ -133,10 +145,16 @@ async fn udp_video_receiver_task(
     info!("UDP video receiver task terminated");
 }
 
+fn decode_source_packet(
+    bytes: &[u8],
+    protocol_version: UdpProtocolVersion,
+) -> Result<SourcePacket, UdpError> {
+    SourcePacket::decode(bytes, protocol_version)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_udp_video_frame_creation() {
         let frame = UdpVideoFrame {
@@ -148,5 +166,54 @@ mod tests {
         assert_eq!(frame.sequence_number, 42);
         assert_eq!(frame.timestamp, 1000);
         assert_eq!(frame.data.len(), 5);
+    }
+
+    fn build_packet(
+        version: UdpProtocolVersion,
+        sequence: u32,
+        include_ack_vector: bool,
+    ) -> Vec<u8> {
+        let payload = b"test-payload".to_vec();
+        let ack_vector = if include_ack_vector {
+            let elements = vec![
+                AckVectorElement::new(VectorElementState::DatagramReceived, 1).unwrap(),
+                AckVectorElement::new(VectorElementState::DatagramNotYetReceived, 2).unwrap(),
+            ];
+            Some(
+                AckVectorHeader::new(sequence, None, elements)
+                    .expect("valid ACK vector for test packet"),
+            )
+        } else {
+            None
+        };
+        let packet =
+            SourcePacket::new(sequence, sequence, 256, payload, ack_vector, None, false).unwrap();
+        packet.encode(version).unwrap()
+    }
+
+    #[test]
+    fn decode_with_correct_version() {
+        let encoded = build_packet(UdpProtocolVersion::V2, 100, false);
+        let decoded = decode_source_packet(&encoded, UdpProtocolVersion::V2).unwrap();
+
+        assert_eq!(decoded.sequence_number(), 100);
+    }
+
+    #[test]
+    fn decode_respects_ack_vector_encoding() {
+        let encoded = build_packet(UdpProtocolVersion::V3, 77, true);
+        let err = decode_source_packet(&encoded, UdpProtocolVersion::V1)
+            .expect_err("V3 ACK vector encoding should not parse as V1");
+
+        // Ensure we surface the underlying decode error for diagnostics
+        let err_string = err.to_string();
+        assert!(
+            err_string.contains("decode") || err_string.contains("invalid field"),
+            "unexpected error: {err_string}"
+        );
+
+        let decoded = decode_source_packet(&encoded, UdpProtocolVersion::V3).unwrap();
+        assert_eq!(decoded.sequence_number(), 77);
+        assert!(decoded.ack_vector.is_some());
     }
 }

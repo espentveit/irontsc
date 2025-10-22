@@ -169,7 +169,7 @@ impl DvcProcessor for GfxDvcProcessor {
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
         use tracing::info;
-        
+
         // If UDP is active, ignore TCP GFX data
         if self.udp_active {
             info!(
@@ -179,7 +179,7 @@ impl DvcProcessor for GfxDvcProcessor {
             );
             return Ok(Vec::new());
         }
-        
+
         info!(
             "📥 RDPEGFX: Received {} bytes on channel {}",
             payload.len(),

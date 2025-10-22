@@ -152,15 +152,13 @@ impl AckVectorHeader {
                 Self::encode_v1(output, &self.ack_vectors)?;
                 Ok(())
             }
-            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
-                Self::encode_v2(
-                    output,
-                    self.base_sequence_number,
-                    self.ack_timestamp,
-                    self.send_ack_time_gap_ms,
-                    &self.ack_vectors,
-                )
-            }
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => Self::encode_v2(
+                output,
+                self.base_sequence_number,
+                self.ack_timestamp,
+                self.send_ack_time_gap_ms,
+                &self.ack_vectors,
+            ),
             _ => Err(UdpError::invalid_state(
                 Self::NAME,
                 "unsupported protocol version for ACK vector",

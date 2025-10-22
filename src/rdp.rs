@@ -499,14 +499,15 @@ async fn establish_udp_transport(
         } else {
             TransportMode::Reliable
         },
-    enable_fec: true,
-    protocol_version: UdpProtocolVersion::V1,
+        enable_fec: true,
+        protocol_version: UdpProtocolVersion::V3,
         mtu: 1232,
         use_dtls,
     };
 
     let corr_id = CorrelationId::new(correlation_id);
-    let (mut manager, command_tx, event_rx) = UdpTransportManager::new(config, Some(corr_id), server_name).await?;
+    let (mut manager, command_tx, event_rx) =
+        UdpTransportManager::new(config, Some(corr_id), server_name).await?;
 
     // Set MS-RDPEMT tunnel parameters if provided
     if let (Some(req_id), Some(cookie)) = (request_id, security_cookie) {
@@ -2006,7 +2007,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                 } else {
                     // Poll all transports simultaneously using select_all
                     use futures_util::stream::StreamExt;
-                    
+
                     // Create futures for all transports
                     let mut futures = udp_transports
                         .iter_mut()
@@ -2018,7 +2019,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                             }
                         })
                         .collect::<futures_util::stream::FuturesUnordered<_>>();
-                    
+
                     // Wait for the first one to complete
                     futures.next().await.flatten()
                 }

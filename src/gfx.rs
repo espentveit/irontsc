@@ -327,16 +327,16 @@ impl GfxContext for GfxState {
                     "🧹 Decoding ClearCodec frame ({} bytes)...",
                     bitmap_data.len()
                 );
-                
+
                 // Decode ClearCodec
                 let width = dest_rect.width() as u32;
                 let height = dest_rect.height() as u32;
                 let mut decoded_buffer = vec![0u8; (width * height * 4) as usize];
-                
+
                 self.clearcodec_decoder
                     .decompress(bitmap_data, width, height, &mut decoded_buffer)
                     .context("Failed to decode ClearCodec frame")?;
-                
+
                 info!("✅ ClearCodec decode complete, blitting to surface");
                 Self::blit_raw_to_surface(surface, &dest_rect, &decoded_buffer)?;
             }
@@ -405,8 +405,15 @@ impl GfxContext for GfxState {
         // This handles cases where END_FRAME might not be sent immediately
         if self.graphics_output.is_some() && !self.surface_output_mappings.is_empty() {
             // Check if this surface is mapped to output
-            if self.surface_output_mappings.iter().any(|m| m.surface_id == surface_id) {
-                info!("📺 Updating graphics output with decoded surface {}", surface_id);
+            if self
+                .surface_output_mappings
+                .iter()
+                .any(|m| m.surface_id == surface_id)
+            {
+                info!(
+                    "📺 Updating graphics output with decoded surface {}",
+                    surface_id
+                );
                 let output = self.graphics_output.as_mut().unwrap();
                 output.clear();
                 for mapping in &self.surface_output_mappings {
