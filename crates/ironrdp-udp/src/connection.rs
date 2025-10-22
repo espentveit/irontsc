@@ -127,7 +127,7 @@ pub struct UdpConnection {
 impl UdpConnection {
     /// Create a new UDP connection
     pub fn new(config: UdpConfig) -> Self {
-        Self {
+        let mut connection = Self {
             config,
             state: ConnectionState::Idle,
             next_send_sequence: 0,
@@ -144,7 +144,29 @@ impl UdpConnection {
             remote_mtu: 1232,
             remote_window_size: 256,
             first_ack_sent: false,
-        }
+        };
+
+        connection.apply_protocol_version_defaults();
+        connection
+    }
+
+    fn apply_protocol_version_defaults(&mut self) {
+        self.config.retransmit_timeout_ms = if self.config.protocol_version >= UdpProtocolVersion::V2
+        {
+            300
+        } else {
+            500
+        };
+    }
+
+    /// Get the currently negotiated protocol version
+    pub fn protocol_version(&self) -> UdpProtocolVersion {
+        self.config.protocol_version
+    }
+
+    /// Current retransmission timeout in milliseconds
+    pub fn retransmit_timeout_ms(&self) -> u64 {
+        self.config.retransmit_timeout_ms
     }
 
     /// Get current connection state
@@ -220,6 +242,7 @@ impl UdpConnection {
                 // Negotiate protocol version
                 let our_version = self.config.protocol_version;
                 self.config.protocol_version = our_version.min(their_version);
+                self.apply_protocol_version_defaults();
             }
         }
 
@@ -288,6 +311,7 @@ impl UdpConnection {
             if let Some(their_version) = syn_ex.udp_version {
                 let our_version = self.config.protocol_version;
                 self.config.protocol_version = our_version.min(their_version);
+                self.apply_protocol_version_defaults();
             }
         }
 
