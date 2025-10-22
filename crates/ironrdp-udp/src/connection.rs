@@ -491,8 +491,9 @@ impl UdpConnection {
     /// Create an ACK packet
     pub fn create_ack(&mut self) -> UdpResult<Vec<u8>> {
         let ack_vector = self.build_ack_vector()?;
+        let sn_source_ack = self.next_receive_sequence.wrapping_sub(1);
         let packet = AckPacket::new(
-            self.last_ack_received,
+            sn_source_ack,
             self.config.receive_window_size,
             ack_vector,
             None,

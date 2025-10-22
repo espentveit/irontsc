@@ -471,11 +471,25 @@ impl UdpTransportManager {
         debug!("Received SYN+ACK ({} bytes)", syn_ack.len());
 
         // Process SYN+ACK and capture negotiated parameters
-        let (negotiated_version, retransmit_timeout_ms) = {
+        let (negotiated_version, retransmit_timeout_ms, ack_packet) = {
             let mut conn = self.connection.lock().await;
             conn.process_syn_ack(&syn_ack)
                 .context("Failed to process SYN+ACK")?;
-            (conn.protocol_version(), conn.retransmit_timeout_ms())
+            let negotiated_version = conn.protocol_version();
+            let retransmit_timeout_ms = conn.retransmit_timeout_ms();
+            let ack_packet = if self.use_dtls {
+                Some(
+                    conn.create_ack()
+                        .context("Failed to create UDP ACK packet")?,
+                )
+            } else {
+                None
+            };
+            (
+                negotiated_version,
+                retransmit_timeout_ms,
+                ack_packet,
+            )
         };
 
         info!(
@@ -483,12 +497,21 @@ impl UdpTransportManager {
             negotiated_version, retransmit_timeout_ms
         );
 
-        // MS-RDPEUDP handshake complete
-        // Note: Per MS-RDPEUDP spec and observed behavior in working captures:
-        // - NO standalone ACK packet should be sent after SYN+ACK
-        // - If DTLS is required, go directly to DTLS ClientHello
-        // - If DTLS is not required, first DATA packet will include ACK flag
-        // - The "ACK" in protocol diagrams refers to ACK flag in DATA packets, not standalone ACK
+        if let Some(ack_packet) = ack_packet {
+            self.socket
+                .send(&ack_packet)
+                .await
+                .context("Failed to send UDP ACK packet")?;
+            info!(
+                "Sent standalone ACK packet ({} bytes) to complete UDP handshake",
+                ack_packet.len()
+            );
+        }
+
+    // MS-RDPEUDP handshake complete
+    // Note: We send a standalone ACK first when DTLS is required so the server
+    // transitions to the data phase before we begin the DTLS handshake. In the
+    // non-DTLS case the ACK flag is carried by the first DATA packet as before.
         info!("UDP handshake complete (SYN → SYN+ACK received), connection established");
 
         Ok(())
