@@ -468,11 +468,25 @@ async fn establish_udp_transport(
     use_lossy_mode: bool,
     request_id: Option<u32>,
     security_cookie: Option<[u8; 16]>,
+    selected_protocol: ironrdp::pdu::nego::SecurityProtocol,
 ) -> anyhow::Result<(
     mpsc::UnboundedSender<UdpTransportCommand>,
     mpsc::UnboundedReceiver<UdpTransportEvent>,
 )> {
     info!("🔌 Establishing UDP transport for {}", destination.name());
+
+    // Determine if DTLS is required based on security protocol
+    // Per MS-RDPEMT Appendix A Footnote <1>:
+    // - Enhanced RDP Security (TLS/CredSSP/RDSTLS) requires DTLS
+    // - Standard RDP Security (RC4) uses unencrypted UDP
+    let use_dtls = !selected_protocol.is_standard_rdp_security();
+
+    if use_dtls {
+        info!("🔐 Enhanced RDP Security detected: DTLS will be required for UDP");
+        info!("   Selected protocol: {}", selected_protocol);
+    } else {
+        info!("ℹ️  Standard RDP Security: UDP will use unencrypted datagrams");
+    }
 
     let server_addr = SocketAddr::new(destination.name().parse()?, destination.port());
     let server_name = destination.name().to_string();
@@ -488,6 +502,7 @@ async fn establish_udp_transport(
         enable_fec: true,
         protocol_version: UdpProtocolVersion::V2,
         mtu: 1232,
+        use_dtls,
     };
 
     let corr_id = CorrelationId::new(correlation_id);
@@ -1712,6 +1727,7 @@ async fn active_session<T: RdpEventSender + Clone>(
     // Extract needed values before connection_result is consumed
     let correlation_id = connection_result.correlation_id;
     let message_channel_id = connection_result.message_channel_id;
+    let selected_protocol = connection_result.selected_protocol;
 
     let mut active_stage = ActiveStage::new(connection_result);
 
@@ -1900,12 +1916,13 @@ async fn active_session<T: RdpEventSender + Clone>(
                             );
 
                             match establish_udp_transport(
-                                dest_clone, 
-                                addr_clone, 
-                                corr_id, 
+                                dest_clone,
+                                addr_clone,
+                                corr_id,
                                 use_lossy,
                                 Some(req_id),
-                                Some(request_info.security_cookie)
+                                Some(request_info.security_cookie),
+                                selected_protocol,
                             ).await {
                                 Ok((cmd_tx, evt_rx)) => {
                                     info!(

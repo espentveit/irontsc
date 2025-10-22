@@ -15,7 +15,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::udp_stream_adapter::UdpStreamAdapter;
+use crate::dtls_udp::{DtlsConfig, DtlsUdpSocket};
 
 /// UDP transport configuration
 #[derive(Debug, Clone)]
@@ -32,6 +32,8 @@ pub struct UdpTransportConfig {
     pub protocol_version: UdpProtocolVersion,
     /// MTU size
     pub mtu: u16,
+    /// Use DTLS encryption (required when Enhanced RDP Security is in effect)
+    pub use_dtls: bool,
 }
 
 impl Default for UdpTransportConfig {
@@ -43,6 +45,7 @@ impl Default for UdpTransportConfig {
             enable_fec: true,
             protocol_version: UdpProtocolVersion::V2,
             mtu: 1232,
+            use_dtls: false, // Default to no DTLS (Standard RDP Security)
         }
     }
 }
@@ -87,12 +90,12 @@ pub struct UdpTransportManager {
     security_cookie: Option<[u8; 16]>,
     /// Tunnel established flag
     tunnel_established: bool,
-    /// TLS stream (if TLS handshake completed)
-    tls_stream: Option<ironrdp_tls::TlsStream<UdpStreamAdapter>>,
-    /// TLS adapter (for feeding packets before/during TLS handshake)
-    tls_adapter: Option<UdpStreamAdapter>,
-    /// Server name for TLS
+    /// Server name for DTLS
     server_name: String,
+    /// DTLS socket wrapper (if DTLS is required per MS-RDPEMT)
+    dtls_socket: Option<DtlsUdpSocket>,
+    /// Whether to use DTLS encryption
+    use_dtls: bool,
 }
 
 impl UdpTransportManager {
@@ -154,6 +157,8 @@ impl UdpTransportManager {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
+        let use_dtls = config.use_dtls;
+
         let manager = Self {
             connection: Arc::new(Mutex::new(connection)),
             socket: Arc::new(socket),
@@ -163,9 +168,9 @@ impl UdpTransportManager {
             request_id: None,
             security_cookie: None,
             tunnel_established: false,
-            tls_stream: None,
-            tls_adapter: None,
             server_name,
+            dtls_socket: None,
+            use_dtls,
         };
 
         Ok((manager, command_tx, event_rx))
@@ -193,81 +198,64 @@ impl UdpTransportManager {
         info!("UDP connection established");
         let _ = self.event_tx.send(UdpTransportEvent::Connected);
 
-        // Perform TLS handshake with packet feeding (required by MS-RDPEMT spec)
-        info!("🔐 Starting TLS handshake over UDP...");
-        
-        // Create adapter
-        let adapter = UdpStreamAdapter::new(
-            self.socket.clone(),
-            self.connection.clone(),
-        );
-        self.tls_adapter = Some(adapter.clone());
-        
-        // Spawn task to feed packets to adapter during handshake
-        let socket_clone = self.socket.clone();
-        let adapter_clone = adapter.clone();
-        let server_addr = self.server_addr;
-        let local_addr = self.socket.local_addr().ok();
-        let feeder_task = tokio::spawn(async move {
-            info!("TLS feeder task: started (local={:?}, server={})", local_addr, server_addr);
-            let mut buf = vec![0u8; 65536];
-            // Feed packets for up to 10 seconds
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            let mut packet_count = 0;
-            let mut timeout_count = 0;
-            while tokio::time::Instant::now() < deadline {
-                match tokio::time::timeout(Duration::from_millis(100), socket_clone.recv_from(&mut buf)).await {
-                    Ok(Ok((len, addr))) if addr == server_addr => {
-                        packet_count += 1;
-                        info!("TLS feeder task: received packet #{} ({} bytes from {})", packet_count, len, addr);
-                        if let Err(e) = adapter_clone.feed_packet(&buf[..len]).await {
-                            warn!("TLS feeder task: feed_packet error: {}", e);
+        // ═══════════════════════════════════════════════════════════════════════
+        // DTLS HANDSHAKE (MS-RDPEMT Requirement with Enhanced RDP Security)
+        // ═══════════════════════════════════════════════════════════════════════
+        //
+        // Per MS-RDPEMT Section 1.5 and Appendix A Footnote <1>:
+        // - DTLS is REQUIRED when Enhanced RDP Security (TLS/CredSSP/RDSTLS) is used
+        // - DTLS handshake MUST complete before sending MS-RDPEMT tunnel PDUs
+        // - Standard RDP Security (RC4) connections use unencrypted UDP (spec-compliant)
+        //
+        // Windows behavior with Standard Security:
+        // - No DTLS handshake performed
+        // - UDP packets sent/received in plaintext
+        // - Tunnel creation and data transfer work without encryption
+        //
+        // Windows behavior with Enhanced Security (observed in some environments):
+        // - DTLS 1.2 handshake initiated
+        // - All tunnel PDUs encrypted with negotiated cipher
+        // - Failure to complete DTLS causes tunnel creation to fail
+        // ═══════════════════════════════════════════════════════════════════════
+
+        if self.use_dtls {
+            info!("🔐 DTLS required (Enhanced RDP Security in effect)");
+            info!("   Performing DTLS 1.2 handshake per MS-RDPEMT...");
+
+            // Create DTLS wrapper
+            let dtls_config = DtlsConfig {
+                server_name: self.server_name.clone(),
+                verify_certificate: false, // TODO: Enable in production
+            };
+
+            match DtlsUdpSocket::new(self.socket.clone(), self.server_addr, dtls_config) {
+                Ok(mut dtls) => {
+                    // Perform DTLS handshake
+                    match dtls.handshake().await {
+                        Ok(()) => {
+                            info!("✅ DTLS handshake complete, tunnel PDUs will be encrypted");
+                            self.dtls_socket = Some(dtls);
                         }
-                    }
-                    Ok(Ok((len, addr))) => {
-                        info!("TLS feeder task: ignoring packet from wrong address {} ({} bytes, expected {})", addr, len, server_addr);
-                    }
-                    Ok(Err(e)) => {
-                        warn!("TLS feeder task: recv_from error: {}", e);
-                    }
-                    Err(_) => {
-                        // Timeout - continue loop
-                        timeout_count += 1;
-                        if timeout_count % 10 == 0 {
-                            debug!("TLS feeder task: {} timeouts so far", timeout_count);
+                        Err(e) => {
+                            error!("❌ DTLS handshake failed: {}", e);
+                            let _ = self.event_tx.send(UdpTransportEvent::Disconnected(
+                                format!("DTLS handshake failed: {}", e)
+                            ));
+                            return Err(e);
                         }
                     }
                 }
+                Err(e) => {
+                    error!("❌ Failed to create DTLS socket: {}", e);
+                    let _ = self.event_tx.send(UdpTransportEvent::Disconnected(
+                        format!("DTLS initialization failed: {}", e)
+                    ));
+                    return Err(e);
+                }
             }
-            info!("TLS feeder task: finished, processed {} packets ({} timeouts)", packet_count, timeout_count);
-        });
-        
-        // Perform TLS handshake
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            ironrdp_tls::upgrade(adapter, &self.server_name)
-        ).await {
-            Ok(Ok((tls_stream, _public_key))) => {
-                info!("✅ TLS handshake complete!");
-                self.tls_stream = Some(tls_stream);
-                feeder_task.abort(); // Stop feeding packets
-            }
-            Ok(Err(e)) => {
-                error!("❌ TLS handshake failed: {}", e);
-                feeder_task.abort();
-                let _ = self.event_tx.send(UdpTransportEvent::Disconnected(
-                    format!("TLS handshake failed: {}", e)
-                ));
-                return Err(anyhow::anyhow!("TLS handshake failed: {}", e));
-            }
-            Err(_) => {
-                error!("❌ TLS handshake timeout");
-                feeder_task.abort();
-                let _ = self.event_tx.send(UdpTransportEvent::Disconnected(
-                    "TLS handshake timeout".to_string()
-                ));
-                return Err(anyhow::anyhow!("TLS handshake timeout"));
-            }
+        } else {
+            info!("ℹ️  DTLS not required (Standard RDP Security)");
+            info!("   UDP tunnel will use unencrypted datagrams per MS-RDPEMT Appendix A");
         }
 
         // Create tunnel if parameters provided
@@ -297,18 +285,7 @@ impl UdpTransportManager {
                         Ok((len, addr)) => {
                             debug!("📨 UDP: Received {} bytes from {}", len, addr);
                             if addr == self.server_addr {
-                                // Feed to TLS adapter if active
-                                if let Some(ref adapter) = self.tls_adapter {
-                                    if let Err(e) = adapter.feed_packet(&recv_buffer[..len]).await {
-                                        debug!("TLS adapter couldn't process packet: {}", e);
-                                        // Fall through to regular handling
-                                    } else {
-                                        // Packet consumed by TLS
-                                        continue;
-                                    }
-                                }
-                                
-                                // Regular packet handling
+                                // Handle received packet (decrypt if DTLS is active)
                                 if let Err(e) = self.handle_received_packet(&recv_buffer[..len]).await {
                                     warn!("Error handling received packet: {}", e);
                                 }
@@ -342,36 +319,38 @@ impl UdpTransportManager {
                 _ = check_retransmit_interval.tick() => {
                     let mut conn = self.connection.lock().await;
                     let retransmits = conn.check_retransmits();
+                    let fec_packet = conn.check_fec_block().ok().flatten();
+                    let ack_packet = if conn.needs_keepalive() {
+                        conn.create_ack().ok()
+                    } else {
+                        None
+                    };
+                    let terminated = conn.state() == ConnectionState::Terminated;
+                    drop(conn);
+
                     for packet in retransmits {
-                        if let Err(e) = self.socket.send(&packet).await {
-                            error!("Failed to retransmit packet: {}", e);
+                        match self.send_over_udp(&packet).await {
+                            Ok(()) => trace!("Retransmitted packet ({} bytes)", packet.len()),
+                            Err(e) => error!("Failed to retransmit packet: {}", e),
+                        }
+                    }
+
+                    if let Some(fec_packet) = fec_packet {
+                        match self.send_over_udp(&fec_packet).await {
+                            Ok(()) => trace!("Sent FEC packet ({} bytes)", fec_packet.len()),
+                            Err(e) => error!("Failed to send FEC packet: {}", e),
+                        }
+                    }
+
+                    if let Some(ack_packet) = ack_packet {
+                        if let Err(e) = self.send_over_udp(&ack_packet).await {
+                            warn!("Failed to send keepalive ACK: {}", e);
                         } else {
-                            trace!("Retransmitted packet ({} bytes)", packet.len());
+                            trace!("Sent keepalive ACK ({} bytes)", ack_packet.len());
                         }
                     }
 
-                    // Check for completed FEC blocks and send FEC packets
-                    if let Ok(Some(fec_packet)) = conn.check_fec_block() {
-                        if let Err(e) = self.socket.send(&fec_packet).await {
-                            error!("Failed to send FEC packet: {}", e);
-                        } else {
-                            trace!("Sent FEC packet ({} bytes)", fec_packet.len());
-                        }
-                    }
-
-                    // Check if keepalive is needed
-                    if conn.needs_keepalive() {
-                        if let Ok(ack_packet) = conn.create_ack() {
-                            if let Err(e) = self.socket.send(&ack_packet).await {
-                                warn!("Failed to send keepalive ACK: {}", e);
-                            } else {
-                                trace!("Sent keepalive ACK ({} bytes)", ack_packet.len());
-                            }
-                        }
-                    }
-
-                    // Check connection state
-                    if conn.state() == ConnectionState::Terminated {
+                    if terminated {
                         warn!("UDP connection terminated due to max retransmits");
                         let _ = self.event_tx.send(UdpTransportEvent::Disconnected(
                             "Max retransmits reached".to_string()
@@ -383,6 +362,34 @@ impl UdpTransportManager {
         }
 
         info!("UDP transport manager stopped");
+        Ok(())
+    }
+
+    async fn send_over_udp(&mut self, payload: &[u8]) -> Result<()> {
+        if let Some(dtls) = self.dtls_socket.as_mut() {
+            let packets = dtls.encrypt(payload)?;
+            if packets.is_empty() {
+                trace!(
+                    "DTLS produced no ciphertext for payload ({} bytes), skipping transmit",
+                    payload.len()
+                );
+                return Ok(());
+            }
+
+            for packet in packets {
+                self.socket
+                    .send(&packet)
+                    .await
+                    .context("Failed to send DTLS packet")?;
+                trace!("Sent DTLS packet ({} bytes)", packet.len());
+            }
+        } else {
+            self.socket
+                .send(payload)
+                .await
+                .context("Failed to send UDP packet")?;
+        }
+
         Ok(())
     }
 
@@ -436,75 +443,65 @@ impl UdpTransportManager {
         Ok(())
     }
 
-    /// Begin TLS handshake over UDP (MS-RDPEMT requirement)
-    /// Returns the adapter that the main loop should feed packets into
-    fn begin_tls_handshake(&mut self) -> UdpStreamAdapter {
-        info!("🔐 Preparing TLS handshake over UDP...");
-
-        // Create stream adapter that we'll feed packets into
-        let adapter = UdpStreamAdapter::new(
-            self.socket.clone(),
-            self.connection.clone(),
-        );
-        
-        adapter
-    }
-
-    /// Complete TLS handshake with the adapter
-    async fn complete_tls_handshake(&mut self, adapter: UdpStreamAdapter) -> Result<()> {
-        info!("🔐 Performing TLS handshake...");
-        
-        // Use ironrdp-tls to upgrade the connection
-        // This will perform the TLS handshake by reading/writing through the adapter
-        let (tls_stream, _server_public_key) = ironrdp_tls::upgrade(adapter, &self.server_name)
-            .await
-            .context("TLS handshake failed")?;
-
-        self.tls_stream = Some(tls_stream);
-
-        info!("✅ TLS handshake complete!");
-        Ok(())
-    }
-
     /// Handle received UDP packet
     async fn handle_received_packet(&mut self, packet: &[u8]) -> Result<()> {
         trace!("Processing received packet ({} bytes)", packet.len());
 
-        // Try to process as source packet (data)
-        let mut conn = self.connection.lock().await;
-        match conn.process_source_packet(packet) {
-            Ok(datas) if !datas.is_empty() => {
-                drop(conn); // Release lock before async operations
-                for data in datas {
-                    info!("📦 UDP: Received data packet ({} bytes payload)", data.len());
-                    
-                    // Dump first 32 bytes for debugging
-                    if data.len() > 0 {
-                        let dump_len = data.len().min(32);
-                        debug!("   First {} bytes: {:02x?}", dump_len, &data[..dump_len]);
+        let decrypted_packets = if let Some(dtls) = self.dtls_socket.as_mut() {
+            match dtls.decrypt(packet) {
+                Ok(packets) => {
+                    if packets.is_empty() {
+                        trace!("DTLS decrypt produced no plaintext payloads");
+                        return Ok(());
                     }
-                    
-                    // Check if this is a tunnel PDU (MS-RDPEMT)
-                    if let Err(e) = self.handle_tunnel_pdu(&data).await {
-                        // If not a tunnel PDU, send as regular data
-                        debug!("Not a tunnel PDU ({}), forwarding as regular data", e);
-                        let _ = self.event_tx.send(UdpTransportEvent::DataReceived(data));
-                    }
+                    packets
+                }
+                Err(e) => {
+                    warn!("DTLS decrypt failed: {}", e);
+                    return Err(e);
                 }
             }
-            Ok(_) => {
-                // Packet received but not yet deliverable (out of order)
-                debug!("📦 UDP packet buffered (out of sequence or no data yet)");
-            }
-            Err(e) => {
-                // Maybe an ACK or FEC; try to process
-                if let Err(err) = conn.process_ack_packet(packet) {
-                    debug!("⚠️  Failed to decode UDP packet as source or ACK: source_err={}, ack_err={}", e, err);
-                    // Dump packet for analysis
-                    let dump_len = packet.len().min(32);
-                    debug!("   Packet first {} bytes: {:02x?}", dump_len, &packet[..dump_len]);
-                } else {
-                    debug!("✓ Processed UDP ACK packet");
+        } else {
+            vec![packet.to_vec()]
+        };
+
+        for plaintext in decrypted_packets {
+            let mut conn = self.connection.lock().await;
+            match conn.process_source_packet(&plaintext) {
+                Ok(datas) if !datas.is_empty() => {
+                    drop(conn); // Release lock before async operations
+                    for data in datas {
+                        info!("📦 UDP: Received data packet ({} bytes payload)", data.len());
+
+                        if !data.is_empty() {
+                            let dump_len = data.len().min(32);
+                            debug!("   First {} bytes: {:02x?}", dump_len, &data[..dump_len]);
+                        }
+
+                        if let Err(e) = self.handle_tunnel_pdu(&data).await {
+                            debug!("Not a tunnel PDU ({}), forwarding as regular data", e);
+                            let _ = self.event_tx.send(UdpTransportEvent::DataReceived(data));
+                        }
+                    }
+                }
+                Ok(_) => {
+                    debug!("📦 UDP packet buffered (out of sequence or no data yet)");
+                }
+                Err(e) => {
+                    if let Err(err) = conn.process_ack_packet(&plaintext) {
+                        let dump_len = plaintext.len().min(32);
+                        debug!(
+                            "⚠️  Failed to decode UDP packet as source or ACK: source_err={}, ack_err={}",
+                            e, err
+                        );
+                        debug!(
+                            "   Packet first {} bytes: {:02x?}",
+                            dump_len,
+                            &plaintext[..dump_len]
+                        );
+                    } else {
+                        debug!("✓ Processed UDP ACK packet");
+                    }
                 }
             }
         }
@@ -563,24 +560,26 @@ impl UdpTransportManager {
     async fn send_data(&mut self, data: Vec<u8>) -> Result<()> {
         trace!("Sending data ({} bytes)", data.len());
 
-        let mut conn = self.connection.lock().await;
-        let packet = conn
-            .send_data(data)
-            .context("Failed to create source packet")?;
+        let mut fec_packet: Option<Vec<u8>> = None;
+        let packet = {
+            let mut conn = self.connection.lock().await;
+            let packet = conn
+                .send_data(data)
+                .context("Failed to create source packet")?;
 
-        self.socket
-            .send(&packet)
-            .await
-            .context("Failed to send packet")?;
+            if let Ok(Some(fec)) = conn.check_fec_block() {
+                fec_packet = Some(fec);
+            }
+
+            packet
+        };
+
+        self.send_over_udp(&packet).await?;
 
         trace!("Sent source packet ({} bytes)", packet.len());
 
-        // Check if FEC block is complete and send FEC packet
-        if let Ok(Some(fec_packet)) = conn.check_fec_block() {
-            self.socket
-                .send(&fec_packet)
-                .await
-                .context("Failed to send FEC packet")?;
+        if let Some(fec_packet) = fec_packet {
+            self.send_over_udp(&fec_packet).await?;
             debug!("Sent FEC packet ({} bytes)", fec_packet.len());
         }
 
@@ -615,8 +614,8 @@ impl UdpTransportManager {
         debug!("   MS-RDPEUDP packet: {} bytes total", udp_packet.len());
         debug!("   First 32 bytes of UDP packet: {:02x?}", &udp_packet[..udp_packet.len().min(32)]);
 
-        self.socket
-            .send(&udp_packet)
+        self
+            .send_over_udp(&udp_packet)
             .await
             .context("Failed to send TunnelCreateRequest")?;
 

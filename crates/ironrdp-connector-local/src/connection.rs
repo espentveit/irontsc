@@ -31,6 +31,8 @@ pub struct ConnectionResult {
     /// MCS message channel ID from server's GCC ServerMessageChannelData (for multitransport responses)
     /// This must be used for sending InitiateMultitransportResponse PDUs per MS-RDPBCGR spec
     pub message_channel_id: Option<u16>,
+    /// Selected security protocol from negotiation (for determining DTLS requirement in MS-RDPEMT)
+    pub selected_protocol: nego::SecurityProtocol,
 }
 
 #[derive(Default, Debug)]
@@ -135,6 +137,8 @@ pub struct ClientConnector {
     pub correlation_id: Option<[u8; 16]>,
     /// MCS message channel ID from server's GCC ServerMessageChannelData (for multitransport responses)
     pub message_channel_id: Option<u16>,
+    /// Selected security protocol from negotiation (preserved for ConnectionResult)
+    pub selected_protocol: nego::SecurityProtocol,
 }
 
 impl ClientConnector {
@@ -146,6 +150,7 @@ impl ClientConnector {
             static_channels: StaticChannelSet::new(),
             correlation_id: None,
             message_channel_id: None,
+            selected_protocol: nego::SecurityProtocol::empty(), // Will be set during negotiation
         }
     }
 
@@ -368,6 +373,9 @@ impl Sequence for ClientConnector {
                         "client advertised {requested_protocol}, but server selected {selected_protocol}",
                     ));
                 }
+
+                // Store selected protocol for later use (DTLS requirement in UDP transport)
+                self.selected_protocol = selected_protocol;
 
                 (
                     Written::Nothing,
@@ -714,6 +722,7 @@ impl Sequence for ClientConnector {
                                 connection_activation,
                                 correlation_id: self.correlation_id,
                                 message_channel_id: self.message_channel_id,
+                                selected_protocol: self.selected_protocol,
                             },
                         },
                         _ => return Err(general_err!("invalid state (this is a bug)")),

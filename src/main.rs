@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 mod config;
+mod dtls_udp;
 mod gfx;
 mod gfx_channel;
 mod h264_codec_caps;
