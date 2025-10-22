@@ -43,7 +43,7 @@ impl Default for UdpTransportConfig {
             local_addr: "0.0.0.0:0".parse().unwrap(),
             mode: TransportMode::Lossy, // Lossy mode better for video
             enable_fec: true,
-            protocol_version: UdpProtocolVersion::V2,
+            protocol_version: UdpProtocolVersion::V1,
             mtu: 1232,
             use_dtls: false, // Default to no DTLS (Standard RDP Security)
         }
@@ -218,35 +218,41 @@ impl UdpTransportManager {
         // - Failure to complete DTLS causes tunnel creation to fail
         // ═══════════════════════════════════════════════════════════════════════
 
+        // DTLS handshake handling moved to event loop - will be performed after UDP handshake
+        // by sending/receiving DTLS messages wrapped in RDP UDP DATA packets
         if self.use_dtls {
             info!("🔐 DTLS required (Enhanced RDP Security in effect)");
-            info!("   Performing DTLS 1.2 handshake per MS-RDPEMT...");
+            info!("   DTLS handshake will be performed via RDP UDP DATA packets");
 
-            // Create DTLS wrapper
+            // Create DTLS layer (encryption only, no socket I/O)
             let dtls_config = DtlsConfig {
                 server_name: self.server_name.clone(),
                 verify_certificate: false, // TODO: Enable in production
             };
 
-            match DtlsUdpSocket::new(self.socket.clone(), self.server_addr, dtls_config) {
+            match DtlsUdpSocket::new(self.server_addr, dtls_config) {
                 Ok(mut dtls) => {
-                    // Perform DTLS handshake
-                    match dtls.handshake().await {
-                        Ok(()) => {
-                            info!("✅ DTLS handshake complete, tunnel PDUs will be encrypted");
+                    // Start DTLS handshake to get ClientHello
+                    match dtls.start_handshake() {
+                        Ok(client_hello) => {
+                            info!("📤 Sending DTLS ClientHello ({} bytes) in RDP UDP DATA packet", client_hello.len());
+                            // Send ClientHello wrapped in RDP UDP DATA packet
+                            if let Err(e) = self.send_data(client_hello).await {
+                                error!("Failed to send DTLS ClientHello: {}", e);
+                                return Err(e);
+                            }
                             self.dtls_socket = Some(dtls);
+                            // Note: Tunnel creation will happen after DTLS handshake completes
+                            // (handled in the event loop when we receive DTLS ServerHello response)
                         }
                         Err(e) => {
-                            error!("❌ DTLS handshake failed: {}", e);
-                            let _ = self.event_tx.send(UdpTransportEvent::Disconnected(
-                                format!("DTLS handshake failed: {}", e)
-                            ));
+                            error!("❌ Failed to start DTLS handshake: {}", e);
                             return Err(e);
                         }
                     }
                 }
                 Err(e) => {
-                    error!("❌ Failed to create DTLS socket: {}", e);
+                    error!("❌ Failed to create DTLS layer: {}", e);
                     let _ = self.event_tx.send(UdpTransportEvent::Disconnected(
                         format!("DTLS initialization failed: {}", e)
                     ));
@@ -258,19 +264,24 @@ impl UdpTransportManager {
             info!("   UDP tunnel will use unencrypted datagrams per MS-RDPEMT Appendix A");
         }
 
-        // Create tunnel if parameters provided
-        if let (Some(request_id), Some(security_cookie)) = (self.request_id, self.security_cookie) {
-            if let Err(e) = self.create_tunnel(request_id, security_cookie).await {
-                error!("Tunnel creation failed: {}", e);
-                let _ = self
-                    .event_tx
-                    .send(UdpTransportEvent::Disconnected(format!("Tunnel creation failed: {}", e)));
-                return Err(e);
+        // Create tunnel if parameters provided (only if DTLS not required)
+        // If DTLS is required, tunnel will be created after DTLS handshake completes
+        if !self.use_dtls {
+            if let (Some(request_id), Some(security_cookie)) = (self.request_id, self.security_cookie) {
+                if let Err(e) = self.create_tunnel(request_id, security_cookie).await {
+                    error!("Tunnel creation failed: {}", e);
+                    let _ = self
+                        .event_tx
+                        .send(UdpTransportEvent::Disconnected(format!("Tunnel creation failed: {}", e)));
+                    return Err(e);
+                }
+                // Note: Tunnel will be marked as established when TunnelCreateResponse is received
+                // in handle_tunnel_pdu() - look for "✅ Tunnel creation succeeded" message
+            } else {
+                warn!("No tunnel parameters provided, skipping tunnel creation");
             }
-            // Note: Tunnel will be marked as established when TunnelCreateResponse is received
-            // in handle_tunnel_pdu() - look for "✅ Tunnel creation succeeded" message
         } else {
-            warn!("No tunnel parameters provided, skipping tunnel creation");
+            info!("⏸️  Tunnel creation deferred until DTLS handshake completes");
         }
 
         // Main event loop
@@ -366,24 +377,37 @@ impl UdpTransportManager {
     }
 
     async fn send_over_udp(&mut self, payload: &[u8]) -> Result<()> {
+        // Check if DTLS is required and handshake is complete
         if let Some(dtls) = self.dtls_socket.as_mut() {
-            let packets = dtls.encrypt(payload)?;
-            if packets.is_empty() {
-                trace!(
-                    "DTLS produced no ciphertext for payload ({} bytes), skipping transmit",
-                    payload.len()
-                );
-                return Ok(());
-            }
+            if dtls.is_handshake_complete() {
+                // DTLS handshake complete - encrypt the payload
+                let packets = dtls.encrypt(payload)?;
+                if packets.is_empty() {
+                    trace!(
+                        "DTLS produced no ciphertext for payload ({} bytes), skipping transmit",
+                        payload.len()
+                    );
+                    return Ok(());
+                }
 
-            for packet in packets {
+                for packet in packets {
+                    self.socket
+                        .send(&packet)
+                        .await
+                        .context("Failed to send DTLS packet")?;
+                    trace!("Sent DTLS packet ({} bytes)", packet.len());
+                }
+            } else {
+                // DTLS handshake not complete - send payload unencrypted
+                // (This is for DTLS handshake messages wrapped in RDP UDP DATA packets)
+                trace!("Sending unencrypted packet ({} bytes) - DTLS handshake in progress", payload.len());
                 self.socket
-                    .send(&packet)
+                    .send(payload)
                     .await
-                    .context("Failed to send DTLS packet")?;
-                trace!("Sent DTLS packet ({} bytes)", packet.len());
+                    .context("Failed to send UDP packet")?;
             }
         } else {
+            // No DTLS - send payload unencrypted
             self.socket
                 .send(payload)
                 .await
@@ -437,8 +461,13 @@ impl UdpTransportManager {
                 .context("Failed to process SYN+ACK")?;
         }
 
-        // Send ACK (implicit in first data packet, so just mark as connected)
-        info!("UDP handshake complete, connection established");
+        // MS-RDPEUDP handshake complete
+        // Note: Per MS-RDPEUDP spec and observed behavior in working captures:
+        // - NO standalone ACK packet should be sent after SYN+ACK
+        // - If DTLS is required, go directly to DTLS ClientHello
+        // - If DTLS is not required, first DATA packet will include ACK flag
+        // - The "ACK" in protocol diagrams refers to ACK flag in DATA packets, not standalone ACK
+        info!("UDP handshake complete (SYN → SYN+ACK received), connection established");
 
         Ok(())
     }
@@ -447,63 +476,108 @@ impl UdpTransportManager {
     async fn handle_received_packet(&mut self, packet: &[u8]) -> Result<()> {
         trace!("Processing received packet ({} bytes)", packet.len());
 
-        let decrypted_packets = if let Some(dtls) = self.dtls_socket.as_mut() {
-            match dtls.decrypt(packet) {
-                Ok(packets) => {
-                    if packets.is_empty() {
-                        trace!("DTLS decrypt produced no plaintext payloads");
-                        return Ok(());
-                    }
-                    packets
-                }
-                Err(e) => {
-                    warn!("DTLS decrypt failed: {}", e);
-                    return Err(e);
-                }
-            }
-        } else {
-            vec![packet.to_vec()]
-        };
+        // First, try to process as RDP UDP packet to extract payload
+        let mut conn = self.connection.lock().await;
+        let source_result = conn.process_source_packet(packet);
+        drop(conn);
 
-        for plaintext in decrypted_packets {
-            let mut conn = self.connection.lock().await;
-            match conn.process_source_packet(&plaintext) {
-                Ok(datas) if !datas.is_empty() => {
-                    drop(conn); // Release lock before async operations
-                    for data in datas {
-                        info!("📦 UDP: Received data packet ({} bytes payload)", data.len());
-
-                        if !data.is_empty() {
-                            let dump_len = data.len().min(32);
-                            debug!("   First {} bytes: {:02x?}", dump_len, &data[..dump_len]);
+        match source_result {
+            Ok(payloads) if !payloads.is_empty() => {
+                // Successfully extracted payloads from RDP UDP DATA packet(s)
+                for payload in payloads {
+                    // Check if we're still in DTLS handshake
+                    if let Some(dtls) = self.dtls_socket.as_mut() {
+                        if !dtls.is_handshake_complete() {
+                            // This payload is a DTLS handshake message
+                            info!("📥 Received DTLS handshake message ({} bytes)", payload.len());
+                            match dtls.process_handshake_data(&payload) {
+                                Ok(Some(response_packets)) => {
+                                    // DTLS wants to send response packets
+                                    for response in response_packets {
+                                        info!("📤 Sending DTLS response ({} bytes) in RDP UDP DATA", response.len());
+                                        self.send_data(response).await?;
+                                    }
+                                }
+                                Ok(None) => {
+                                    // Handshake either complete or waiting for more data
+                                    if dtls.is_handshake_complete() {
+                                        info!("✅ DTLS handshake complete, tunnel PDUs will be encrypted");
+                                        
+                                        // Now that DTLS is complete, create the tunnel
+                                        if let (Some(request_id), Some(security_cookie)) = (self.request_id, self.security_cookie) {
+                                            if !self.tunnel_established {
+                                                info!("🔧 DTLS complete, now creating MS-RDPEMT tunnel");
+                                                if let Err(e) = self.create_tunnel(request_id, security_cookie).await {
+                                                    error!("Tunnel creation after DTLS failed: {}", e);
+                                                    return Err(e);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        trace!("DTLS waiting for more handshake data");
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("❌ DTLS handshake processing failed: {}", e);
+                                    return Err(e);
+                                }
+                            }
+                            continue; // Don't process as tunnel PDU yet
                         }
 
-                        if let Err(e) = self.handle_tunnel_pdu(&data).await {
-                            debug!("Not a tunnel PDU ({}), forwarding as regular data", e);
-                            let _ = self.event_tx.send(UdpTransportEvent::DataReceived(data));
+                        // DTLS handshake complete - decrypt tunnel PDU
+                        match dtls.decrypt(&payload) {
+                            Ok(decrypted_payloads) => {
+                                for decrypted in decrypted_payloads {
+                                    self.handle_tunnel_pdu_or_data(&decrypted).await?;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("DTLS decrypt failed: {}", e);
+                                return Err(e);
+                            }
                         }
-                    }
-                }
-                Ok(_) => {
-                    debug!("📦 UDP packet buffered (out of sequence or no data yet)");
-                }
-                Err(e) => {
-                    if let Err(err) = conn.process_ack_packet(&plaintext) {
-                        let dump_len = plaintext.len().min(32);
-                        debug!(
-                            "⚠️  Failed to decode UDP packet as source or ACK: source_err={}, ack_err={}",
-                            e, err
-                        );
-                        debug!(
-                            "   Packet first {} bytes: {:02x?}",
-                            dump_len,
-                            &plaintext[..dump_len]
-                        );
                     } else {
-                        debug!("✓ Processed UDP ACK packet");
+                        // No DTLS - payload is plaintext tunnel PDU
+                        self.handle_tunnel_pdu_or_data(&payload).await?;
                     }
                 }
             }
+            Ok(_) => {
+                // No payloads yet (buffered or out of sequence)
+                debug!("📦 UDP packet buffered (out of sequence or no data yet)");
+            }
+            Err(e) => {
+                // Not a source packet, try as ACK packet
+                let mut conn = self.connection.lock().await;
+                if let Err(ack_err) = conn.process_ack_packet(packet) {
+                    let dump_len = packet.len().min(32);
+                    debug!(
+                        "⚠️  Failed to decode UDP packet: source_err={}, ack_err={}",
+                        e, ack_err
+                    );
+                    debug!("   Packet first {} bytes: {:02x?}", dump_len, &packet[..dump_len]);
+                } else {
+                    debug!("✓ Processed UDP ACK packet");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle tunnel PDU or forward as regular data
+    async fn handle_tunnel_pdu_or_data(&mut self, data: &[u8]) -> Result<()> {
+        info!("📦 UDP: Received data packet ({} bytes payload)", data.len());
+
+        if !data.is_empty() {
+            let dump_len = data.len().min(32);
+            debug!("   First {} bytes: {:02x?}", dump_len, &data[..dump_len]);
+        }
+
+        if let Err(e) = self.handle_tunnel_pdu(data).await {
+            debug!("Not a tunnel PDU ({}), forwarding as regular data", e);
+            let _ = self.event_tx.send(UdpTransportEvent::DataReceived(data.to_vec()));
         }
 
         Ok(())
@@ -647,7 +721,7 @@ pub async fn create_video_udp_transport(
         server_addr,
         mode: TransportMode::Lossy, // Best for video
         enable_fec: true,           // FEC helps recover lost frames
-        protocol_version: UdpProtocolVersion::V2,
+    protocol_version: UdpProtocolVersion::V1,
         ..Default::default()
     };
 

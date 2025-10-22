@@ -3,26 +3,18 @@
 /// Provides DTLS 1.2 encryption/decryption for the MS-RDPEMT UDP transport.
 use anyhow::{anyhow, Context, Result};
 use foreign_types::ForeignType;
-use libc::{c_int, c_long, c_void};
+use libc::{c_int, c_void};
 use openssl_sys as ffi;
 use openssl::ssl::{ErrorCode, Ssl, SslContext, SslMethod, SslMode, SslOptions, SslVerifyMode, SslVersion};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
-use tokio::time::timeout;
 use tracing::{debug, info, trace, warn};
 
 // Additional FFI declarations not available in openssl_sys
 unsafe extern "C" {
     fn BIO_ctrl_pending(b: *mut ffi::BIO) -> libc::size_t;
-    // Note: DTLSv1_handle_timeout and DTLSv1_get_timeout were removed in OpenSSL 3.0
-    // We use simple timeouts instead of OpenSSL's internal retransmission timers
 }
 
 const MAX_DTLS_RECORD_SIZE: usize = 64 * 1024;
-const DTLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-const DTLS_FALLBACK_TIMEOUT: Duration = Duration::from_millis(500);
 const CLIENT_MTU: u32 = 1232;
 
 /// DTLS configuration for MS-RDPEMT
@@ -33,13 +25,12 @@ pub struct DtlsConfig {
     pub verify_certificate: bool,
 }
 
-/// DTLS wrapper for a UDP socket
+/// DTLS wrapper for encrypting/decrypting UDP datagrams
+/// Note: This does NOT handle socket I/O - packets must be wrapped in RDP UDP DATA frames
 pub struct DtlsUdpSocket {
-    /// Underlying UDP socket
-    socket: Arc<UdpSocket>,
     /// DTLS SSL context
     ssl_context: SslContext,
-    /// Server address
+    /// Server address (for logging/debugging)
     server_addr: SocketAddr,
     /// Configuration
     config: DtlsConfig,
@@ -50,9 +41,8 @@ pub struct DtlsUdpSocket {
 }
 
 impl DtlsUdpSocket {
-    /// Create a new DTLS wrapper for the given UDP socket
+    /// Create a new DTLS encryption layer (does not handle socket I/O)
     pub fn new(
-        socket: Arc<UdpSocket>,
         server_addr: SocketAddr,
         config: DtlsConfig,
     ) -> Result<Self> {
@@ -98,7 +88,6 @@ impl DtlsUdpSocket {
         let ssl_context = ctx_builder.build();
 
         Ok(Self {
-            socket,
             ssl_context,
             server_addr,
             config,
@@ -107,8 +96,9 @@ impl DtlsUdpSocket {
         })
     }
 
-    /// Perform the DTLS handshake with the remote server.
-    pub async fn handshake(&mut self) -> Result<()> {
+    /// Start DTLS handshake and return ClientHello packet to send
+    /// Call process_handshake_data() with server responses until handshake completes
+    pub fn start_handshake(&mut self) -> Result<Vec<u8>> {
         info!("🤝 Starting DTLS 1.2 handshake with {}", self.server_addr);
 
         // Create SSL connection instance
@@ -131,51 +121,83 @@ impl DtlsUdpSocket {
         let (rbio, wbio) = Self::create_memory_bios()?;
         unsafe { ffi::SSL_set_bio(Self::ssl_ptr(&ssl), rbio, wbio) };
 
-        info!("📡 Executing DTLS handshake (async BIO bridge)");
-
-        let deadline = Instant::now() + DTLS_HANDSHAKE_TIMEOUT;
-        let mut recv_buffer = vec![0u8; MAX_DTLS_RECORD_SIZE];
-
-        loop {
-            if Instant::now() >= deadline {
-                return Err(anyhow!("DTLS handshake timed out"));
-            }
-
-            let ret = unsafe { ffi::SSL_do_handshake(Self::ssl_ptr(&ssl)) };
-
-            if ret == 1 {
-                trace!("DTLS handshake step complete");
-                self.flush_wbio(&mut ssl).await?;
-                break;
-            } else {
-                let error_code = unsafe {
-                    ErrorCode::from_raw(ffi::SSL_get_error(Self::ssl_ptr(&ssl), ret))
-                };
-                match error_code {
-                    ErrorCode::WANT_READ => {
-                        trace!("DTLS handshake requires inbound data");
-                        self.flush_wbio(&mut ssl).await?;
-                        self.await_handshake_packet(&mut ssl, &mut recv_buffer, deadline)
-                            .await?;
-                    }
-                    ErrorCode::WANT_WRITE => {
-                        trace!("DTLS handshake produced outbound data");
-                        self.flush_wbio(&mut ssl).await?;
-                    }
-                    other => {
-                        return Err(anyhow!(
-                            "DTLS handshake failed (error {:?})",
-                            other
-                        ));
-                    }
-                }
-            }
+        // Initiate handshake to generate ClientHello
+        let ret = unsafe { ffi::SSL_do_handshake(Self::ssl_ptr(&ssl)) };
+        
+        if ret == 1 {
+            // Unlikely to complete on first call, but handle it
+            self.ssl_conn = Some(ssl);
+            self.handshake_complete = true;
+            return Ok(Vec::new());
         }
 
-        info!("✅ DTLS handshake complete");
+        // Extract ClientHello from write BIO
+        let packets = Self::drain_wbio(&mut ssl)?;
+        
+        // Store SSL connection for continued handshake
         self.ssl_conn = Some(ssl);
-        self.handshake_complete = true;
-        Ok(())
+        
+        // Return first packet (ClientHello)
+        packets.into_iter().next()
+            .ok_or_else(|| anyhow!("DTLS handshake did not produce ClientHello"))
+    }
+
+    /// Process incoming DTLS handshake data and return any outgoing packets
+    /// Returns Ok(Some(packets)) if there are packets to send
+    /// Returns Ok(None) if handshake is complete
+    pub fn process_handshake_data(&mut self, data: &[u8]) -> Result<Option<Vec<Vec<u8>>>> {
+        if self.handshake_complete {
+            return Ok(None);
+        }
+
+        let ssl = self.ssl_conn.as_mut()
+            .context("DTLS handshake not started - call start_handshake() first")?;
+
+        // Feed data into read BIO
+        Self::write_to_rbio(ssl, data)?;
+
+        // Continue handshake
+        let ret = unsafe { ffi::SSL_do_handshake(Self::ssl_ptr(ssl)) };
+
+        if ret == 1 {
+            // Handshake complete
+            info!("✅ DTLS handshake complete");
+            self.handshake_complete = true;
+            return Ok(None);
+        }
+
+        // Check error code
+        let error_code = unsafe {
+            ErrorCode::from_raw(ffi::SSL_get_error(Self::ssl_ptr(ssl), ret))
+        };
+
+        match error_code {
+            ErrorCode::WANT_READ => {
+                // Need more data from server, extract any outgoing packets first
+                let packets = Self::drain_wbio(ssl)?;
+                if packets.is_empty() {
+                    trace!("DTLS waiting for more server data");
+                    Ok(None)
+                } else {
+                    trace!("DTLS handshake produced {} response packets", packets.len());
+                    Ok(Some(packets))
+                }
+            }
+            ErrorCode::WANT_WRITE => {
+                // Data ready to send
+                let packets = Self::drain_wbio(ssl)?;
+                trace!("DTLS handshake produced {} packets", packets.len());
+                Ok(Some(packets))
+            }
+            other => {
+                Err(anyhow!("DTLS handshake failed (error {:?})", other))
+            }
+        }
+    }
+
+    /// Check if DTLS handshake is complete
+    pub fn is_handshake_complete(&self) -> bool {
+        self.handshake_complete
     }
 
     /// Encrypt plaintext payload(s) into DTLS records.
@@ -217,67 +239,6 @@ impl DtlsUdpSocket {
 
         Self::write_to_rbio(ssl, ciphertext)?;
         Self::drain_plaintext(ssl)
-    }
-
-    /// Check if DTLS handshake is complete
-    pub fn is_handshake_complete(&self) -> bool {
-        self.handshake_complete
-    }
-
-    /// Get the underlying UDP socket
-    pub fn socket(&self) -> &Arc<UdpSocket> {
-        &self.socket
-    }
-
-    async fn await_handshake_packet(
-        &mut self,
-        ssl: &mut Ssl,
-        buffer: &mut [u8],
-        deadline: Instant,
-    ) -> Result<()> {
-        loop {
-            if Instant::now() >= deadline {
-                return Err(anyhow!("Timed out waiting for DTLS packet"));
-            }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let wait_for = DTLS_FALLBACK_TIMEOUT.min(remaining);
-
-            match timeout(wait_for, self.socket.recv_from(buffer)).await {
-                Ok(Ok((len, addr))) => {
-                    if addr != self.server_addr {
-                        debug!(
-                            "Ignoring DTLS packet from unexpected address {} (expected {})",
-                            addr, self.server_addr
-                        );
-                        continue;
-                    }
-
-                    trace!("📥 DTLS handshake packet ({} bytes)", len);
-                    Self::write_to_rbio(ssl, &buffer[..len])?;
-                    return Ok(());
-                }
-                Ok(Err(e)) => {
-                    return Err(anyhow!("Failed to receive DTLS packet: {}", e));
-                }
-                Err(_) => {
-                    // Timeout expired, OpenSSL will handle retransmissions internally
-                    trace!("DTLS handshake timeout expired, continuing to wait");
-                }
-            }
-        }
-    }
-
-    async fn flush_wbio(&self, ssl: &mut Ssl) -> Result<()> {
-        let packets = Self::drain_wbio(ssl)?;
-        for packet in packets {
-            trace!("📡 Sending DTLS packet ({} bytes)", packet.len());
-            self.socket
-                .send(&packet)
-                .await
-                .with_context(|| "Failed to send DTLS packet".to_string())?;
-        }
-        Ok(())
     }
 
     #[inline]
@@ -423,7 +384,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_dtls_creation() {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3389);
 
         let config = DtlsConfig {
@@ -431,7 +391,8 @@ mod tests {
             verify_certificate: false,
         };
 
-        let dtls = DtlsUdpSocket::new(Arc::new(socket), server_addr, config);
+        let dtls = DtlsUdpSocket::new(server_addr, config);
         assert!(dtls.is_ok());
     }
 }
+

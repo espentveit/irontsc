@@ -69,7 +69,7 @@ impl Default for UdpConfig {
             initial_sequence_number: 0,
             receive_window_size: 256,
             mode: TransportMode::Reliable,
-            protocol_version: UdpProtocolVersion::V2,
+            protocol_version: UdpProtocolVersion::V1,
             enable_fec: true,
             fec_block_size: 8,
             retransmit_timeout_ms: 300, // Version 2 default
@@ -311,15 +311,33 @@ impl UdpConnection {
         let sequence_number = self.next_send_sequence;
         self.next_send_sequence = self.next_send_sequence.wrapping_add(1);
 
-        let ack_vector = self.build_ack_vector()?;
+        // MS-RDPEUDP 3.1.5.1.2: First DATA packet after SYN+ACK should NOT include ACK_VECTOR
+        // because we haven't received any DATA packets yet (only SYN+ACK which is not a DATA packet)
+        let ack_vector = if self.first_ack_sent {
+            self.build_ack_vector()?
+        } else {
+            None  // Force no ACK vector for first DATA packet
+        };
 
         // MS-RDPEUDP: First data packet after SYN+ACK MUST have ACK flag set
         // to complete the 3-way handshake (Section 1.4)
         let include_ack = !self.first_ack_sent;
 
+        // snSourceAck should acknowledge the last SOURCE (DATA) packet received
+        // For the first DATA packet, we use next_receive_sequence - 1 which is the
+        // server's Initial Sequence Number from the SYN+ACK
+        // (We decrement because next_receive_sequence was already incremented during reset)
+        let sn_source_ack = if self.first_ack_sent {
+            // Normal case: acknowledge the last DATA packet we received
+            self.next_receive_sequence.wrapping_sub(1)
+        } else {
+            // No data has been received yet, so acknowledge "prior to" the server's first DATA
+            self.next_receive_sequence.wrapping_sub(1)
+        };
+
         let packet = SourcePacket::new(
             sequence_number,
-            self.last_ack_received,
+            sn_source_ack,
             self.config.receive_window_size,
             data.clone(),
             ack_vector.clone(),
@@ -454,13 +472,19 @@ impl UdpConnection {
     pub fn create_ack(&mut self) -> UdpResult<Vec<u8>> {
         let ack_vector = self.build_ack_vector()?;
         let packet = AckPacket::new(
-            self.next_receive_sequence.wrapping_sub(1),
+            self.last_ack_received,
             self.config.receive_window_size,
             ack_vector,
             None,
         );
 
         self.last_ack_sent = Instant::now();
+        
+        // Mark first ACK as sent (completes 3-way handshake per MS-RDPEUDP)
+        if !self.first_ack_sent {
+            self.first_ack_sent = true;
+        }
+        
         Ok(packet.encode())
     }
 
