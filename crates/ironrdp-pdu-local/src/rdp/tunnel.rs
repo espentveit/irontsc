@@ -258,19 +258,28 @@ pub enum TunnelPdu {
         response: TunnelCreateResponse,
     },
     /// Tunnel data (DVC payload)
-    Data { header: TunnelHeader, payload: Vec<u8> },
+    Data {
+        header: TunnelHeader,
+        payload: Vec<u8>,
+    },
 }
 
 impl TunnelPdu {
     pub fn create_request(request_id: u32, security_cookie: [u8; 16]) -> Self {
         let request = TunnelCreateRequest::new(request_id, security_cookie);
-        let header = TunnelHeader::new(TunnelAction::CreateRequest, TunnelCreateRequest::FIXED_PART_SIZE as u16);
+        let header = TunnelHeader::new(
+            TunnelAction::CreateRequest,
+            TunnelCreateRequest::FIXED_PART_SIZE as u16,
+        );
         Self::CreateRequest { header, request }
     }
 
     pub fn create_response(hr_response: i32) -> Self {
         let response = TunnelCreateResponse::new(hr_response);
-        let header = TunnelHeader::new(TunnelAction::CreateResponse, TunnelCreateResponse::FIXED_PART_SIZE as u16);
+        let header = TunnelHeader::new(
+            TunnelAction::CreateResponse,
+            TunnelCreateResponse::FIXED_PART_SIZE as u16,
+        );
         Self::CreateResponse { header, response }
     }
 

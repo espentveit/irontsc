@@ -137,7 +137,8 @@ pub async fn example_udp_gfx_integration() -> Result<()> {
     };
 
     // 3. Create UDP GFX channel
-    let mut udp_channel = UdpGfxChannel::new(server_addr, server_name, Some(correlation_id)).await?;
+    let mut udp_channel =
+        UdpGfxChannel::new(server_addr, server_name, Some(correlation_id)).await?;
 
     // 4. Wait for connection
     udp_channel.wait_for_connection().await?;

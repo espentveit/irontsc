@@ -1,11 +1,13 @@
 /// DTLS wrapper for UDP datagrams (MS-RDPEMT requirement)
 ///
 /// Provides DTLS 1.2 encryption/decryption for the MS-RDPEMT UDP transport.
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use foreign_types::ForeignType;
 use libc::{c_int, c_void};
+use openssl::ssl::{
+    ErrorCode, Ssl, SslContext, SslMethod, SslMode, SslOptions, SslVerifyMode, SslVersion,
+};
 use openssl_sys as ffi;
-use openssl::ssl::{ErrorCode, Ssl, SslContext, SslMethod, SslMode, SslOptions, SslVerifyMode, SslVersion};
 use std::net::SocketAddr;
 use tracing::{debug, info, trace, warn};
 
@@ -42,15 +44,15 @@ pub struct DtlsUdpSocket {
 
 impl DtlsUdpSocket {
     /// Create a new DTLS encryption layer (does not handle socket I/O)
-    pub fn new(
-        server_addr: SocketAddr,
-        config: DtlsConfig,
-    ) -> Result<Self> {
-        info!("🔐 Initializing DTLS for MS-RDPEMT (server: {})", config.server_name);
+    pub fn new(server_addr: SocketAddr, config: DtlsConfig) -> Result<Self> {
+        info!(
+            "🔐 Initializing DTLS for MS-RDPEMT (server: {})",
+            config.server_name
+        );
 
         // Create DTLS 1.2 context
-        let mut ctx_builder = SslContext::builder(SslMethod::dtls())
-            .context("Failed to create DTLS context")?;
+        let mut ctx_builder =
+            SslContext::builder(SslMethod::dtls()).context("Failed to create DTLS context")?;
 
         // Set DTLS version to 1.2 (required by most RDP servers)
         ctx_builder
@@ -123,7 +125,7 @@ impl DtlsUdpSocket {
 
         // Initiate handshake to generate ClientHello
         let ret = unsafe { ffi::SSL_do_handshake(Self::ssl_ptr(&ssl)) };
-        
+
         if ret == 1 {
             // Unlikely to complete on first call, but handle it
             self.ssl_conn = Some(ssl);
@@ -133,12 +135,14 @@ impl DtlsUdpSocket {
 
         // Extract ClientHello from write BIO
         let packets = Self::drain_wbio(&mut ssl)?;
-        
+
         // Store SSL connection for continued handshake
         self.ssl_conn = Some(ssl);
-        
+
         // Return first packet (ClientHello)
-        packets.into_iter().next()
+        packets
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow!("DTLS handshake did not produce ClientHello"))
     }
 
@@ -150,7 +154,9 @@ impl DtlsUdpSocket {
             return Ok(None);
         }
 
-        let ssl = self.ssl_conn.as_mut()
+        let ssl = self
+            .ssl_conn
+            .as_mut()
             .context("DTLS handshake not started - call start_handshake() first")?;
 
         // Feed data into read BIO
@@ -167,9 +173,8 @@ impl DtlsUdpSocket {
         }
 
         // Check error code
-        let error_code = unsafe {
-            ErrorCode::from_raw(ffi::SSL_get_error(Self::ssl_ptr(ssl), ret))
-        };
+        let error_code =
+            unsafe { ErrorCode::from_raw(ffi::SSL_get_error(Self::ssl_ptr(ssl), ret)) };
 
         match error_code {
             ErrorCode::WANT_READ => {
@@ -189,9 +194,7 @@ impl DtlsUdpSocket {
                 trace!("DTLS handshake produced {} packets", packets.len());
                 Ok(Some(packets))
             }
-            other => {
-                Err(anyhow!("DTLS handshake failed (error {:?})", other))
-            }
+            other => Err(anyhow!("DTLS handshake failed (error {:?})", other)),
         }
     }
 
@@ -318,20 +321,15 @@ impl DtlsUdpSocket {
                     break;
                 }
 
-                let to_read =
-                    std::cmp::min(pending as usize, MAX_DTLS_RECORD_SIZE).max(1);
+                let to_read = std::cmp::min(pending as usize, MAX_DTLS_RECORD_SIZE).max(1);
                 let mut buf = vec![0u8; to_read];
-                let read = ffi::BIO_read(
-                    wbio,
-                    buf.as_mut_ptr() as *mut c_void,
-                    to_read as c_int,
-                );
+                let read = ffi::BIO_read(wbio, buf.as_mut_ptr() as *mut c_void, to_read as c_int);
 
                 if read <= 0 {
                     break;
                 }
 
-                 buf.truncate(read as usize);
+                buf.truncate(read as usize);
                 packets.push(buf);
             }
 
@@ -358,11 +356,7 @@ impl DtlsUdpSocket {
                 return Err(anyhow!("DTLS read BIO not present"));
             }
 
-            let written = ffi::BIO_write(
-                rbio,
-                data.as_ptr() as *const c_void,
-                data.len() as c_int,
-            );
+            let written = ffi::BIO_write(rbio, data.as_ptr() as *const c_void, data.len() as c_int);
 
             if written <= 0 {
                 return Err(anyhow!("Failed to feed ciphertext into DTLS BIO"));
@@ -395,4 +389,3 @@ mod tests {
         assert!(dtls.is_ok());
     }
 }
-

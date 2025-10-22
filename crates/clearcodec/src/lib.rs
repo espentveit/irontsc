@@ -48,22 +48,14 @@ const MAX_SURFACE_HEIGHT: u32 = 4096;
 
 /// LOG2 floor lookup table for fast bit operations
 const CLEAR_LOG2_FLOOR: [u8; 256] = [
-    0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
 ];
 
 /// Bit masks for extracting variable-length bit fields
@@ -129,7 +121,9 @@ impl ClearCodec {
         Self {
             seq_number: 0,
             glyph_cache: (0..GLYPH_CACHE_SIZE).map(|_| GlyphEntry::new()).collect(),
-            vbar_storage: (0..CLEARCODEC_VBAR_SIZE).map(|_| VBarEntry::new()).collect(),
+            vbar_storage: (0..CLEARCODEC_VBAR_SIZE)
+                .map(|_| VBarEntry::new())
+                .collect(),
             vbar_cursor: 0,
             short_vbar_storage: (0..CLEARCODEC_VBAR_SHORT_SIZE)
                 .map(|_| VBarEntry::new())
@@ -216,13 +210,7 @@ impl ClearCodec {
 
         // Process glyph data - returns glyph index if miss, None if hit or no glyph
         let glyph_index_opt = if glyph_flags & CLEARCODEC_FLAG_GLYPH_INDEX != 0 {
-            self.decompress_glyph_data(
-                &mut cursor,
-                glyph_flags,
-                width,
-                height,
-                dst_data,
-            )?
+            self.decompress_glyph_data(&mut cursor, glyph_flags, width, height, dst_data)?
         } else {
             None
         };
@@ -474,7 +462,8 @@ impl ClearCodec {
                     }
 
                     suboffset += short_pixel_count * 3;
-                    self.short_vbar_cursor = (self.short_vbar_cursor + 1) % CLEARCODEC_VBAR_SHORT_SIZE;
+                    self.short_vbar_cursor =
+                        (self.short_vbar_cursor + 1) % CLEARCODEC_VBAR_SHORT_SIZE;
 
                     // Build full vbar
                     let full_entry = &mut self.vbar_storage[self.vbar_cursor];
@@ -529,8 +518,9 @@ impl ClearCodec {
                             if dst_offset + 4 <= dst_data.len()
                                 && src_offset + 4 <= vbar_entry.pixels.len()
                             {
-                                dst_data[dst_offset..dst_offset + 4]
-                                    .copy_from_slice(&vbar_entry.pixels[src_offset..src_offset + 4]);
+                                dst_data[dst_offset..dst_offset + 4].copy_from_slice(
+                                    &vbar_entry.pixels[src_offset..src_offset + 4],
+                                );
                             }
                         }
                     }
@@ -693,10 +683,18 @@ impl ClearCodec {
             }
 
             if start_index >= palette_count {
-                bail!("Start index {} >= palette count {}", start_index, palette_count);
+                bail!(
+                    "Start index {} >= palette count {}",
+                    start_index,
+                    palette_count
+                );
             }
             if stop_index >= palette_count {
-                bail!("Stop index {} >= palette count {}", stop_index, palette_count);
+                bail!(
+                    "Stop index {} >= palette count {}",
+                    stop_index,
+                    palette_count
+                );
             }
 
             // Write run of suite start color
@@ -743,7 +741,11 @@ impl ClearCodec {
         }
 
         if pixel_index != pixel_count {
-            bail!("RLEX pixel count mismatch: {} != {}", pixel_index, pixel_count);
+            bail!(
+                "RLEX pixel count mismatch: {} != {}",
+                pixel_index,
+                pixel_count
+            );
         }
 
         Ok(())
@@ -760,25 +762,19 @@ impl Default for ClearCodec {
 
 fn read_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8> {
     let mut buf = [0u8; 1];
-    cursor
-        .read_exact(&mut buf)
-        .context("Failed to read u8")?;
+    cursor.read_exact(&mut buf).context("Failed to read u8")?;
     Ok(buf[0])
 }
 
 fn read_u16(cursor: &mut Cursor<&[u8]>) -> Result<u16> {
     let mut buf = [0u8; 2];
-    cursor
-        .read_exact(&mut buf)
-        .context("Failed to read u16")?;
+    cursor.read_exact(&mut buf).context("Failed to read u16")?;
     Ok(u16::from_le_bytes(buf))
 }
 
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {
     let mut buf = [0u8; 4];
-    cursor
-        .read_exact(&mut buf)
-        .context("Failed to read u32")?;
+    cursor.read_exact(&mut buf).context("Failed to read u32")?;
     Ok(u32::from_le_bytes(buf))
 }
 
@@ -801,7 +797,10 @@ mod tests {
         let mut output = vec![0u8; 100];
         let result = codec.decompress(&[], 10000, 10000, &mut output);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Surface too large"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Surface too large"));
     }
 
     #[test]
@@ -811,30 +810,31 @@ mod tests {
         let compressed = vec![0x00, 0x00]; // Header: no flags, seq 0
         let result = codec.decompress(&compressed, 10, 10, &mut output);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Output buffer too small"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Output buffer too small"));
     }
 
     #[test]
     fn test_clearcodec_sequence_number() {
         let mut codec = ClearCodec::new();
         let mut output = vec![0u8; 16]; // 2x2 BGRA
-        
+
         // First frame with seq 0
         let compressed1 = vec![
-            0x00, 0x00,  // flags=0, seq=0
-            0x00, 0x00, 0x00, 0x00,  // residual_byte_count=0
-            0x00, 0x00, 0x00, 0x00,  // bands_byte_count=0
-            0x00, 0x00, 0x00, 0x00,  // subcodec_byte_count=0
+            0x00, 0x00, // flags=0, seq=0
+            0x00, 0x00, 0x00, 0x00, // residual_byte_count=0
+            0x00, 0x00, 0x00, 0x00, // bands_byte_count=0
+            0x00, 0x00, 0x00, 0x00, // subcodec_byte_count=0
         ];
         assert!(codec.decompress(&compressed1, 2, 2, &mut output).is_ok());
         assert_eq!(codec.seq_number, 1);
-        
+
         // Second frame with seq 1
         let compressed2 = vec![
-            0x00, 0x01,  // flags=0, seq=1
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, // flags=0, seq=1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         assert!(codec.decompress(&compressed2, 2, 2, &mut output).is_ok());
         assert_eq!(codec.seq_number, 2);
@@ -844,25 +844,22 @@ mod tests {
     fn test_clearcodec_sequence_mismatch() {
         let mut codec = ClearCodec::new();
         let mut output = vec![0u8; 16];
-        
+
         // First frame seq 0
         let compressed1 = vec![
-            0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         codec.decompress(&compressed1, 2, 2, &mut output).unwrap();
-        
+
         // Wrong sequence number (5 instead of 1)
         let compressed2 = vec![
-            0x00, 0x05,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         let result = codec.decompress(&compressed2, 2, 2, &mut output);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Sequence number mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Sequence number mismatch"));
     }
 }

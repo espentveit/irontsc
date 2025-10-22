@@ -1143,7 +1143,7 @@ impl GtkRdpWidget {
             buffer.len(),
             region
         );
-        
+
         if width == 0 || height == 0 {
             self.cancel_pending_upload();
             self.picture
@@ -1302,7 +1302,7 @@ impl GtkRdpWidget {
 
     fn upload_framebuffer(&self, width: u16, height: u16) {
         tracing::debug!("🖼️ upload_framebuffer called: {}x{}", width, height);
-        
+
         let stride = width as usize * 4;
         let frame_len = stride * height as usize;
         let bytes = {

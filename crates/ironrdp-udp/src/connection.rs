@@ -151,12 +151,12 @@ impl UdpConnection {
     }
 
     fn apply_protocol_version_defaults(&mut self) {
-        self.config.retransmit_timeout_ms = if self.config.protocol_version >= UdpProtocolVersion::V2
-        {
-            300
-        } else {
-            500
-        };
+        self.config.retransmit_timeout_ms =
+            if self.config.protocol_version >= UdpProtocolVersion::V2 {
+                300
+            } else {
+                500
+            };
     }
 
     /// Get the currently negotiated protocol version
@@ -338,7 +338,7 @@ impl UdpConnection {
         let ack_vector = if self.first_ack_sent {
             self.build_ack_vector()?
         } else {
-            None  // Force no ACK vector for first DATA packet
+            None // Force no ACK vector for first DATA packet
         };
 
         // MS-RDPEUDP: First data packet after SYN+ACK MUST have ACK flag set
@@ -437,12 +437,12 @@ impl UdpConnection {
         // Clear the block for next round
         self.source_packets_in_block.clear();
 
-    Ok(Some(fec_packet.encode(self.config.protocol_version)?))
+        Ok(Some(fec_packet.encode(self.config.protocol_version)?))
     }
 
     /// Process received source packet
     pub fn process_source_packet(&mut self, bytes: &[u8]) -> UdpResult<Vec<Vec<u8>>> {
-    let packet = SourcePacket::decode(bytes, self.config.protocol_version)?;
+        let packet = SourcePacket::decode(bytes, self.config.protocol_version)?;
 
         self.handle_ack_headers(
             &packet.header,
@@ -499,13 +499,13 @@ impl UdpConnection {
         );
 
         self.last_ack_sent = Instant::now();
-        
+
         // Mark first ACK as sent (completes 3-way handshake per MS-RDPEUDP)
         if !self.first_ack_sent {
             self.first_ack_sent = true;
         }
-        
-    packet.encode(self.config.protocol_version)
+
+        packet.encode(self.config.protocol_version)
     }
 
     /// Check if retransmission is needed and return packets to retransmit
@@ -550,7 +550,7 @@ impl UdpConnection {
 
     /// Process ACK packet from peer
     pub fn process_ack_packet(&mut self, bytes: &[u8]) -> UdpResult<()> {
-    let packet = AckPacket::decode(bytes, self.config.protocol_version)?;
+        let packet = AckPacket::decode(bytes, self.config.protocol_version)?;
         self.handle_ack_headers(
             &packet.header,
             packet.ack_vector.as_ref(),

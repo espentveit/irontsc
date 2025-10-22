@@ -28,10 +28,7 @@ pub struct UdpStreamAdapter {
 }
 
 impl UdpStreamAdapter {
-    pub fn new(
-        socket: Arc<UdpSocket>,
-        connection: Arc<Mutex<UdpConnection>>,
-    ) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, connection: Arc<Mutex<UdpConnection>>) -> Self {
         let state = Arc::new(Mutex::new(StreamState {
             read_queue: VecDeque::new(),
             read_waker: None,
@@ -49,7 +46,11 @@ impl UdpStreamAdapter {
     /// Feed a received UDP packet to the stream adapter
     /// This should be called by the main loop when a packet is received
     pub async fn feed_packet(&self, packet: &[u8]) -> io::Result<()> {
-        tracing::info!("feed_packet: {} bytes, first 16 bytes: {:02x?}", packet.len(), &packet[..packet.len().min(16)]);
+        tracing::info!(
+            "feed_packet: {} bytes, first 16 bytes: {:02x?}",
+            packet.len(),
+            &packet[..packet.len().min(16)]
+        );
         // Try to process as source packet (data)
         let mut conn = self.connection.lock().await;
         match conn.process_source_packet(packet) {
@@ -81,7 +82,10 @@ impl UdpStreamAdapter {
                     }
                     Err(e2) => {
                         tracing::warn!("invalid packet: src={}, ack={}", e, e2);
-                        Err(io::Error::new(io::ErrorKind::InvalidData, format!("Invalid packet: {}", e)))
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid packet: {}", e),
+                        ))
                     }
                 }
             }
@@ -149,11 +153,19 @@ impl AsyncWrite for UdpStreamAdapter {
 
         // Spawn task to send data
         tokio::spawn(async move {
-            tracing::info!("poll_write: sending {} bytes TLS data, first 16: {:02x?}", len, data_preview);
+            tracing::info!(
+                "poll_write: sending {} bytes TLS data, first 16: {:02x?}",
+                len,
+                data_preview
+            );
             let mut conn = connection.lock().await;
             match conn.send_data(data) {
                 Ok(packet) => {
-                    tracing::info!("poll_write: wrapped into {} byte RDPEUDP packet, first 16: {:02x?}", packet.len(), &packet[..packet.len().min(16)]);
+                    tracing::info!(
+                        "poll_write: wrapped into {} byte RDPEUDP packet, first 16: {:02x?}",
+                        packet.len(),
+                        &packet[..packet.len().min(16)]
+                    );
                     if let Err(e) = socket.send(&packet).await {
                         tracing::error!("UDP stream adapter send error: {}", e);
                     } else {
