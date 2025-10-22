@@ -121,6 +121,9 @@ pub struct UdpConnection {
     // Remote peer info
     remote_mtu: u16,
     remote_window_size: u16,
+
+    // Track if first ACK after handshake has been sent (MS-RDPEUDP 3-way handshake requirement)
+    first_ack_sent: bool,
 }
 
 impl UdpConnection {
@@ -142,6 +145,7 @@ impl UdpConnection {
             last_ack_sent: Instant::now(),
             remote_mtu: 1232,
             remote_window_size: 256,
+            first_ack_sent: false,
         }
     }
 
@@ -290,6 +294,8 @@ impl UdpConnection {
         }
 
         self.state = ConnectionState::Connected;
+        // Next data packet MUST include ACK flag to complete 3-way handshake per MS-RDPEUDP
+        self.first_ack_sent = false;
         Ok(())
     }
 
@@ -307,6 +313,10 @@ impl UdpConnection {
 
         let ack_vector = self.build_ack_vector()?;
 
+        // MS-RDPEUDP: First data packet after SYN+ACK MUST have ACK flag set
+        // to complete the 3-way handshake (Section 1.4)
+        let include_ack = !self.first_ack_sent;
+
         let packet = SourcePacket::new(
             sequence_number,
             self.last_ack_received,
@@ -314,9 +324,15 @@ impl UdpConnection {
             data.clone(),
             ack_vector.clone(),
             None,
+            include_ack,
         )?;
 
         let encoded = packet.encode();
+
+        // Mark first ACK as sent
+        if include_ack {
+            self.first_ack_sent = true;
+        }
 
         // Store for potential retransmission
         if self.config.mode == TransportMode::Reliable {
@@ -814,13 +830,13 @@ mod tests {
         receiver.reset_receive_state(0);
 
         // Simulate receiving sequence 1 before sequence 0
-        let packet1 = SourcePacket::new(1, 0, 256, b"two".to_vec(), None, None).unwrap();
+        let packet1 = SourcePacket::new(1, 0, 256, b"two".to_vec(), None, None, false).unwrap();
         let encoded1 = packet1.encode();
         let buffered = receiver.process_source_packet(&encoded1).unwrap();
         assert!(buffered.is_empty());
 
         // Now receive sequence 0, which should flush both
-        let packet0 = SourcePacket::new(0, 0, 256, b"one".to_vec(), None, None).unwrap();
+        let packet0 = SourcePacket::new(0, 0, 256, b"one".to_vec(), None, None, false).unwrap();
         let encoded0 = packet0.encode();
         let delivered = receiver.process_source_packet(&encoded0).unwrap();
         assert_eq!(delivered.len(), 2);

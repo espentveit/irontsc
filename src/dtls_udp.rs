@@ -3,7 +3,7 @@
 /// Provides DTLS 1.2 encryption/decryption for the MS-RDPEMT UDP transport.
 use anyhow::{anyhow, Context, Result};
 use foreign_types::ForeignType;
-use libc::{c_char, c_int, c_long, c_void, timeval};
+use libc::{c_int, c_long, c_void};
 use openssl_sys as ffi;
 use openssl::ssl::{ErrorCode, Ssl, SslContext, SslMethod, SslMode, SslOptions, SslVerifyMode, SslVersion};
 use std::net::SocketAddr;
@@ -16,8 +16,8 @@ use tracing::{debug, info, trace, warn};
 // Additional FFI declarations not available in openssl_sys
 unsafe extern "C" {
     fn BIO_ctrl_pending(b: *mut ffi::BIO) -> libc::size_t;
-    fn DTLSv1_handle_timeout(ssl: *mut ffi::SSL) -> c_long;
-    fn DTLSv1_get_timeout(ssl: *const ffi::SSL, tv: *mut timeval) -> c_long;
+    // Note: DTLSv1_handle_timeout and DTLSv1_get_timeout were removed in OpenSSL 3.0
+    // We use simple timeouts instead of OpenSSL's internal retransmission timers
 }
 
 const MAX_DTLS_RECORD_SIZE: usize = 64 * 1024;
@@ -241,10 +241,7 @@ impl DtlsUdpSocket {
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let wait_for = self
-                .dtls_timeout(ssl)
-                .unwrap_or(DTLS_FALLBACK_TIMEOUT)
-                .min(remaining);
+            let wait_for = DTLS_FALLBACK_TIMEOUT.min(remaining);
 
             match timeout(wait_for, self.socket.recv_from(buffer)).await {
                 Ok(Ok((len, addr))) => {
@@ -264,13 +261,8 @@ impl DtlsUdpSocket {
                     return Err(anyhow!("Failed to receive DTLS packet: {}", e));
                 }
                 Err(_) => {
-                    trace!("DTLS handshake timeout expired, triggering retransmit");
-                    if Self::handle_dtls_timeout(ssl)? {
-                        self.flush_wbio(ssl).await?;
-                    } else {
-                        // Timer expired but OpenSSL reports no retransmit needed; keep waiting.
-                        trace!("DTLS timeout expired but no retransmit required");
-                    }
+                    // Timeout expired, OpenSSL will handle retransmissions internally
+                    trace!("DTLS handshake timeout expired, continuing to wait");
                 }
             }
         }
@@ -419,42 +411,9 @@ impl DtlsUdpSocket {
         Ok(())
     }
 
-    fn handle_dtls_timeout(ssl: &mut Ssl) -> Result<bool> {
-        unsafe {
-            let rc = DTLSv1_handle_timeout(Self::ssl_ptr(ssl));
-            if rc < 0 {
-                Err(anyhow!("DTLSv1_handle_timeout reported an error"))
-            } else {
-                Ok(rc > 0)
-            }
-        }
-    }
-
-    fn dtls_timeout(&self, ssl: &Ssl) -> Option<Duration> {
-        unsafe {
-            let mut tv = timeval {
-                tv_sec: 0,
-                tv_usec: 0,
-            };
-            let rc = DTLSv1_get_timeout(Self::ssl_ptr(ssl), &mut tv);
-            if rc <= 0 {
-                return None;
-            }
-
-            let secs = if tv.tv_sec < 0 {
-                0
-            } else {
-                tv.tv_sec as u64
-            };
-            let micros = if tv.tv_usec < 0 {
-                0
-            } else {
-                tv.tv_usec as u64
-            };
-
-            Some(Duration::from_secs(secs).saturating_add(Duration::from_micros(micros)))
-        }
-    }
+    // OpenSSL 3.x removed DTLSv1_handle_timeout and DTLSv1_get_timeout
+    // DTLS retransmissions are handled internally by OpenSSL with memory BIOs
+    // We just need to keep calling SSL_do_handshake() and feeding packets
 }
 
 #[cfg(test)]

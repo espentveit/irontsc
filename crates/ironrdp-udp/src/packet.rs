@@ -112,8 +112,12 @@ impl SourcePacket {
         data: Vec<u8>,
         ack_vector: Option<AckVectorHeader>,
         ack_of_ack: Option<AckOfAckVectorHeader>,
+        include_ack: bool,
     ) -> UdpResult<Self> {
         let mut flags = DatagramFlags::DATA;
+        if include_ack {
+            flags |= DatagramFlags::ACK;
+        }
         if ack_vector.is_some() {
             flags |= DatagramFlags::ACK_VECTOR;
         }
@@ -360,7 +364,7 @@ mod tests {
     #[test]
     fn test_source_packet_encoding_decoding() {
         let data = b"Hello, RDP-UDP!".to_vec();
-        let packet = SourcePacket::new(42, 100, 256, data.clone(), None, None).unwrap();
+        let packet = SourcePacket::new(42, 100, 256, data.clone(), None, None, false).unwrap();
         let encoded = packet.encode();
         let decoded = SourcePacket::decode(&encoded).unwrap();
 
