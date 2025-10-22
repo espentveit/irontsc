@@ -1,3 +1,5 @@
+use std::fmt;
+
 use bitflags::bitflags;
 use ironrdp_core::ReadCursor;
 
@@ -79,5 +81,16 @@ impl UdpProtocolVersion {
 
     pub fn from_raw(raw: u16) -> Self {
         Self(raw)
+    }
+}
+
+impl fmt::Display for UdpProtocolVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::V1 => write!(f, "RDPUDP v1 (0x0001)"),
+            Self::V2 => write!(f, "RDPUDP v2 (0x0002)"),
+            Self::V3 => write!(f, "RDPUDP v3 (0x0101)"),
+            other => write!(f, "RDPUDP 0x{:04X}", other.raw_value()),
+        }
     }
 }

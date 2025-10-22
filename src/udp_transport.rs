@@ -43,7 +43,7 @@ impl Default for UdpTransportConfig {
             local_addr: "0.0.0.0:0".parse().unwrap(),
             mode: TransportMode::Lossy, // Lossy mode better for video
             enable_fec: true,
-            protocol_version: UdpProtocolVersion::V1,
+            protocol_version: UdpProtocolVersion::V3,
             mtu: 1232,
             use_dtls: false, // Default to no DTLS (Standard RDP Security)
         }
@@ -330,7 +330,13 @@ impl UdpTransportManager {
                 _ = check_retransmit_interval.tick() => {
                     let mut conn = self.connection.lock().await;
                     let retransmits = conn.check_retransmits();
-                    let fec_packet = conn.check_fec_block().ok().flatten();
+                    let fec_packet = match conn.check_fec_block() {
+                        Ok(packet) => packet,
+                        Err(err) => {
+                            warn!("Failed to finalize FEC block: {}", err);
+                            None
+                        }
+                    };
                     let ack_packet = if conn.needs_keepalive() {
                         conn.create_ack().ok()
                     } else {
@@ -454,12 +460,22 @@ impl UdpTransportManager {
 
         debug!("Received SYN+ACK ({} bytes)", syn_ack.len());
 
-        // Process SYN+ACK
-        {
+        // Process SYN+ACK and capture negotiated parameters
+        let (negotiated_version, retransmit_timeout_ms) = {
             let mut conn = self.connection.lock().await;
             conn.process_syn_ack(&syn_ack)
                 .context("Failed to process SYN+ACK")?;
-        }
+            (
+                conn.protocol_version(),
+                conn.retransmit_timeout_ms(),
+            )
+        };
+
+        info!(
+            "UDP negotiated protocol version {} (retransmit timeout {} ms)",
+            negotiated_version,
+            retransmit_timeout_ms
+        );
 
         // MS-RDPEUDP handshake complete
         // Note: Per MS-RDPEUDP spec and observed behavior in working captures:
@@ -641,7 +657,10 @@ impl UdpTransportManager {
                 .send_data(data)
                 .context("Failed to create source packet")?;
 
-            if let Ok(Some(fec)) = conn.check_fec_block() {
+            if let Some(fec) = conn
+                .check_fec_block()
+                .context("Failed to finalize FEC block")?
+            {
                 fec_packet = Some(fec);
             }
 
@@ -721,7 +740,7 @@ pub async fn create_video_udp_transport(
         server_addr,
         mode: TransportMode::Lossy, // Best for video
         enable_fec: true,           // FEC helps recover lost frames
-    protocol_version: UdpProtocolVersion::V1,
+        protocol_version: UdpProtocolVersion::V3,
         ..Default::default()
     };
 
