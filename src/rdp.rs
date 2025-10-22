@@ -499,8 +499,8 @@ async fn establish_udp_transport(
         } else {
             TransportMode::Reliable
         },
-        enable_fec: true,
-        protocol_version: UdpProtocolVersion::V2,
+    enable_fec: true,
+    protocol_version: UdpProtocolVersion::V1,
         mtu: 1232,
         use_dtls,
     };
