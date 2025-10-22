@@ -82,9 +82,7 @@ impl Default for UdpConfig {
 /// Outgoing packet waiting for acknowledgment
 #[derive(Debug, Clone)]
 struct PendingPacket {
-    sequence_number: u32,
     data: Vec<u8>,
-    first_sent: Instant,
     last_sent: Instant,
     retransmit_count: u8,
 }
@@ -345,7 +343,7 @@ impl UdpConnection {
             include_ack,
         )?;
 
-        let encoded = packet.encode();
+        let encoded = packet.encode(self.config.protocol_version)?;
 
         // Mark first ACK as sent
         if include_ack {
@@ -358,9 +356,7 @@ impl UdpConnection {
             self.pending_packets.insert(
                 sequence_number,
                 PendingPacket {
-                    sequence_number,
                     data: encoded.clone(),
-                    first_sent: now,
                     last_sent: now,
                     retransmit_count: 0,
                 },
@@ -417,12 +413,12 @@ impl UdpConnection {
         // Clear the block for next round
         self.source_packets_in_block.clear();
 
-        Ok(Some(fec_packet.encode()))
+    Ok(Some(fec_packet.encode(self.config.protocol_version)?))
     }
 
     /// Process received source packet
     pub fn process_source_packet(&mut self, bytes: &[u8]) -> UdpResult<Vec<Vec<u8>>> {
-        let packet = SourcePacket::decode(bytes)?;
+    let packet = SourcePacket::decode(bytes, self.config.protocol_version)?;
 
         self.handle_ack_headers(
             &packet.header,
@@ -485,7 +481,7 @@ impl UdpConnection {
             self.first_ack_sent = true;
         }
         
-        Ok(packet.encode())
+    packet.encode(self.config.protocol_version)
     }
 
     /// Check if retransmission is needed and return packets to retransmit
@@ -530,7 +526,7 @@ impl UdpConnection {
 
     /// Process ACK packet from peer
     pub fn process_ack_packet(&mut self, bytes: &[u8]) -> UdpResult<()> {
-        let packet = AckPacket::decode(bytes)?;
+    let packet = AckPacket::decode(bytes, self.config.protocol_version)?;
         self.handle_ack_headers(
             &packet.header,
             packet.ack_vector.as_ref(),
@@ -603,7 +599,11 @@ impl UdpConnection {
         }
 
         let base_sequence_number = self.next_receive_sequence.wrapping_sub(1);
-        let ack_timestamp = current_timestamp_ms();
+        let ack_timestamp = match self.config.protocol_version {
+            UdpProtocolVersion::V1 => None,
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => Some(current_timestamp_ms()),
+            _ => None,
+        };
 
         Ok(Some(AckVectorHeader::new(
             base_sequence_number,
@@ -855,13 +855,17 @@ mod tests {
 
         // Simulate receiving sequence 1 before sequence 0
         let packet1 = SourcePacket::new(1, 0, 256, b"two".to_vec(), None, None, false).unwrap();
-        let encoded1 = packet1.encode();
+        let encoded1 = packet1
+            .encode(UdpProtocolVersion::V1)
+            .expect("encode source packet");
         let buffered = receiver.process_source_packet(&encoded1).unwrap();
         assert!(buffered.is_empty());
 
         // Now receive sequence 0, which should flush both
         let packet0 = SourcePacket::new(0, 0, 256, b"one".to_vec(), None, None, false).unwrap();
-        let encoded0 = packet0.encode();
+        let encoded0 = packet0
+            .encode(UdpProtocolVersion::V1)
+            .expect("encode source packet");
         let delivered = receiver.process_source_packet(&encoded0).unwrap();
         assert_eq!(delivered.len(), 2);
         assert_eq!(delivered[0], b"one".to_vec());

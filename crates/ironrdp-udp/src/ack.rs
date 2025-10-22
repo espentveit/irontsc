@@ -1,6 +1,7 @@
 use ironrdp_core::ReadCursor;
 
 use crate::error::{UdpError, UdpErrorExt as _, UdpResult};
+use crate::syndataex::UdpProtocolVersion;
 
 /// VECTOR_ELEMENT_STATE Enumeration (section 2.2.1.1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,18 +97,19 @@ pub struct AckVectorHeader {
     /// Base sequence number being acknowledged
     pub base_sequence_number: u32,
     /// Timestamp when the ACK was created (in milliseconds)
-    pub ack_timestamp: u32,
+    pub ack_timestamp: Option<u32>,
+    /// Optional gap between last received packet and ACK emission (RDPUDP2)
+    pub send_ack_time_gap_ms: Option<u8>,
     /// Vector of acknowledgment elements (RLE encoded)
     pub ack_vectors: Vec<AckVectorElement>,
 }
 
 impl AckVectorHeader {
     pub const NAME: &'static str = "RDPUDP_ACK_VECTOR_HEADER";
-    pub const FIXED_SIZE: usize = 12; // uBaseSeqNum (4) + uAckTimestamp (4) + uNumVectors (2) + uPadding (2)
 
     pub fn new(
         base_sequence_number: u32,
-        ack_timestamp: u32,
+        ack_timestamp: Option<u32>,
         ack_vectors: Vec<AckVectorElement>,
     ) -> UdpResult<Self> {
         if ack_vectors.is_empty() {
@@ -127,57 +129,43 @@ impl AckVectorHeader {
         Ok(Self {
             base_sequence_number,
             ack_timestamp,
+            send_ack_time_gap_ms: None,
             ack_vectors,
         })
     }
 
-    pub fn decode(cursor: &mut ReadCursor<'_>) -> UdpResult<Self> {
-        let base_sequence_number = cursor
-            .try_read_u32_be()
-            .map_err(|e| UdpError::decode(Self::NAME, e))?;
-
-        let ack_timestamp = cursor
-            .try_read_u32_be()
-            .map_err(|e| UdpError::decode(Self::NAME, e))?;
-
-        let num_vectors = cursor
-            .try_read_u16_be()
-            .map_err(|e| UdpError::decode(Self::NAME, e))?;
-
-        // Skip padding (2 bytes)
-        cursor
-            .try_read_u16_be()
-            .map_err(|e| UdpError::decode(Self::NAME, e))?;
-
-        let mut ack_vectors = Vec::with_capacity(num_vectors as usize);
-        for _ in 0..num_vectors {
-            let byte = cursor
-                .try_read_u8()
-                .map_err(|e| UdpError::decode(Self::NAME, e))?;
-            let element = AckVectorElement::from_byte(byte)?;
-            ack_vectors.push(element);
-        }
-
-        Ok(Self {
-            base_sequence_number,
-            ack_timestamp,
-            ack_vectors,
-        })
-    }
-
-    pub fn encode_into(&self, output: &mut Vec<u8>) {
-        output.extend_from_slice(&self.base_sequence_number.to_be_bytes());
-        output.extend_from_slice(&self.ack_timestamp.to_be_bytes());
-        output.extend_from_slice(&(self.ack_vectors.len() as u16).to_be_bytes());
-        output.extend_from_slice(&[0u8, 0u8]); // padding
-
-        for element in &self.ack_vectors {
-            output.push(element.to_byte());
+    pub fn decode(cursor: &mut ReadCursor<'_>, version: UdpProtocolVersion) -> UdpResult<Self> {
+        match version {
+            UdpProtocolVersion::V1 => Self::decode_v1(cursor),
+            UdpProtocolVersion::V2 => Self::decode_v2(cursor),
+            UdpProtocolVersion::V3 => Self::decode_v2(cursor),
+            _ => Err(UdpError::invalid_state(
+                Self::NAME,
+                "unsupported protocol version for ACK vector",
+            )),
         }
     }
 
-    pub fn size(&self) -> usize {
-        Self::FIXED_SIZE + self.ack_vectors.len()
+    pub fn encode_into(&self, output: &mut Vec<u8>, version: UdpProtocolVersion) -> UdpResult<()> {
+        match version {
+            UdpProtocolVersion::V1 => {
+                Self::encode_v1(output, &self.ack_vectors)?;
+                Ok(())
+            }
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
+                Self::encode_v2(
+                    output,
+                    self.base_sequence_number,
+                    self.ack_timestamp,
+                    self.send_ack_time_gap_ms,
+                    &self.ack_vectors,
+                )
+            }
+            _ => Err(UdpError::invalid_state(
+                Self::NAME,
+                "unsupported protocol version for ACK vector",
+            )),
+        }
     }
 }
 
@@ -190,23 +178,279 @@ pub struct AckOfAckVectorHeader {
 
 impl AckOfAckVectorHeader {
     pub const NAME: &'static str = "RDPUDP_ACK_OF_ACKVECTOR_HEADER";
-    pub const SIZE: usize = 4;
+    pub const SIZE_V1: usize = 4;
 
     pub fn new(sequence_number: u32) -> Self {
         Self { sequence_number }
     }
 
-    pub fn decode(cursor: &mut ReadCursor<'_>) -> UdpResult<Self> {
-        let sequence_number = cursor
-            .try_read_u32_be()
+    pub fn decode(cursor: &mut ReadCursor<'_>, version: UdpProtocolVersion) -> UdpResult<Self> {
+        match version {
+            UdpProtocolVersion::V1 => {
+                let sequence_number = cursor
+                    .try_read_u32_be()
+                    .map_err(|e| UdpError::decode(Self::NAME, e))?;
+                Ok(Self { sequence_number })
+            }
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
+                let sequence_low = cursor
+                    .try_read_u16_be()
+                    .map_err(|e| UdpError::decode(Self::NAME, e))?;
+                Ok(Self {
+                    sequence_number: sequence_low as u32,
+                })
+            }
+            _ => Err(UdpError::invalid_state(
+                Self::NAME,
+                "unsupported protocol version for ACK-of-ACK",
+            )),
+        }
+    }
+
+    pub fn encode_into(&self, output: &mut Vec<u8>, version: UdpProtocolVersion) -> UdpResult<()> {
+        match version {
+            UdpProtocolVersion::V1 => {
+                output.extend_from_slice(&self.sequence_number.to_be_bytes());
+                Ok(())
+            }
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
+                let lower = (self.sequence_number & 0xFFFF) as u16;
+                output.extend_from_slice(&lower.to_be_bytes());
+                Ok(())
+            }
+            _ => Err(UdpError::invalid_state(
+                Self::NAME,
+                "unsupported protocol version for ACK-of-ACK",
+            )),
+        }
+    }
+}
+
+impl AckVectorHeader {
+    fn decode_v1(cursor: &mut ReadCursor<'_>) -> UdpResult<Self> {
+        use ironrdp_core::NotEnoughBytesError;
+
+        let ack_vector_size = cursor
+            .try_read_u16_be()
+            .map_err(|e: NotEnoughBytesError| UdpError::decode(Self::NAME, e))?;
+
+        let mut ack_vectors = Vec::with_capacity(ack_vector_size as usize);
+        for _ in 0..ack_vector_size {
+            let byte = cursor
+                .try_read_u8()
+                .map_err(|e| UdpError::decode(Self::NAME, e))?;
+            ack_vectors.push(AckVectorElement::from_byte(byte)?);
+        }
+
+        // V1 structures are padded to a DWORD boundary
+        let consumed = 2 + ack_vector_size as usize;
+        let padding = (4 - (consumed % 4)) % 4;
+        for _ in 0..padding {
+            // Ignore padding bytes if present
+            if cursor.len() > 0 {
+                cursor
+                    .try_read_u8()
+                    .map_err(|e| UdpError::decode(Self::NAME, e))?;
+            }
+        }
+
+        Ok(Self {
+            base_sequence_number: 0,
+            ack_timestamp: None,
+            send_ack_time_gap_ms: None,
+            ack_vectors,
+        })
+    }
+
+    fn decode_v2(cursor: &mut ReadCursor<'_>) -> UdpResult<Self> {
+        use ironrdp_core::NotEnoughBytesError;
+
+        let base_sequence_low = cursor
+            .try_read_u16_be()
+            .map_err(|e: NotEnoughBytesError| UdpError::decode(Self::NAME, e))?;
+
+        let size_and_flag = cursor
+            .try_read_u8()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
-        Ok(Self { sequence_number })
+        let timestamp_present = (size_and_flag & 0x80) != 0;
+        let coded_size = (size_and_flag & 0x7F) as usize;
+
+        let ack_timestamp = if timestamp_present {
+            if cursor.len() < 3 {
+                return Err(UdpError::invalid_field(
+                    Self::NAME,
+                    "timestamp",
+                    "not enough bytes",
+                ));
+            }
+            let mut ts_bytes = [0u8; 4];
+            let ts_slice = cursor.read_slice(3);
+            ts_bytes[1..].copy_from_slice(ts_slice);
+            Some(u32::from_be_bytes(ts_bytes))
+        } else {
+            None
+        };
+
+        let send_ack_time_gap_ms = if timestamp_present {
+            Some(
+                cursor
+                    .try_read_u8()
+                    .map_err(|e| UdpError::decode(Self::NAME, e))?,
+            )
+        } else {
+            None
+        };
+
+        if cursor.len() < coded_size {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "AckVector",
+                "not enough bytes",
+            ));
+        }
+
+        let coded_bytes = cursor.read_slice(coded_size);
+
+        let ack_vectors = decode_coded_ack_vector(coded_bytes)?;
+
+        Ok(Self {
+            base_sequence_number: base_sequence_low as u32,
+            ack_timestamp,
+            send_ack_time_gap_ms,
+            ack_vectors,
+        })
     }
 
-    pub fn encode_into(&self, output: &mut Vec<u8>) {
-        output.extend_from_slice(&self.sequence_number.to_be_bytes());
+    fn encode_v1(output: &mut Vec<u8>, elements: &[AckVectorElement]) -> UdpResult<()> {
+        let size = elements.len();
+        if size > u16::MAX as usize {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "uAckVectorSize",
+                "too many ACK vector elements",
+            ));
+        }
+
+        output.extend_from_slice(&(size as u16).to_be_bytes());
+        for element in elements {
+            output.push(element.to_byte());
+        }
+
+        let consumed = 2 + size;
+        let padding = (4 - (consumed % 4)) % 4;
+        output.extend(std::iter::repeat(0u8).take(padding));
+
+        Ok(())
     }
+
+    fn encode_v2(
+        output: &mut Vec<u8>,
+        base_sequence_number: u32,
+        ack_timestamp: Option<u32>,
+        send_ack_time_gap_ms: Option<u8>,
+        elements: &[AckVectorElement],
+    ) -> UdpResult<()> {
+        let coded_vector = encode_coded_ack_vector(elements)?;
+        if coded_vector.len() > 0x7F {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "codedAckVecSize",
+                "coded ACK vector too large",
+            ));
+        }
+
+        output.extend_from_slice(&((base_sequence_number & 0xFFFF) as u16).to_be_bytes());
+
+        let mut size_and_flag = (coded_vector.len() as u8) & 0x7F;
+        if ack_timestamp.is_some() {
+            size_and_flag |= 0x80;
+        }
+        output.push(size_and_flag);
+
+        if let Some(ts) = ack_timestamp {
+            let ts_bytes = ts.to_be_bytes();
+            output.extend_from_slice(&ts_bytes[1..]);
+            output.push(send_ack_time_gap_ms.unwrap_or(0));
+        }
+
+        output.extend_from_slice(&coded_vector);
+        Ok(())
+    }
+}
+
+fn decode_coded_ack_vector(bytes: &[u8]) -> UdpResult<Vec<AckVectorElement>> {
+    let mut elements = Vec::new();
+
+    for &byte in bytes {
+        if (byte & 0x80) == 0 {
+            // State map mode (7 bits)
+            let mut run_state = None;
+            let mut run_length = 0u8;
+
+            for bit in (0..7).rev() {
+                let received = ((byte >> bit) & 0x01) != 0;
+                let state = if received {
+                    VectorElementState::DatagramReceived
+                } else {
+                    VectorElementState::DatagramNotYetReceived
+                };
+
+                if run_state == Some(state) && run_length < 64 {
+                    run_length += 1;
+                } else {
+                    if let Some(prev_state) = run_state.take() {
+                        elements.push(AckVectorElement::new(prev_state, run_length)?);
+                    }
+                    run_state = Some(state);
+                    run_length = 1;
+                }
+            }
+
+            if let Some(prev_state) = run_state {
+                elements.push(AckVectorElement::new(prev_state, run_length)?);
+            }
+        } else {
+            // Run-length mode
+            let state = if (byte & 0x40) != 0 {
+                VectorElementState::DatagramReceived
+            } else {
+                VectorElementState::DatagramNotYetReceived
+            };
+
+            let length = (byte & 0x3F) + 1;
+            elements.push(AckVectorElement::new(state, length)?);
+        }
+    }
+
+    Ok(elements)
+}
+
+fn encode_coded_ack_vector(elements: &[AckVectorElement]) -> UdpResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+
+    for element in elements {
+        let mut remaining = element.count();
+        let state_bit = match element.state {
+            VectorElementState::DatagramReceived => 0x40,
+            VectorElementState::DatagramNotYetReceived => 0x00,
+            _ => {
+                return Err(UdpError::invalid_state(
+                    AckVectorHeader::NAME,
+                    "unsupported ACK vector state for RDPUDP2",
+                ))
+            }
+        };
+
+        while remaining > 0 {
+            let chunk = remaining.min(64);
+            let byte = 0x80 | state_bit | ((chunk - 1) & 0x3F);
+            bytes.push(byte);
+            remaining -= chunk;
+        }
+    }
+
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -243,23 +487,25 @@ mod tests {
     }
 
     #[test]
-    fn test_ack_vector_header_encoding_decoding() {
+    fn test_ack_vector_header_encoding_decoding_v1() {
         let vectors = vec![
             AckVectorElement::new(VectorElementState::DatagramReceived, 5).unwrap(),
             AckVectorElement::new(VectorElementState::DatagramNotYetReceived, 2).unwrap(),
             AckVectorElement::new(VectorElementState::DatagramReceived, 10).unwrap(),
         ];
 
-        let header = AckVectorHeader::new(42, 1000, vectors.clone()).unwrap();
+        let header = AckVectorHeader::new(0, None, vectors.clone()).unwrap();
 
         let mut encoded = Vec::new();
-        header.encode_into(&mut encoded);
+        header
+            .encode_into(&mut encoded, UdpProtocolVersion::V1)
+            .unwrap();
 
         let mut cursor = ReadCursor::new(&encoded);
-        let decoded = AckVectorHeader::decode(&mut cursor).unwrap();
+        let decoded = AckVectorHeader::decode(&mut cursor, UdpProtocolVersion::V1).unwrap();
 
-        assert_eq!(decoded.base_sequence_number, 42);
-        assert_eq!(decoded.ack_timestamp, 1000);
+        assert_eq!(decoded.base_sequence_number, 0);
+        assert_eq!(decoded.ack_timestamp, None);
         assert_eq!(decoded.ack_vectors.len(), 3);
         assert_eq!(
             decoded.ack_vectors[0].state,
@@ -274,15 +520,54 @@ mod tests {
     }
 
     #[test]
-    fn test_ack_of_ack_vector() {
+    fn test_ack_vector_header_encoding_decoding_v2() {
+        let vectors = vec![
+            AckVectorElement::new(VectorElementState::DatagramReceived, 3).unwrap(),
+            AckVectorElement::new(VectorElementState::DatagramNotYetReceived, 1).unwrap(),
+        ];
+
+        let header = AckVectorHeader::new(1234, Some(0x00FF_FFEE), vectors.clone()).unwrap();
+
+        let mut encoded = Vec::new();
+        header
+            .encode_into(&mut encoded, UdpProtocolVersion::V2)
+            .unwrap();
+
+        let mut cursor = ReadCursor::new(&encoded);
+        let decoded = AckVectorHeader::decode(&mut cursor, UdpProtocolVersion::V2).unwrap();
+
+        assert_eq!(decoded.base_sequence_number, 1234 & 0xFFFF); // low 16 bits only
+        assert_eq!(decoded.ack_timestamp, Some(0x00FF_FFEE));
+        assert_eq!(decoded.ack_vectors.len(), vectors.len());
+    }
+
+    #[test]
+    fn test_ack_of_ack_vector_v1() {
         let header = AckOfAckVectorHeader::new(12345);
 
         let mut encoded = Vec::new();
-        header.encode_into(&mut encoded);
+        header
+            .encode_into(&mut encoded, UdpProtocolVersion::V1)
+            .unwrap();
 
         let mut cursor = ReadCursor::new(&encoded);
-        let decoded = AckOfAckVectorHeader::decode(&mut cursor).unwrap();
+        let decoded = AckOfAckVectorHeader::decode(&mut cursor, UdpProtocolVersion::V1).unwrap();
 
         assert_eq!(decoded.sequence_number, 12345);
+    }
+
+    #[test]
+    fn test_ack_of_ack_vector_v2() {
+        let header = AckOfAckVectorHeader::new(0xABCD_1234);
+
+        let mut encoded = Vec::new();
+        header
+            .encode_into(&mut encoded, UdpProtocolVersion::V2)
+            .unwrap();
+
+        let mut cursor = ReadCursor::new(&encoded);
+        let decoded = AckOfAckVectorHeader::decode(&mut cursor, UdpProtocolVersion::V2).unwrap();
+
+        assert_eq!(decoded.sequence_number, 0x1234);
     }
 }
