@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
 // Import UDP packet types for proper parsing
-use ironrdp_udp::SourcePacket;
+use ironrdp_udp::{SourcePacket, UdpProtocolVersion};
 
 /// H.264 video frame received via UDP
 #[derive(Debug, Clone)]
@@ -51,7 +51,7 @@ async fn udp_video_receiver_task(
                 trace!("📦 Received UDP packet: {} bytes", n);
 
                 // Parse RDPUDP packet using proper packet decoder
-                match SourcePacket::decode(&buffer[..n]) {
+                match SourcePacket::decode(&buffer[..n], UdpProtocolVersion::V1) {
                     Ok(packet) => {
                         let seq = packet.sequence_number();
                         let payload = &packet.data;
