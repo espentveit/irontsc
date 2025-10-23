@@ -493,7 +493,7 @@ async fn establish_udp_transport(
 
     let config = UdpTransportConfig {
         server_addr,
-        local_addr: SocketAddr::new(client_addr.ip(), 0),
+        local_addr: SocketAddr::new(client_addr.ip(), client_addr.port()),
         mode: if use_lossy_mode {
             TransportMode::Lossy
         } else {
@@ -555,24 +555,38 @@ async fn establish_rdpudp(
         );
     }
 
-    let bind_addr = SocketAddr::new(client_addr.ip(), 0);
-    debug!("Binding UDP socket to: {}", bind_addr);
+    let desired_bind_addr = SocketAddr::new(client_addr.ip(), client_addr.port());
+    debug!("Binding UDP socket to match TCP source: {}", desired_bind_addr);
 
-    let socket = match UdpSocket::bind(bind_addr).await {
+    let socket = match UdpSocket::bind(desired_bind_addr).await {
         Ok(socket) => socket,
         Err(err) => {
             warn!(
-                "Failed to bind to {}, trying UNSPECIFIED: {}",
-                bind_addr, err
+                "Failed to bind UDP to TCP source {} ({}), retrying with unspecified IP",
+                desired_bind_addr, err
             );
             let fallback_ip = match client_addr.ip() {
                 IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             };
 
-            UdpSocket::bind(SocketAddr::new(fallback_ip, 0))
-                .await
-                .with_context(|| format!("bind fallback UDP socket after error: {err}"))?
+            match UdpSocket::bind(SocketAddr::new(fallback_ip, client_addr.port())).await {
+                Ok(socket) => socket,
+                Err(fallback_err) => {
+                    warn!(
+                        "Fallback bind to {}:{} failed ({}); using ephemeral port",
+                        fallback_ip,
+                        client_addr.port(),
+                        fallback_err
+                    );
+
+                    UdpSocket::bind(SocketAddr::new(fallback_ip, 0))
+                        .await
+                        .with_context(|| format!(
+                            "bind fallback UDP socket after error: {fallback_err}"
+                        ))?
+                }
+            }
         }
     };
 
