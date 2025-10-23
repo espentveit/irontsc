@@ -493,7 +493,7 @@ async fn establish_udp_transport(
 
     let config = UdpTransportConfig {
         server_addr,
-        local_addr: SocketAddr::new(client_addr.ip(), client_addr.port()),
+        local_addr: SocketAddr::new(client_addr.ip(), 0), // Use ephemeral port
         mode: if use_lossy_mode {
             TransportMode::Lossy
         } else {
