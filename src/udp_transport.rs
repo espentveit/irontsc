@@ -204,28 +204,43 @@ impl UdpTransportManager {
         self.request_id = Some(request_id);
         self.security_cookie = Some(security_cookie);
 
-        // Compute cookie hash for MS-RDPEMT authentication (required for UDPv3)
-        // This hash authenticates the UDP connection to the RDP session
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&security_cookie);
-        let hash_raw: [u8; 32] = hasher.finalize().into();
+        // Check if security cookie is all zeros (server doesn't support/require authentication)
+        let cookie_is_zero = security_cookie.iter().all(|&b| b == 0);
 
-        // Apply 32-bit little-endian byte swap (per MS-RDPEUDP spec)
-        let mut cookie_hash = [0u8; 32];
-        for i in 0..8 {
-            let offset = i * 4;
-            cookie_hash[offset] = hash_raw[offset + 3];
-            cookie_hash[offset + 1] = hash_raw[offset + 2];
-            cookie_hash[offset + 2] = hash_raw[offset + 1];
-            cookie_hash[offset + 3] = hash_raw[offset];
-        }
+        if cookie_is_zero {
+            // Server doesn't require MS-RDPEMT authentication - use UDPv2 without cookie hash
+            warn!("⚠️  Security cookie is all zeros - server doesn't require MS-RDPEMT authentication");
+            warn!("   Using UDPv2 without cookie hash for compatibility");
 
-        // Set cookie hash on the UDP connection (will be included in SYN packet for UDPv3)
-        if let Ok(mut conn) = self.connection.try_lock() {
-            conn.set_cookie_hash(cookie_hash);
-            info!("✅ Cookie hash set for MS-RDPEMT authentication (UDPv3)");
-            info!("   Hash (first 16 bytes): {:02x?}", &cookie_hash[..16]);
+            // Set protocol version to V2 (doesn't require cookie hash)
+            if let Ok(mut conn) = self.connection.try_lock() {
+                conn.set_protocol_version(UdpProtocolVersion::V2);
+                info!("   Protocol version set to UDPv2 (0x0002)");
+            }
+        } else {
+            // Compute cookie hash for MS-RDPEMT authentication (required for UDPv3)
+            // This hash authenticates the UDP connection to the RDP session
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&security_cookie);
+            let hash_raw: [u8; 32] = hasher.finalize().into();
+
+            // Apply 32-bit little-endian byte swap (per MS-RDPEUDP spec)
+            let mut cookie_hash = [0u8; 32];
+            for i in 0..8 {
+                let offset = i * 4;
+                cookie_hash[offset] = hash_raw[offset + 3];
+                cookie_hash[offset + 1] = hash_raw[offset + 2];
+                cookie_hash[offset + 2] = hash_raw[offset + 1];
+                cookie_hash[offset + 3] = hash_raw[offset];
+            }
+
+            // Set cookie hash on the UDP connection (will be included in SYN packet for UDPv3)
+            if let Ok(mut conn) = self.connection.try_lock() {
+                conn.set_cookie_hash(cookie_hash);
+                info!("✅ Cookie hash set for MS-RDPEMT authentication (UDPv3)");
+                info!("   Hash (first 16 bytes): {:02x?}", &cookie_hash[..16]);
+            }
         }
     }
 
@@ -518,21 +533,11 @@ impl UdpTransportManager {
         debug!("Received SYN+ACK ({} bytes)", syn_ack.len());
 
         // Process SYN+ACK and capture negotiated parameters
-        let (negotiated_version, retransmit_timeout_ms, ack_packet) = {
+        let (negotiated_version, retransmit_timeout_ms) = {
             let mut conn = self.connection.lock().await;
             conn.process_syn_ack(&syn_ack)
                 .context("Failed to process SYN+ACK")?;
-            let negotiated_version = conn.protocol_version();
-            let retransmit_timeout_ms = conn.retransmit_timeout_ms();
-            let ack_packet = if self.use_dtls {
-                Some(
-                    conn.create_ack()
-                        .context("Failed to create UDP ACK packet")?,
-                )
-            } else {
-                None
-            };
-            (negotiated_version, retransmit_timeout_ms, ack_packet)
+            (conn.protocol_version(), conn.retransmit_timeout_ms())
         };
 
         info!(
@@ -540,22 +545,13 @@ impl UdpTransportManager {
             negotiated_version, retransmit_timeout_ms
         );
 
-        if let Some(ack_packet) = ack_packet {
-            self.socket
-                .send(&ack_packet)
-                .await
-                .context("Failed to send UDP ACK packet")?;
-            info!(
-                "Sent standalone ACK packet ({} bytes) to complete UDP handshake",
-                ack_packet.len()
-            );
-        }
+        // Per MS-RDPEUDP Section 1.4: Do NOT send standalone ACK packet
+        // The ACK flag will be automatically included in the first DATA packet (with DTLS ClientHello)
+        // by the connection state machine (see connection.rs:422)
 
-        // MS-RDPEUDP handshake complete
-        // Note: We send a standalone ACK first when DTLS is required so the server
-        // transitions to the data phase before we begin the DTLS handshake. In the
-        // non-DTLS case the ACK flag is carried by the first DATA packet as before.
-        info!("UDP handshake complete (SYN → SYN+ACK received), connection established");
+        // MS-RDPEUDP handshake is now SYN → SYN+ACK complete
+        // The final ACK will be included in the first DATA packet per MS-RDPEUDP spec
+        info!("UDP handshake complete (SYN → SYN+ACK received), ready for data transfer");
 
         Ok(())
     }

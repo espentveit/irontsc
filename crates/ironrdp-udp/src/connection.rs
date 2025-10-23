@@ -197,6 +197,12 @@ impl UdpConnection {
         self.cookie_hash = Some(cookie_hash);
     }
 
+    /// Set protocol version (e.g., to use V2 when server doesn't support V3 authentication)
+    pub fn set_protocol_version(&mut self, version: UdpProtocolVersion) {
+        self.config.protocol_version = version;
+        self.apply_protocol_version_defaults();
+    }
+
     /// Create a SYN packet to initiate connection
     pub fn create_syn(&mut self) -> UdpResult<Vec<u8>> {
         if self.state != ConnectionState::Idle {
