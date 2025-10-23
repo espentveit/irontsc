@@ -625,6 +625,11 @@ impl UdpConnection {
 
     /// Check if keepalive is needed
     pub fn needs_keepalive(&self) -> bool {
+        // Don't send keepalive ACKs until after the first DATA packet completes the 3-way handshake
+        if !self.first_ack_sent {
+            return false;
+        }
+
         let elapsed = Instant::now().duration_since(self.last_keepalive);
         elapsed >= Duration::from_millis(self.config.keepalive_interval_ms)
     }
