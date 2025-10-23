@@ -7,6 +7,65 @@ use crate::header::FecHeader;
 use crate::payload::{FecPayloadHeader, PayloadPrefix, SourcePayloadHeader};
 use crate::syndataex::UdpProtocolVersion;
 
+fn ack_of_ack_encoded_length(version: UdpProtocolVersion) -> usize {
+    match version {
+        UdpProtocolVersion::V1 => AckOfAckVectorHeader::SIZE_V1,
+        UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => 2,
+        _ => AckOfAckVectorHeader::SIZE_V1,
+    }
+}
+
+fn decode_ack_vector_if_present(
+    context: &'static str,
+    header: &FecHeader,
+    cursor: &mut ReadCursor<'_>,
+    version: UdpProtocolVersion,
+    require: bool,
+    min_remaining: usize,
+) -> UdpResult<Option<AckVectorHeader>> {
+    if !header.flags.contains(DatagramFlags::ACK) || header.flags.contains(DatagramFlags::SYN) {
+        return Ok(None);
+    }
+
+    if cursor.len() == 0 {
+        return if require {
+            Err(UdpError::invalid_field(
+                context,
+                "AckVector",
+                "expected ACK vector bytes",
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+
+    let mut preview = cursor.clone();
+    match AckVectorHeader::decode(&mut preview, version) {
+        Ok(vector) => {
+            if preview.len() < min_remaining {
+                return if require {
+                    Err(UdpError::invalid_field(
+                        context,
+                        "AckVector",
+                        "not enough bytes for remaining fields",
+                    ))
+                } else {
+                    Ok(None)
+                };
+            }
+            *cursor = preview;
+            Ok(Some(vector))
+        }
+        Err(err) => {
+            if require {
+                Err(err)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// ACK packet sent during the data transfer phase
 #[derive(Debug, Clone)]
 pub struct AckPacket {
@@ -25,9 +84,6 @@ impl AckPacket {
         ack_of_ack: Option<AckOfAckVectorHeader>,
     ) -> Self {
         let mut flags = DatagramFlags::ACK;
-        if ack_vector.is_some() {
-            flags |= DatagramFlags::ACK_VECTOR;
-        }
         if ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK_OF_ACKS;
         }
@@ -57,11 +113,20 @@ impl AckPacket {
             ));
         }
 
-        let ack_vector = if header.flags.contains(DatagramFlags::ACK_VECTOR) {
-            Some(AckVectorHeader::decode(&mut cursor, version)?)
+        let ack_of_ack_len = if header.flags.contains(DatagramFlags::ACK_OF_ACKS) {
+            ack_of_ack_encoded_length(version)
         } else {
-            None
+            0
         };
+
+        let ack_vector = decode_ack_vector_if_present(
+            Self::NAME,
+            &header,
+            &mut cursor,
+            version,
+            true,
+            ack_of_ack_len,
+        )?;
 
         let ack_of_ack = if header.flags.contains(DatagramFlags::ACK_OF_ACKS) {
             Some(AckOfAckVectorHeader::decode(&mut cursor, version)?)
@@ -107,7 +172,8 @@ impl SourcePacket {
     pub const NAME: &'static str = "RDPUDP_SOURCE_PACKET";
 
     pub fn new(
-        sequence_number: u32,
+        coded_sequence_number: u32,
+        source_sequence_number: u32,
         sn_source_ack: u32,
         receive_window_size: u16,
         data: Vec<u8>,
@@ -116,11 +182,8 @@ impl SourcePacket {
         include_ack: bool,
     ) -> UdpResult<Self> {
         let mut flags = DatagramFlags::DATA;
-        if include_ack {
+        if include_ack || ack_vector.is_some() || ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK;
-        }
-        if ack_vector.is_some() {
-            flags |= DatagramFlags::ACK_VECTOR;
         }
         if ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK_OF_ACKS;
@@ -135,7 +198,7 @@ impl SourcePacket {
         // Payload length includes the source header (4 bytes) + data
         let payload_length = (SourcePayloadHeader::SIZE + data.len()) as u16;
         let payload_prefix = PayloadPrefix::new(payload_length);
-        let source_header = SourcePayloadHeader::new(sequence_number);
+        let source_header = SourcePayloadHeader::new(coded_sequence_number, source_sequence_number);
 
         Ok(Self {
             header,
@@ -159,11 +222,32 @@ impl SourcePacket {
             ));
         }
 
-        let ack_vector = if header.flags.contains(DatagramFlags::ACK_VECTOR) {
-            Some(AckVectorHeader::decode(&mut cursor, version)?)
+        if header.flags.contains(DatagramFlags::ACK_OF_ACKS)
+            && !header.flags.contains(DatagramFlags::ACK)
+        {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "uFlags",
+                "ACK_OF_ACKS flag requires ACK flag",
+            ));
+        }
+
+        let ack_of_ack_len = if header.flags.contains(DatagramFlags::ACK_OF_ACKS) {
+            ack_of_ack_encoded_length(version)
         } else {
-            None
+            0
         };
+
+        let min_remaining = ack_of_ack_len + PayloadPrefix::SIZE + SourcePayloadHeader::SIZE;
+
+        let ack_vector = decode_ack_vector_if_present(
+            Self::NAME,
+            &header,
+            &mut cursor,
+            version,
+            false,
+            min_remaining,
+        )?;
 
         let ack_of_ack = if header.flags.contains(DatagramFlags::ACK_OF_ACKS) {
             Some(AckOfAckVectorHeader::decode(&mut cursor, version)?)
@@ -211,7 +295,11 @@ impl SourcePacket {
     }
 
     pub fn sequence_number(&self) -> u32 {
-        self.source_header.sequence_number
+        self.source_header.sn_source_start
+    }
+
+    pub fn coded_sequence_number(&self) -> u32 {
+        self.source_header.sn_coded
     }
 }
 
@@ -238,8 +326,8 @@ impl FecPacket {
         ack_of_ack: Option<AckOfAckVectorHeader>,
     ) -> UdpResult<Self> {
         let mut flags = DatagramFlags::DATA | DatagramFlags::FEC;
-        if ack_vector.is_some() {
-            flags |= DatagramFlags::ACK_VECTOR;
+        if ack_vector.is_some() || ack_of_ack.is_some() {
+            flags |= DatagramFlags::ACK;
         }
         if ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK_OF_ACKS;
@@ -285,11 +373,32 @@ impl FecPacket {
             ));
         }
 
-        let ack_vector = if header.flags.contains(DatagramFlags::ACK_VECTOR) {
-            Some(AckVectorHeader::decode(&mut cursor, version)?)
+        if header.flags.contains(DatagramFlags::ACK_OF_ACKS)
+            && !header.flags.contains(DatagramFlags::ACK)
+        {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "uFlags",
+                "ACK_OF_ACKS flag requires ACK flag",
+            ));
+        }
+
+        let ack_of_ack_len = if header.flags.contains(DatagramFlags::ACK_OF_ACKS) {
+            ack_of_ack_encoded_length(version)
         } else {
-            None
+            0
         };
+
+        let min_remaining = ack_of_ack_len + PayloadPrefix::SIZE + FecPayloadHeader::SIZE;
+
+        let ack_vector = decode_ack_vector_if_present(
+            Self::NAME,
+            &header,
+            &mut cursor,
+            version,
+            false,
+            min_remaining,
+        )?;
 
         let ack_of_ack = if header.flags.contains(DatagramFlags::ACK_OF_ACKS) {
             Some(AckOfAckVectorHeader::decode(&mut cursor, version)?)
@@ -367,20 +476,21 @@ mod tests {
     #[test]
     fn test_source_packet_encoding_decoding() {
         let data = b"Hello, RDP-UDP!".to_vec();
-        let packet = SourcePacket::new(42, 100, 256, data.clone(), None, None, false).unwrap();
+        let packet = SourcePacket::new(42, 42, 100, 256, data.clone(), None, None, false).unwrap();
         let encoded = packet
             .encode(UdpProtocolVersion::V1)
             .expect("encode SOURCE packet");
         let decoded = SourcePacket::decode(&encoded, UdpProtocolVersion::V1).unwrap();
 
         assert_eq!(decoded.sequence_number(), 42);
+        assert_eq!(decoded.coded_sequence_number(), 42);
         assert_eq!(decoded.header.sn_source_ack, 100);
         assert_eq!(decoded.data, data);
     }
 
     #[test]
     fn test_fec_packet_encoding_decoding() {
-        let fec_header = FecPayloadHeader::new(100, 5, 10, 2);
+        let fec_header = FecPayloadHeader::new(200, 100, 9, 2);
         let fec_data = vec![0xAA; 128];
 
         let packet = FecPacket::new(200, 256, fec_header, fec_data.clone(), None, None).unwrap();
@@ -390,7 +500,8 @@ mod tests {
         let decoded = FecPacket::decode(&encoded, UdpProtocolVersion::V1).unwrap();
 
         assert_eq!(decoded.header.sn_source_ack, 200);
-        assert_eq!(decoded.fec_header.sn_coded, 100);
+        assert_eq!(decoded.fec_header.sn_coded, 200);
+        assert_eq!(decoded.fec_header.sn_source_start, 100);
         assert_eq!(decoded.fec_header.fec_index, 2);
         assert_eq!(decoded.fec_data, fec_data);
     }

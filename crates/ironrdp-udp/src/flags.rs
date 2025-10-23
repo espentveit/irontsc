@@ -10,7 +10,6 @@ bitflags! {
         const FEC = 0x0010;
         const CN = 0x0020;
         const CWR = 0x0040;
-        const ACK_VECTOR = 0x0080; // Same as SACK_OPTION
         const ACK_OF_ACKS = 0x0100;
         const SYNLOSSY = 0x0200;
         const ACKDELAYED = 0x0400;

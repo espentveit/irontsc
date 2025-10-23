@@ -186,8 +186,10 @@ mod tests {
         } else {
             None
         };
-        let packet =
-            SourcePacket::new(sequence, sequence, 256, payload, ack_vector, None, false).unwrap();
+        let packet = SourcePacket::new(
+            sequence, sequence, sequence, 256, payload, ack_vector, None, false,
+        )
+        .unwrap();
         packet.encode(version).unwrap()
     }
 

@@ -180,6 +180,30 @@ impl UdpTransportManager {
     pub fn set_tunnel_params(&mut self, request_id: u32, security_cookie: [u8; 16]) {
         self.request_id = Some(request_id);
         self.security_cookie = Some(security_cookie);
+
+        // Compute cookie hash for MS-RDPEMT authentication (required for UDPv3)
+        // This hash authenticates the UDP connection to the RDP session
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&security_cookie);
+        let hash_raw: [u8; 32] = hasher.finalize().into();
+
+        // Apply 32-bit little-endian byte swap (per MS-RDPEUDP spec)
+        let mut cookie_hash = [0u8; 32];
+        for i in 0..8 {
+            let offset = i * 4;
+            cookie_hash[offset] = hash_raw[offset + 3];
+            cookie_hash[offset + 1] = hash_raw[offset + 2];
+            cookie_hash[offset + 2] = hash_raw[offset + 1];
+            cookie_hash[offset + 3] = hash_raw[offset];
+        }
+
+        // Set cookie hash on the UDP connection (will be included in SYN packet for UDPv3)
+        if let Ok(mut conn) = self.connection.try_lock() {
+            conn.set_cookie_hash(cookie_hash);
+            info!("✅ Cookie hash set for MS-RDPEMT authentication (UDPv3)");
+            info!("   Hash (first 16 bytes): {:02x?}", &cookie_hash[..16]);
+        }
     }
 
     /// Run the UDP transport manager
@@ -485,11 +509,7 @@ impl UdpTransportManager {
             } else {
                 None
             };
-            (
-                negotiated_version,
-                retransmit_timeout_ms,
-                ack_packet,
-            )
+            (negotiated_version, retransmit_timeout_ms, ack_packet)
         };
 
         info!(
@@ -508,10 +528,10 @@ impl UdpTransportManager {
             );
         }
 
-    // MS-RDPEUDP handshake complete
-    // Note: We send a standalone ACK first when DTLS is required so the server
-    // transitions to the data phase before we begin the DTLS handshake. In the
-    // non-DTLS case the ACK flag is carried by the first DATA packet as before.
+        // MS-RDPEUDP handshake complete
+        // Note: We send a standalone ACK first when DTLS is required so the server
+        // transitions to the data phase before we begin the DTLS handshake. In the
+        // non-DTLS case the ACK flag is carried by the first DATA packet as before.
         info!("UDP handshake complete (SYN → SYN+ACK received), connection established");
 
         Ok(())
