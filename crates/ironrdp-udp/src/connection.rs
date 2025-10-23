@@ -70,7 +70,7 @@ impl Default for UdpConfig {
         Self {
             mtu: 1232, // Default MTU from spec
             initial_sequence_number: 0,
-            receive_window_size: 256,
+            receive_window_size: 64, // Match Windows RDP client behavior
             mode: TransportMode::Reliable,
             protocol_version: UdpProtocolVersion::V1,
             enable_fec: true,
@@ -371,18 +371,9 @@ impl UdpConnection {
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
                 let negotiated_version = self.config.protocol_version.min(their_version);
-                let requires_cookie =
-                    their_version.raw_value() >= UdpProtocolVersion::V3.raw_value();
-                let missing_cookie =
-                    requires_cookie && !Self::cookie_hash_present(syn_ex.cookie_hash);
 
-                if missing_cookie {
-                    return Err(UdpError::invalid_field(
-                        SynDataEx::NAME,
-                        "cookieHash",
-                        "UDPv3 handshake requires cookie hash",
-                    ));
-                }
+                // Note: Cookie hash is NOT required in server's SYN+ACK response
+                // Per MS-RDPEUDP spec, cookie hash is only required in CLIENT's SYN packet
 
                 self.config.protocol_version = negotiated_version;
                 self.apply_protocol_version_defaults();

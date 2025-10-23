@@ -1,6 +1,7 @@
 /// UDP Transport Manager for RDP
 ///
 /// Handles UDP-based multitransport for RDP, optimized for H.264 video streaming
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,15 +111,37 @@ impl UdpTransportManager {
         mpsc::UnboundedReceiver<UdpTransportEvent>,
     )> {
         // Create UDP socket
-        let socket = UdpSocket::bind(config.local_addr)
-            .await
-            .context("Failed to bind UDP socket")?;
-
-        info!(
-            "UDP socket bound to {} for server {}",
-            socket.local_addr()?,
-            config.server_addr
-        );
+        let desired_addr = config.local_addr;
+        let socket = match UdpSocket::bind(desired_addr).await {
+            Ok(socket) => {
+                info!(
+                    "UDP socket bound to {} for server {}",
+                    socket.local_addr()?,
+                    config.server_addr
+                );
+                socket
+            }
+            Err(err) if err.kind() == ErrorKind::AddrInUse && desired_addr.port() != 0 => {
+                warn!(
+                    "UDP bind failed for {} ({}); falling back to ephemeral port",
+                    desired_addr,
+                    err
+                );
+                let fallback_addr = SocketAddr::new(desired_addr.ip(), 0);
+                let socket = UdpSocket::bind(fallback_addr)
+                    .await
+                    .context("Failed to bind UDP socket with ephemeral port")?;
+                info!(
+                    "UDP socket rebound to {} for server {}",
+                    socket.local_addr()?,
+                    config.server_addr
+                );
+                socket
+            }
+            Err(err) => {
+                return Err(err).context("Failed to bind UDP socket");
+            }
+        };
 
         // Connect to server
         socket
@@ -130,7 +153,7 @@ impl UdpTransportManager {
         let udp_config = UdpConfig {
             mtu: config.mtu,
             initial_sequence_number: rand::random(),
-            receive_window_size: 256,
+            receive_window_size: 64, // Match Windows RDP client behavior
             mode: config.mode,
             protocol_version: config.protocol_version,
             enable_fec: config.enable_fec,
