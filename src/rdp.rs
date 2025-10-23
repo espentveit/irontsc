@@ -1838,30 +1838,43 @@ async fn active_session<T: RdpEventSender + Clone>(
                         );
                     }
 
+                    // Check if security cookie is all zeros (server doesn't support/require authentication)
+                    let cookie_is_zero = request_info.security_cookie.iter().all(|&b| b == 0);
+
                     // Calculate SHA-256 hash of security cookie for UDP authentication
-                    let mut hasher = Sha256::new();
-                    hasher.update(&request_info.security_cookie);
-                    let hash_raw: [u8; 32] = hasher.finalize().into();
+                    // Only compute hash if cookie is non-zero (server supports MS-RDPEMT auth)
+                    let cookie_hash = if !cookie_is_zero {
+                        let mut hasher = Sha256::new();
+                        hasher.update(&request_info.security_cookie);
+                        let hash_raw: [u8; 32] = hasher.finalize().into();
 
-                    // CRITICAL: The hash must be byte-swapped in 4-byte (32-bit) chunks to little-endian
-                    // Windows RDP client does this transformation before sending the hash
-                    let mut cookie_hash = [0u8; 32];
-                    for i in 0..8 {
-                        let offset = i * 4;
-                        cookie_hash[offset] = hash_raw[offset + 3];
-                        cookie_hash[offset + 1] = hash_raw[offset + 2];
-                        cookie_hash[offset + 2] = hash_raw[offset + 1];
-                        cookie_hash[offset + 3] = hash_raw[offset];
-                    }
+                        // CRITICAL: The hash must be byte-swapped in 4-byte (32-bit) chunks to little-endian
+                        // Windows RDP client does this transformation before sending the hash
+                        let mut cookie_hash = [0u8; 32];
+                        for i in 0..8 {
+                            let offset = i * 4;
+                            cookie_hash[offset] = hash_raw[offset + 3];
+                            cookie_hash[offset + 1] = hash_raw[offset + 2];
+                            cookie_hash[offset + 2] = hash_raw[offset + 1];
+                            cookie_hash[offset + 3] = hash_raw[offset];
+                        }
 
-                    if !is_duplicate {
-                        info!("   request_id={}, Cookie Hash (SHA-256 raw): {:02x?}", request_id, hash_raw);
-                        info!(
-                            "   request_id={}, Cookie Hash (LE-swapped for UDP): {:02x?}",
-                            request_id,
-                            cookie_hash
-                        );
-                    }
+                        if !is_duplicate {
+                            info!("   request_id={}, Cookie Hash (SHA-256 raw): {:02x?}", request_id, hash_raw);
+                            info!(
+                                "   request_id={}, Cookie Hash (LE-swapped for UDP): {:02x?}",
+                                request_id,
+                                cookie_hash
+                            );
+                        }
+                        cookie_hash
+                    } else {
+                        if !is_duplicate {
+                            warn!("   request_id={}, Security cookie is all zeros - server doesn't require MS-RDPEMT authentication", request_id);
+                            warn!("   request_id={}, Will use UDPv2 without cookie hash", request_id);
+                        }
+                        [0u8; 32] // All-zero hash indicates no authentication
+                    };
 
                     // Only start UDP handshake if this is a new request (not a duplicate)
                     if !is_duplicate {
