@@ -122,6 +122,10 @@ pub struct UdpConnection {
     last_keepalive: Instant,
     last_ack_sent: Instant,
 
+    // ACK-of-ACK tracking (section 2.2.2.6)
+    pending_ack_of_ack: Option<u32>,
+    last_ack_of_ack_sent: Option<u32>,
+
     // Remote peer info
     remote_mtu: u16,
     remote_window_size: u16,
@@ -148,6 +152,8 @@ impl UdpConnection {
             source_packets_in_block: Vec::new(),
             last_keepalive: Instant::now(),
             last_ack_sent: Instant::now(),
+            pending_ack_of_ack: None,
+            last_ack_of_ack_sent: None,
             remote_mtu: 1232,
             remote_window_size: 256,
             first_ack_sent: false,
@@ -275,13 +281,16 @@ impl UdpConnection {
 
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
-                // Negotiate protocol version
-                let our_version = self.config.protocol_version;
-                self.config.protocol_version = our_version.min(their_version);
+                let negotiated_version = self.config.protocol_version.min(their_version);
+                let requires_cookie =
+                    their_version.raw_value() >= UdpProtocolVersion::V3.raw_value();
+                let missing_cookie =
+                    requires_cookie && !Self::cookie_hash_present(syn_ex.cookie_hash);
+
+                self.config.protocol_version = negotiated_version;
                 self.apply_protocol_version_defaults();
 
-                // UDPv3 requires a valid cookie hash
-                if their_version >= UdpProtocolVersion::V3 && !Self::cookie_hash_present(syn_ex.cookie_hash) {
+                if missing_cookie {
                     return Err(UdpError::invalid_field(
                         SynDataEx::NAME,
                         "cookieHash",
@@ -335,8 +344,6 @@ impl UdpConnection {
         self.state = ConnectionState::Connected;
         Ok(packet.to_padded_bytes())
     }
-
-    /// Process received SYN+ACK packet (client-side)
     pub fn process_syn_ack(&mut self, bytes: &[u8]) -> UdpResult<()> {
         if self.state != ConnectionState::SynSent {
             return Err(UdpError::invalid_state(
@@ -363,9 +370,13 @@ impl UdpConnection {
 
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
-                if their_version >= UdpProtocolVersion::V3
-                    && !Self::cookie_hash_present(syn_ex.cookie_hash)
-                {
+                let negotiated_version = self.config.protocol_version.min(their_version);
+                let requires_cookie =
+                    their_version.raw_value() >= UdpProtocolVersion::V3.raw_value();
+                let missing_cookie =
+                    requires_cookie && !Self::cookie_hash_present(syn_ex.cookie_hash);
+
+                if missing_cookie {
                     return Err(UdpError::invalid_field(
                         SynDataEx::NAME,
                         "cookieHash",
@@ -373,8 +384,7 @@ impl UdpConnection {
                     ));
                 }
 
-                let our_version = self.config.protocol_version;
-                self.config.protocol_version = our_version.min(their_version);
+                self.config.protocol_version = negotiated_version;
                 self.apply_protocol_version_defaults();
             }
         }
@@ -404,6 +414,11 @@ impl UdpConnection {
         } else {
             None // Force no ACK vector for first DATA packet
         };
+        let ack_of_ack = if ack_vector.is_some() {
+            self.take_pending_ack_of_ack()
+        } else {
+            None
+        };
 
         // MS-RDPEUDP: First data packet after SYN+ACK MUST have ACK flag set
         // to complete the 3-way handshake (Section 1.4)
@@ -428,7 +443,7 @@ impl UdpConnection {
             self.config.receive_window_size,
             data.clone(),
             ack_vector.clone(),
-            None,
+            ack_of_ack,
             include_ack,
         )?;
 
@@ -490,6 +505,11 @@ impl UdpConnection {
         );
 
         let ack_vector = self.build_ack_vector()?;
+        let ack_of_ack = if ack_vector.is_some() {
+            self.take_pending_ack_of_ack()
+        } else {
+            None
+        };
 
         let fec_packet = crate::packet::FecPacket::new(
             self.last_ack_received,
@@ -497,7 +517,7 @@ impl UdpConnection {
             fec_header,
             fec_data,
             ack_vector,
-            None,
+            ack_of_ack,
         )?;
 
         // Clear the block for next round
@@ -557,12 +577,17 @@ impl UdpConnection {
     /// Create an ACK packet
     pub fn create_ack(&mut self) -> UdpResult<Vec<u8>> {
         let ack_vector = self.build_ack_vector()?;
+        let ack_of_ack = if ack_vector.is_some() {
+            self.take_pending_ack_of_ack()
+        } else {
+            None
+        };
         let sn_source_ack = self.next_receive_sequence.wrapping_sub(1);
         let packet = AckPacket::new(
             sn_source_ack,
             self.config.receive_window_size,
             ack_vector,
-            None,
+            ack_of_ack,
         );
 
         self.last_ack_sent = Instant::now();
@@ -715,6 +740,32 @@ impl UdpConnection {
         }
         self.last_ack_received = header.sn_source_ack;
         self.last_keepalive = Instant::now();
+        self.schedule_ack_of_ack(header.sn_source_ack);
+    }
+
+    fn schedule_ack_of_ack(&mut self, sequence: u32) {
+        if let Some(last_sent) = self.last_ack_of_ack_sent {
+            if !sequence_gt(sequence, last_sent) {
+                return;
+            }
+        }
+
+        self.pending_ack_of_ack = Some(sequence);
+    }
+
+    fn take_pending_ack_of_ack(&mut self) -> Option<AckOfAckVectorHeader> {
+        let sequence = self.pending_ack_of_ack?;
+
+        if let Some(last_sent) = self.last_ack_of_ack_sent {
+            if !sequence_gt(sequence, last_sent) {
+                self.pending_ack_of_ack = None;
+                return None;
+            }
+        }
+
+        self.pending_ack_of_ack = None;
+        self.last_ack_of_ack_sent = Some(sequence);
+        Some(AckOfAckVectorHeader::new(sequence))
     }
 
     fn remove_acked_upto(&mut self, sequence: u32) {
@@ -826,6 +877,10 @@ fn sequence_leq(a: u32, b: u32) -> bool {
         let diff = b.wrapping_sub(a);
         diff < (1u32 << 31)
     }
+}
+
+fn sequence_gt(a: u32, b: u32) -> bool {
+    a != b && !sequence_leq(a, b)
 }
 
 #[cfg(test)]
@@ -1102,5 +1157,56 @@ mod tests {
         assert_eq!(delivered.len(), 2);
         assert_eq!(delivered[0], b"one".to_vec());
         assert_eq!(delivered[1], b"two".to_vec());
+    }
+
+    #[test]
+    fn ack_of_ack_is_emitted_after_peer_ack() {
+        let config = UdpConfig::default();
+        let mut conn = UdpConnection::new(config.clone());
+        conn.state = ConnectionState::Connected;
+        conn.reset_receive_state(0);
+
+        conn.send_data(b"client-data".to_vec())
+            .expect("send client data");
+
+        let ack_vector = AckVectorHeader::new(
+            0,
+            None,
+            vec![AckVectorElement::new(VectorElementState::DatagramReceived, 1).unwrap()],
+        )
+        .expect("create ack vector");
+        let peer_ack = AckPacket::new(0, config.receive_window_size, Some(ack_vector), None);
+        let version = conn.protocol_version();
+        let encoded_ack = peer_ack.encode(version).expect("encode ack");
+        conn.process_ack_packet(&encoded_ack)
+            .expect("process peer ack");
+
+        conn.next_receive_sequence = 1;
+        conn.ack_states
+            .push_back(VectorElementState::DatagramReceived);
+
+        let ack_bytes = conn.create_ack().expect("create ack");
+        let parsed = AckPacket::decode(&ack_bytes, version).expect("decode ack");
+        let ack_of_ack = parsed
+            .ack_of_ack
+            .expect("expected ACK-of-ACK header to be present");
+        assert_eq!(ack_of_ack.sequence_number, 0);
+    }
+
+    #[test]
+    fn ack_of_ack_not_emitted_without_pending_ack() {
+        let config = UdpConfig::default();
+        let mut conn = UdpConnection::new(config.clone());
+        conn.state = ConnectionState::Connected;
+        conn.reset_receive_state(0);
+
+        let version = conn.protocol_version();
+        conn.next_receive_sequence = 1;
+        conn.ack_states
+            .push_back(VectorElementState::DatagramReceived);
+
+        let ack_bytes = conn.create_ack().expect("create ack");
+        let parsed = AckPacket::decode(&ack_bytes, version).expect("decode ack");
+        assert!(parsed.ack_of_ack.is_none());
     }
 }
