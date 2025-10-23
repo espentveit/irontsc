@@ -37,28 +37,40 @@ impl PayloadPrefix {
 /// This header is present in source packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourcePayloadHeader {
-    /// Sequence number of this source packet
-    pub sequence_number: u32,
+    /// Coded sequence number for this packet (snCoded)
+    pub sn_coded: u32,
+    /// Source sequence number for the payload (snSourceStart)
+    pub sn_source_start: u32,
 }
 
 impl SourcePayloadHeader {
     pub const NAME: &'static str = "RDPUDP_SOURCE_PAYLOAD_HEADER";
-    pub const SIZE: usize = 4;
+    pub const SIZE: usize = 8;
 
-    pub fn new(sequence_number: u32) -> Self {
-        Self { sequence_number }
+    pub fn new(sn_coded: u32, sn_source_start: u32) -> Self {
+        Self {
+            sn_coded,
+            sn_source_start,
+        }
     }
 
     pub fn decode(cursor: &mut ReadCursor<'_>) -> UdpResult<Self> {
-        let sequence_number = cursor
+        let sn_coded = cursor
+            .try_read_u32_be()
+            .map_err(|e| UdpError::decode(Self::NAME, e))?;
+        let sn_source_start = cursor
             .try_read_u32_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
-        Ok(Self { sequence_number })
+        Ok(Self {
+            sn_coded,
+            sn_source_start,
+        })
     }
 
     pub fn encode_into(&self, output: &mut Vec<u8>) {
-        output.extend_from_slice(&self.sequence_number.to_be_bytes());
+        output.extend_from_slice(&self.sn_coded.to_be_bytes());
+        output.extend_from_slice(&self.sn_source_start.to_be_bytes());
     }
 }
 
@@ -68,23 +80,23 @@ impl SourcePayloadHeader {
 /// the source packets that were used to generate the FEC packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FecPayloadHeader {
-    /// Sequence number of the first source packet in the FEC block
+    /// Sequence number assigned to this FEC packet (snCoded)
     pub sn_coded: u32,
-    /// Index within the FEC block (starting from 0)
-    pub sn_source_start: u8,
-    /// Number of source packets covered by this FEC packet
+    /// First source sequence number protected by this FEC packet (snSourceStart)
+    pub sn_source_start: u32,
+    /// Difference between last and first source sequence number in the block (uRange)
     pub urange: u8,
-    /// Index of this FEC packet within the FEC block
+    /// Index of this FEC packet within the block (uFecIndex)
     pub fec_index: u8,
-    /// Padding byte (reserved, must be 0)
-    pub u_padding: u8,
+    /// Reserved padding (MUST be zero)
+    pub u_padding: u16,
 }
 
 impl FecPayloadHeader {
     pub const NAME: &'static str = "RDPUDP_FEC_PAYLOAD_HEADER";
-    pub const SIZE: usize = 8;
+    pub const SIZE: usize = 12;
 
-    pub fn new(sn_coded: u32, sn_source_start: u8, urange: u8, fec_index: u8) -> Self {
+    pub fn new(sn_coded: u32, sn_source_start: u32, urange: u8, fec_index: u8) -> Self {
         Self {
             sn_coded,
             sn_source_start,
@@ -100,7 +112,7 @@ impl FecPayloadHeader {
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
         let sn_source_start = cursor
-            .try_read_u8()
+            .try_read_u32_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
         let urange = cursor
@@ -112,10 +124,9 @@ impl FecPayloadHeader {
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
         let u_padding = cursor
-            .try_read_u8()
+            .try_read_u16_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
-        // Validate that padding is 0
         if u_padding != 0 {
             return Err(UdpError::invalid_field(
                 Self::NAME,
@@ -135,17 +146,17 @@ impl FecPayloadHeader {
 
     pub fn encode_into(&self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.sn_coded.to_be_bytes());
-        output.push(self.sn_source_start);
+        output.extend_from_slice(&self.sn_source_start.to_be_bytes());
         output.push(self.urange);
         output.push(self.fec_index);
-        output.push(0); // padding
+        output.extend_from_slice(&0u16.to_be_bytes());
     }
 
-    /// Get the sequence number range covered by this FEC packet
-    pub fn source_range(&self) -> std::ops::Range<u32> {
-        let start = self.sn_coded.wrapping_add(self.sn_source_start as u32);
+    /// Get the inclusive sequence number range covered by this FEC packet
+    pub fn source_range(&self) -> std::ops::RangeInclusive<u32> {
+        let start = self.sn_source_start;
         let end = start.wrapping_add(self.urange as u32);
-        start..end
+        start..=end
     }
 }
 
@@ -168,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_source_payload_header() {
-        let header = SourcePayloadHeader::new(0x12345678);
+        let header = SourcePayloadHeader::new(0x11112222, 0x33334444);
 
         let mut encoded = Vec::new();
         header.encode_into(&mut encoded);
@@ -176,12 +187,13 @@ mod tests {
         let mut cursor = ReadCursor::new(&encoded);
         let decoded = SourcePayloadHeader::decode(&mut cursor).unwrap();
 
-        assert_eq!(decoded.sequence_number, 0x12345678);
+        assert_eq!(decoded.sn_coded, 0x11112222);
+        assert_eq!(decoded.sn_source_start, 0x33334444);
     }
 
     #[test]
     fn test_fec_payload_header() {
-        let header = FecPayloadHeader::new(100, 5, 10, 2);
+        let header = FecPayloadHeader::new(200, 100, 9, 2);
 
         let mut encoded = Vec::new();
         header.encode_into(&mut encoded);
@@ -189,25 +201,24 @@ mod tests {
         let mut cursor = ReadCursor::new(&encoded);
         let decoded = FecPayloadHeader::decode(&mut cursor).unwrap();
 
-        assert_eq!(decoded.sn_coded, 100);
-        assert_eq!(decoded.sn_source_start, 5);
-        assert_eq!(decoded.urange, 10);
+        assert_eq!(decoded.sn_coded, 200);
+        assert_eq!(decoded.sn_source_start, 100);
+        assert_eq!(decoded.urange, 9);
         assert_eq!(decoded.fec_index, 2);
 
         // Test source range
         let range = decoded.source_range();
-        assert_eq!(range.start, 105); // 100 + 5
-        assert_eq!(range.end, 115); // 105 + 10
+        assert_eq!(range, 100..=109);
     }
 
     #[test]
     fn test_fec_payload_header_rejects_invalid_padding() {
-        let mut data = vec![0u8; 8];
+        let mut data = vec![0u8; 12];
         data[0..4].copy_from_slice(&100u32.to_be_bytes());
-        data[4] = 5; // sn_source_start
-        data[5] = 10; // urange
-        data[6] = 2; // fec_index
-        data[7] = 1; // invalid padding (should be 0)
+        data[4..8].copy_from_slice(&5u32.to_be_bytes());
+        data[8] = 10; // urange
+        data[9] = 2; // fec_index
+        data[10..12].copy_from_slice(&1u16.to_be_bytes()); // invalid padding (should be 0)
 
         let mut cursor = ReadCursor::new(&data);
         let result = FecPayloadHeader::decode(&mut cursor);

@@ -13,6 +13,9 @@ use crate::packet::{AckPacket, SourcePacket};
 use crate::syndata::SynData;
 use crate::syndataex::{SynDataEx, SynDataExFlags, UdpProtocolVersion};
 
+const MIN_ALLOWED_MTU: u16 = 1132;
+const MAX_ALLOWED_MTU: u16 = 1232;
+
 /// Transport mode (Reliable or Lossy)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
@@ -100,6 +103,9 @@ pub struct UdpConnection {
     // Correlation ID for multitransport
     correlation_id: Option<CorrelationId>,
 
+    // Cookie hash for MS-RDPEMT authentication (required for UDPv3)
+    cookie_hash: Option<[u8; 32]>,
+
     // Pending outgoing packets (for reliable mode)
     pending_packets: HashMap<u32, PendingPacket>,
 
@@ -134,6 +140,7 @@ impl UdpConnection {
             next_receive_sequence: 0,
             last_ack_received: 0,
             correlation_id: None,
+            cookie_hash: None,
             pending_packets: HashMap::new(),
             receive_buffer: HashMap::new(),
             ack_states: VecDeque::new(),
@@ -179,12 +186,25 @@ impl UdpConnection {
         self.correlation_id = Some(correlation_id);
     }
 
+    /// Set cookie hash for MS-RDPEMT authentication (required for UDPv3)
+    pub fn set_cookie_hash(&mut self, cookie_hash: [u8; 32]) {
+        self.cookie_hash = Some(cookie_hash);
+    }
+
     /// Create a SYN packet to initiate connection
     pub fn create_syn(&mut self) -> UdpResult<Vec<u8>> {
         if self.state != ConnectionState::Idle {
             return Err(UdpError::invalid_state(
                 "create_syn",
                 "Connection not in Idle state",
+            ));
+        }
+
+        self.ensure_local_mtu("create_syn")?;
+        if self.config.protocol_version >= UdpProtocolVersion::V3 && !self.has_local_cookie_hash() {
+            return Err(UdpError::invalid_state(
+                "create_syn",
+                "cookie hash required for UDPv3 handshake",
             ));
         }
 
@@ -197,10 +217,19 @@ impl UdpConnection {
         };
 
         let syn_data_ex = if self.config.protocol_version != UdpProtocolVersion::V1 {
+            let cookie_hash = if self.config.protocol_version >= UdpProtocolVersion::V3 {
+                self.cookie_hash
+            } else {
+                None
+            };
+
+            // Log when cookie hash is included (UDPv3 authentication)
+            // Note: Logging happens in udp_transport.rs layer
+
             Some(SynDataEx {
                 flags: SynDataExFlags::VERSION_INFO_VALID,
                 udp_version: Some(self.config.protocol_version),
-                cookie_hash: None,
+                cookie_hash,
             })
         } else {
             None
@@ -232,6 +261,13 @@ impl UdpConnection {
         let packet = SynPacket::decode(bytes)?;
         let inner = packet.inner();
 
+        self.validate_peer_mtu(SynData::NAME, "uUpStreamMtu", inner.syn_data.upstream_mtu)?;
+        self.validate_peer_mtu(
+            SynData::NAME,
+            "uDownStreamMtu",
+            inner.syn_data.downstream_mtu,
+        )?;
+
         self.next_receive_sequence = inner.syn_data.initial_sequence_number;
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
@@ -243,6 +279,15 @@ impl UdpConnection {
                 let our_version = self.config.protocol_version;
                 self.config.protocol_version = our_version.min(their_version);
                 self.apply_protocol_version_defaults();
+
+                // UDPv3 requires a valid cookie hash
+                if their_version >= UdpProtocolVersion::V3 && !Self::cookie_hash_present(syn_ex.cookie_hash) {
+                    return Err(UdpError::invalid_field(
+                        SynDataEx::NAME,
+                        "cookieHash",
+                        "UDPv3 handshake requires cookie hash",
+                    ));
+                }
             }
         }
 
@@ -258,6 +303,8 @@ impl UdpConnection {
                 "Connection not in SynReceived state",
             ));
         }
+
+        self.ensure_local_mtu("create_syn_ack")?;
 
         self.next_send_sequence = self.config.initial_sequence_number;
 
@@ -301,6 +348,13 @@ impl UdpConnection {
         let packet = SynAckPacket::decode(bytes)?;
         let inner = packet.inner();
 
+        self.validate_peer_mtu(SynData::NAME, "uUpStreamMtu", inner.syn_data.upstream_mtu)?;
+        self.validate_peer_mtu(
+            SynData::NAME,
+            "uDownStreamMtu",
+            inner.syn_data.downstream_mtu,
+        )?;
+
         self.next_receive_sequence = inner.syn_data.initial_sequence_number;
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
@@ -309,6 +363,16 @@ impl UdpConnection {
 
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
+                if their_version >= UdpProtocolVersion::V3
+                    && !Self::cookie_hash_present(syn_ex.cookie_hash)
+                {
+                    return Err(UdpError::invalid_field(
+                        SynDataEx::NAME,
+                        "cookieHash",
+                        "UDPv3 handshake requires cookie hash",
+                    ));
+                }
+
                 let our_version = self.config.protocol_version;
                 self.config.protocol_version = our_version.min(their_version);
                 self.apply_protocol_version_defaults();
@@ -358,6 +422,7 @@ impl UdpConnection {
         };
 
         let packet = SourcePacket::new(
+            sequence_number,
             sequence_number,
             sn_source_ack,
             self.config.receive_window_size,
@@ -416,10 +481,11 @@ impl UdpConnection {
         let base_sequence = self
             .next_send_sequence
             .wrapping_sub(self.source_packets_in_block.len() as u32);
+        let block_len = self.source_packets_in_block.len() as u8;
         let fec_header = crate::payload::FecPayloadHeader::new(
             base_sequence,
-            0, // sn_source_start: index of first packet in block (0 for first packet)
-            self.source_packets_in_block.len() as u8, // urange: number of source packets
+            base_sequence,
+            block_len.saturating_sub(1),
             fec_index,
         );
 
@@ -697,6 +763,52 @@ impl UdpConnection {
             sequence = sequence.wrapping_add(count);
         }
     }
+
+    fn ensure_local_mtu(&self, context: &'static str) -> UdpResult<()> {
+        if Self::mtu_within_bounds(self.config.mtu) {
+            Ok(())
+        } else {
+            Err(UdpError::invalid_state(
+                context,
+                "MTU must be between 1132 and 1232 bytes",
+            ))
+        }
+    }
+
+    fn validate_peer_mtu(
+        &self,
+        context: &'static str,
+        field: &'static str,
+        mtu: u16,
+    ) -> UdpResult<()> {
+        if Self::mtu_within_bounds(mtu) {
+            Ok(())
+        } else {
+            Err(UdpError::invalid_field(
+                context,
+                field,
+                "MTU must be between 1132 and 1232 bytes",
+            ))
+        }
+    }
+
+    const fn mtu_within_bounds(mtu: u16) -> bool {
+        mtu >= MIN_ALLOWED_MTU && mtu <= MAX_ALLOWED_MTU
+    }
+
+    fn has_local_cookie_hash(&self) -> bool {
+        match &self.cookie_hash {
+            Some(hash) => hash.iter().any(|&byte| byte != 0),
+            None => false,
+        }
+    }
+
+    fn cookie_hash_present(cookie_hash: Option<[u8; 32]>) -> bool {
+        match cookie_hash {
+            Some(hash) => hash.iter().any(|&byte| byte != 0),
+            None => false,
+        }
+    }
 }
 
 fn current_timestamp_ms() -> u32 {
@@ -852,6 +964,101 @@ mod tests {
     }
 
     #[test]
+    fn create_syn_rejects_out_of_range_mtu() {
+        let mut config = UdpConfig::default();
+        config.mtu = MIN_ALLOWED_MTU - 1;
+        let mut connection = UdpConnection::new(config);
+
+        let err = connection
+            .create_syn()
+            .expect_err("MTU below minimum should fail");
+        assert!(err.to_string().contains("MTU must be between"));
+    }
+
+    #[test]
+    fn create_syn_requires_cookie_for_udp_v3() {
+        let mut config = UdpConfig::default();
+        config.protocol_version = UdpProtocolVersion::V3;
+        let mut connection = UdpConnection::new(config.clone());
+
+        let err = connection
+            .create_syn()
+            .expect_err("UDPv3 without cookie must be rejected");
+        assert!(err.to_string().contains("cookie hash"));
+
+        let mut cookie = [0u8; 32];
+        cookie[0] = 1;
+        connection.set_cookie_hash(cookie);
+        connection
+            .create_syn()
+            .expect("cookie hash satisfies UDPv3 requirement");
+    }
+
+    #[test]
+    fn process_syn_rejects_out_of_range_mtu() {
+        let config = UdpConfig::default();
+        let mut server = UdpConnection::new(config.clone());
+
+        let syn = SynPacket::new(
+            config.receive_window_size,
+            false,
+            SynData {
+                initial_sequence_number: config.initial_sequence_number,
+                upstream_mtu: MIN_ALLOWED_MTU - 1,
+                downstream_mtu: MIN_ALLOWED_MTU,
+            },
+            None,
+            None,
+        );
+
+        let err = server
+            .process_syn(&syn.to_padded_bytes())
+            .expect_err("server must reject SYN advertising invalid MTU");
+        assert!(err.to_string().contains("MTU must be between"));
+    }
+
+    #[test]
+    fn process_syn_rejects_udp_v3_without_cookie() {
+        let mut config = UdpConfig::default();
+        config.protocol_version = UdpProtocolVersion::V3;
+        let mut server = UdpConnection::new(config.clone());
+
+        let syn = SynPacket::new(
+            config.receive_window_size,
+            false,
+            SynData {
+                initial_sequence_number: config.initial_sequence_number,
+                upstream_mtu: MIN_ALLOWED_MTU,
+                downstream_mtu: MIN_ALLOWED_MTU,
+            },
+            None,
+            Some(SynDataEx {
+                flags: SynDataExFlags::VERSION_INFO_VALID,
+                udp_version: Some(UdpProtocolVersion::V3),
+                cookie_hash: None,
+            }),
+        );
+
+        let syn_bytes = syn.to_padded_bytes();
+        let decoded = SynPacket::decode(&syn_bytes).expect("decode SYN");
+        let syn_ex = decoded
+            .inner()
+            .syn_data_ex
+            .expect("SYN should advertise SYNEX payload");
+        assert_eq!(syn_ex.udp_version, Some(UdpProtocolVersion::V3));
+        assert_eq!(syn_ex.cookie_hash, Some([0u8; 32]));
+        assert!(
+            !UdpConnection::cookie_hash_present(syn_ex.cookie_hash),
+            "expected missing (all-zero) cookie hash"
+        );
+
+        let err = server
+            .process_syn(&syn_bytes)
+            .expect_err("server must require cookie for UDPv3 SYN");
+        assert!(err.to_string().contains("cookie hash"));
+    }
+
+    #[test]
     fn test_send_receive_data() {
         let config = UdpConfig::default();
         let mut sender = UdpConnection::new(config.clone());
@@ -879,7 +1086,7 @@ mod tests {
         receiver.reset_receive_state(0);
 
         // Simulate receiving sequence 1 before sequence 0
-        let packet1 = SourcePacket::new(1, 0, 256, b"two".to_vec(), None, None, false).unwrap();
+        let packet1 = SourcePacket::new(1, 1, 0, 256, b"two".to_vec(), None, None, false).unwrap();
         let encoded1 = packet1
             .encode(UdpProtocolVersion::V1)
             .expect("encode source packet");
@@ -887,7 +1094,7 @@ mod tests {
         assert!(buffered.is_empty());
 
         // Now receive sequence 0, which should flush both
-        let packet0 = SourcePacket::new(0, 0, 256, b"one".to_vec(), None, None, false).unwrap();
+        let packet0 = SourcePacket::new(0, 0, 0, 256, b"one".to_vec(), None, None, false).unwrap();
         let encoded0 = packet0
             .encode(UdpProtocolVersion::V1)
             .expect("encode source packet");
