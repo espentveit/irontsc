@@ -12,6 +12,11 @@
 //! - Copyright 2016 Thincast Technologies GmbH
 //! - Licensed under the Apache License, Version 2.0
 //!
+//! ## Included subcodecs
+//!
+//! - Residual, Bands, and RLEX processing
+//! - **NSCodec** tile decoding (ported from FreeRDP `libfreerdp/codec/nsc.c`)
+//!
 //! # Example
 //! ```
 //! use clearcodec::ClearCodec;
@@ -29,6 +34,9 @@
 
 use anyhow::{bail, Context, Result};
 use std::io::{Cursor, Read};
+
+mod nscodec;
+use nscodec::NsCodec;
 
 // ClearCodec flags (MS-RDPEGFX 2.2.5.2)
 const CLEARCODEC_FLAG_GLYPH_INDEX: u8 = 0x01;
@@ -113,6 +121,7 @@ pub struct ClearCodec {
     short_vbar_storage: Vec<VBarEntry>,
     short_vbar_cursor: usize,
     temp_buffer: Vec<u8>,
+    ns_codec: NsCodec,
 }
 
 impl ClearCodec {
@@ -130,6 +139,7 @@ impl ClearCodec {
                 .collect(),
             short_vbar_cursor: 0,
             temp_buffer: Vec::new(),
+            ns_codec: NsCodec::new(),
         }
     }
 
@@ -602,8 +612,37 @@ impl ClearCodec {
                     suboffset += bitmap_data_byte_count;
                 }
                 1 => {
-                    // NSCodec - not implemented yet
-                    bail!("NSCodec subcodec not implemented");
+                    let start = cursor.position() as usize;
+                    let end = start
+                        .checked_add(bitmap_data_byte_count as usize)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "NSCodec tile length overflow: {} bytes",
+                                bitmap_data_byte_count
+                            )
+                        })?;
+
+                    let data = cursor.get_ref();
+                    if end > data.len() {
+                        bail!(
+                            "NSCodec tile truncated: expected {} bytes, have {}",
+                            bitmap_data_byte_count,
+                            data.len().saturating_sub(start)
+                        );
+                    }
+
+                    self.ns_codec.decode_tile(
+                        &data[start..end],
+                        tile_width,
+                        tile_height,
+                        width,
+                        dst_data,
+                        x_start as u32,
+                        y_start as u32,
+                    )?;
+
+                    cursor.set_position(end as u64);
+                    suboffset += bitmap_data_byte_count;
                 }
                 2 => {
                     // RLEX (run-length encoded with palette)
@@ -861,5 +900,54 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Sequence number mismatch"));
+    }
+
+    #[test]
+    fn test_clearcodec_nscodec_tile() {
+        let mut codec = ClearCodec::new();
+        let width = 2u32;
+        let height = 2u32;
+        let mut output = vec![0u8; (width * height * 4) as usize];
+
+        // Build NSCodec payload with simple constant Y plane and transparent chroma/alpha
+        let mut nscodec_payload = Vec::new();
+        for _ in 0..4 {
+            nscodec_payload.extend_from_slice(&4u32.to_le_bytes());
+        }
+        nscodec_payload.push(1); // ColorLossLevel
+        nscodec_payload.push(0); // ChromaSubsamplingLevel
+        nscodec_payload.extend_from_slice(&[0, 0]); // Reserved
+        nscodec_payload.extend_from_slice(&[100, 100, 100, 100]); // Y
+        nscodec_payload.extend_from_slice(&[0, 0, 0, 0]); // Co
+        nscodec_payload.extend_from_slice(&[0, 0, 0, 0]); // Cg
+        nscodec_payload.extend_from_slice(&[255, 255, 255, 255]); // Alpha
+
+        let bitmap_data_byte_count = nscodec_payload.len() as u32;
+
+        let mut compressed = Vec::new();
+        compressed.push(0x00); // glyph flags
+        compressed.push(0x00); // seq number
+        compressed.extend_from_slice(&0u32.to_le_bytes()); // residual
+        compressed.extend_from_slice(&0u32.to_le_bytes()); // bands
+        compressed.extend_from_slice(&(13u32 + bitmap_data_byte_count).to_le_bytes()); // subcodec size
+
+        // Tile header covering entire surface
+        compressed.extend_from_slice(&0u16.to_le_bytes()); // x_start
+        compressed.extend_from_slice(&0u16.to_le_bytes()); // y_start
+        compressed.extend_from_slice(&(width as u16).to_le_bytes()); // tile width
+        compressed.extend_from_slice(&(height as u16).to_le_bytes()); // tile height
+        compressed.extend_from_slice(&bitmap_data_byte_count.to_le_bytes());
+        compressed.push(1); // subcodec ID = NSCodec
+
+        compressed.extend_from_slice(&nscodec_payload);
+
+        codec
+            .decompress(&compressed, width, height, &mut output)
+            .expect("NSCodec tile should decode");
+
+        let expected = [100u8, 100u8, 100u8, 255u8];
+        for chunk in output.chunks_exact(4) {
+            assert_eq!(chunk, &expected);
+        }
     }
 }

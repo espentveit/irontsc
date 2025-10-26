@@ -7,12 +7,7 @@ use ironrdp_pdu::codecs::rfx::{EntropyAlgorithm, Quant, RfxRectangle};
 use thiserror::Error;
 
 #[allow(unused_imports)]
-use crate::{
-    color_conversion,
-    dwt,
-    rlgr,
-    subband_reconstruction,
-};
+use crate::{color_conversion, dwt, rlgr, subband_reconstruction};
 
 const PROGRESSIVE_MAGIC: u32 = 0xCACCACCA;
 const TILE_SIZE: usize = 64;
@@ -94,20 +89,17 @@ struct BlockHeader {
 
 impl BlockHeader {
     fn parse(data: &mut &[u8]) -> Result<Self> {
-        ensure_progressive!(
-            data.len() >= 6,
-            ProgressiveError::Truncated("block header"),
-        );
+        ensure_progressive!(data.len() >= 6, ProgressiveError::Truncated("block header"),);
         let block_type_val = u16::from_le_bytes([data[0], data[1]]);
         let length = u32::from_le_bytes(data[2..6].try_into().unwrap()) as usize;
         *data = &data[6..];
-        
+
         let block_type = BlockType::from_u16(block_type_val)?;
         ensure_progressive!(
             length >= 6,
             ProgressiveError::Invalid(format!("block length {} too short", length)),
         );
-        
+
         Ok(Self { block_type, length })
     }
 }
@@ -414,11 +406,7 @@ impl TileDecodeScratch {
 
     fn channels_mut(&mut self) -> [&mut [i16]; COMPONENT_COUNT] {
         let [ref mut c0, ref mut c1, ref mut c2] = self.channels;
-        [
-            c0.as_mut_slice(),
-            c1.as_mut_slice(),
-            c2.as_mut_slice(),
-        ]
+        [c0.as_mut_slice(), c1.as_mut_slice(), c2.as_mut_slice()]
     }
 
     fn channels(&self) -> [&[i16]; COMPONENT_COUNT] {
@@ -776,10 +764,9 @@ impl<'a> TileDecoder<'a> {
             cr: channels[2],
         };
 
-        color_conversion::ycbcr_to_rgba(ycbcr, tile_state.reconstruction.as_mut_slice())
-            .map_err(|err| ProgressiveError::Invalid(format!(
-                "YCbCr to RGBA conversion failed: {err}"
-            )))?;
+        color_conversion::ycbcr_to_rgba(ycbcr, tile_state.reconstruction.as_mut_slice()).map_err(
+            |err| ProgressiveError::Invalid(format!("YCbCr to RGBA conversion failed: {err}")),
+        )?;
 
         Ok(())
     }
@@ -853,7 +840,9 @@ impl<'a> TileDecoder<'a> {
             let quant = region
                 .progressive_quants
                 .get(quality as usize)
-                .ok_or_else(|| ProgressiveError::Invalid("progressive quant index out of range".into()))?;
+                .ok_or_else(|| {
+                    ProgressiveError::Invalid("progressive quant index out of range".into())
+                })?;
             Ok([quant.y, quant.cb, quant.cr])
         }
     }
@@ -1172,9 +1161,8 @@ fn progressive_idwt_x(
                 let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
                 if dst_idx + 2 < dst_band.len() {
                     dst_band[dst_idx] = x2;
-                    dst_band[dst_idx + 1] = clamp_i16(
-                        ((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0),
-                    );
+                    dst_band[dst_idx + 1] =
+                        clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
                     dst_band[dst_idx + 2] = x_next;
                 }
             }
@@ -1183,9 +1171,8 @@ fn progressive_idwt_x(
             let x_next = clamp_i16(i32::from(l0) - (i32::from(h0) / 2));
             if dst_idx + 2 < dst_band.len() {
                 dst_band[dst_idx] = x2;
-                dst_band[dst_idx + 1] = clamp_i16(
-                    ((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0),
-                );
+                dst_band[dst_idx + 1] =
+                    clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
                 dst_band[dst_idx + 2] = x_next;
                 let l0 = *low_band.get(low_idx).unwrap_or(&l0);
                 if dst_idx + 3 < dst_band.len() {
@@ -1255,9 +1242,8 @@ fn progressive_idwt_y(
                 }
                 dst_idx += dst_step;
                 if dst_idx < dst_band.len() {
-                    dst_band[dst_idx] = clamp_i16(
-                        ((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0),
-                    );
+                    dst_band[dst_idx] =
+                        clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
                 }
                 dst_idx += dst_step;
                 if dst_idx < dst_band.len() {
@@ -1272,9 +1258,8 @@ fn progressive_idwt_y(
             }
             dst_idx += dst_step;
             if dst_idx < dst_band.len() {
-                dst_band[dst_idx] = clamp_i16(
-                    ((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0),
-                );
+                dst_band[dst_idx] =
+                    clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
             }
             dst_idx += dst_step;
             if dst_idx < dst_band.len() {
@@ -1305,7 +1290,7 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
 
     let dst_step = n_band_l + n_band_h;
     let dst_len = dst_step * dst_step;
-    
+
     if buffer.len() < dst_len || temp.len() < dst_step * (n_band_l + n_band_h) {
         return;
     }
@@ -1315,49 +1300,27 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
     let mut lh_copy = vec![0i16; lh_len];
     let mut hh_copy = vec![0i16; hh_len];
     let mut ll_copy = vec![0i16; ll_len.min(buffer.len() - (hl_len + lh_len + hh_len))];
-    
+
     hl_copy.copy_from_slice(&buffer[0..hl_len]);
     lh_copy.copy_from_slice(&buffer[hl_len..hl_len + lh_len]);
     hh_copy.copy_from_slice(&buffer[hl_len + lh_len..hl_len + lh_len + hh_len]);
     let ll_actual_len = ll_copy.len();
-    ll_copy.copy_from_slice(&buffer[hl_len + lh_len + hh_len..hl_len + lh_len + hh_len + ll_actual_len]);
+    ll_copy.copy_from_slice(
+        &buffer[hl_len + lh_len + hh_len..hl_len + lh_len + hh_len + ll_actual_len],
+    );
 
     let (l_temp, h_temp) = temp.split_at_mut(n_band_l * dst_step);
 
     progressive_idwt_x(
-        &ll_copy,
-        n_band_l,
-        &hl_copy,
-        n_band_h,
-        l_temp,
-        dst_step,
-        n_band_l,
-        n_band_h,
-        n_band_l,
+        &ll_copy, n_band_l, &hl_copy, n_band_h, l_temp, dst_step, n_band_l, n_band_h, n_band_l,
     );
     progressive_idwt_x(
-        &lh_copy,
-        n_band_l,
-        &hh_copy,
-        n_band_h,
-        h_temp,
-        dst_step,
-        n_band_l,
-        n_band_h,
-        n_band_h,
+        &lh_copy, n_band_l, &hh_copy, n_band_h, h_temp, dst_step, n_band_l, n_band_h, n_band_h,
     );
-    
+
     let llx = &mut buffer[0..dst_len];
     progressive_idwt_y(
-        l_temp,
-        dst_step,
-        h_temp,
-        dst_step,
-        llx,
-        dst_step,
-        n_band_l,
-        n_band_h,
-        dst_step,
+        l_temp, dst_step, h_temp, dst_step, llx, dst_step, n_band_l, n_band_h, dst_step,
     );
 }
 
@@ -1423,7 +1386,11 @@ impl<'a> BitStream<'a> {
     }
 
     fn read_bits(&mut self, num_bits: u32) -> u32 {
-        self.mask = if num_bits == 32 { 0xFFFFFFFF } else { (1 << num_bits) - 1 };
+        self.mask = if num_bits == 32 {
+            0xFFFFFFFF
+        } else {
+            (1 << num_bits) - 1
+        };
         let value = (self.accumulator >> (32 - num_bits)) & self.mask;
         self.shift(num_bits);
         value
@@ -1490,7 +1457,7 @@ impl<'a> UpgradeState<'a> {
         }
 
         self.mode = false; // zero encoding is next
-        
+
         // unary encoding - read sign bit
         let sign = self.srl.peek_bit();
         self.srl.shift(1);
@@ -1612,20 +1579,70 @@ fn progressive_upgrade_decode(
 
     // Process all non-LL subbands (extrapolate layout)
     state.non_ll = true;
-    
-    state.upgrade_block(&mut coefficients[0..1023], &mut sign[0..1023], shift.hl1, bitpos_delta.hl1)?; // HL1
-    state.upgrade_block(&mut coefficients[1023..2046], &mut sign[1023..2046], shift.lh1, bitpos_delta.lh1)?; // LH1
-    state.upgrade_block(&mut coefficients[2046..3007], &mut sign[2046..3007], shift.hh1, bitpos_delta.hh1)?; // HH1
-    state.upgrade_block(&mut coefficients[3007..3279], &mut sign[3007..3279], shift.hl2, bitpos_delta.hl2)?; // HL2
-    state.upgrade_block(&mut coefficients[3279..3551], &mut sign[3279..3551], shift.lh2, bitpos_delta.lh2)?; // LH2
-    state.upgrade_block(&mut coefficients[3551..3807], &mut sign[3551..3807], shift.hh2, bitpos_delta.hh2)?; // HH2
-    state.upgrade_block(&mut coefficients[3807..3879], &mut sign[3807..3879], shift.hl3, bitpos_delta.hl3)?; // HL3
-    state.upgrade_block(&mut coefficients[3879..3951], &mut sign[3879..3951], shift.lh3, bitpos_delta.lh3)?; // LH3
-    state.upgrade_block(&mut coefficients[3951..4015], &mut sign[3951..4015], shift.hh3, bitpos_delta.hh3)?; // HH3
+
+    state.upgrade_block(
+        &mut coefficients[0..1023],
+        &mut sign[0..1023],
+        shift.hl1,
+        bitpos_delta.hl1,
+    )?; // HL1
+    state.upgrade_block(
+        &mut coefficients[1023..2046],
+        &mut sign[1023..2046],
+        shift.lh1,
+        bitpos_delta.lh1,
+    )?; // LH1
+    state.upgrade_block(
+        &mut coefficients[2046..3007],
+        &mut sign[2046..3007],
+        shift.hh1,
+        bitpos_delta.hh1,
+    )?; // HH1
+    state.upgrade_block(
+        &mut coefficients[3007..3279],
+        &mut sign[3007..3279],
+        shift.hl2,
+        bitpos_delta.hl2,
+    )?; // HL2
+    state.upgrade_block(
+        &mut coefficients[3279..3551],
+        &mut sign[3279..3551],
+        shift.lh2,
+        bitpos_delta.lh2,
+    )?; // LH2
+    state.upgrade_block(
+        &mut coefficients[3551..3807],
+        &mut sign[3551..3807],
+        shift.hh2,
+        bitpos_delta.hh2,
+    )?; // HH2
+    state.upgrade_block(
+        &mut coefficients[3807..3879],
+        &mut sign[3807..3879],
+        shift.hl3,
+        bitpos_delta.hl3,
+    )?; // HL3
+    state.upgrade_block(
+        &mut coefficients[3879..3951],
+        &mut sign[3879..3951],
+        shift.lh3,
+        bitpos_delta.lh3,
+    )?; // LH3
+    state.upgrade_block(
+        &mut coefficients[3951..4015],
+        &mut sign[3951..4015],
+        shift.hh3,
+        bitpos_delta.hh3,
+    )?; // HH3
 
     // Process LL3 subband
     state.non_ll = false;
-    state.upgrade_block(&mut coefficients[4015..4096], &mut sign[4015..4096], shift.ll3, bitpos_delta.ll3)?; // LL3
+    state.upgrade_block(
+        &mut coefficients[4015..4096],
+        &mut sign[4015..4096],
+        shift.ll3,
+        bitpos_delta.ll3,
+    )?; // LL3
 
     state.finish()?;
 
@@ -1696,9 +1713,7 @@ fn parse_tile_simple_block<'a>(
     })
 }
 
-fn parse_tile_upgrade_block<'a>(
-    data: &mut &'a [u8],
-) -> Result<TileUpgradeBlock<'a>> {
+fn parse_tile_upgrade_block<'a>(data: &mut &'a [u8]) -> Result<TileUpgradeBlock<'a>> {
     ensure_progressive!(
         data.len() >= 1 + 1 + 1 + 2 + 2 + 1 + 2 * 6,
         ProgressiveError::Truncated("tile upgrade block"),
@@ -1918,17 +1933,18 @@ impl ProgressiveDecoder {
 
         // SYNC and CONTEXT are only required in the first frame, not in incremental updates
         // For incremental updates, we use the previously stored context_flags
-        
+
         // Return the frame index from frame_begin, or use the hint if frame_begin wasn't present
-        let frame_index = frame_begin.map(|fb| fb.frame_index).unwrap_or(frame_index_hint);
-        
+        let frame_index = frame_begin
+            .map(|fb| fb.frame_index)
+            .unwrap_or(frame_index_hint);
+
         Ok(ProgressiveSurfaceUpdate {
             surface_id,
             frame_index,
             tiles,
         })
     }
-
 }
 
 pub struct ProgressiveSurfaceUpdate {

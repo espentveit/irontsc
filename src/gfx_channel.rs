@@ -231,12 +231,7 @@ impl DvcProcessor for GfxDvcProcessor {
                 messages.iter().map(|m| m.len()).sum::<usize>()
             );
             for (i, msg) in messages.iter().enumerate() {
-                info!(
-                    "  Message {}: {} bytes - {:02X?}",
-                    i,
-                    msg.len(),
-                    &msg[..]
-                );
+                info!("  Message {}: {} bytes - {:02X?}", i, msg.len(), &msg[..]);
             }
         }
         Ok(messages

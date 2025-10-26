@@ -7,9 +7,9 @@ use anyhow::{Context as _, Result, ensure};
 use clearcodec::ClearCodec;
 use ironrdp_gfx::pdu::{MonitorDefinition, Point16, Rectangle};
 use ironrdp_gfx::{GfxContext, codec};
+use ironrdp_graphics::progressive::ProgressiveDecoder;
 #[cfg(feature = "h264")]
 use ironrdp_h264::{AvcKind, FfmpegDecoder, H264Decoder};
-use ironrdp_graphics::progressive::ProgressiveDecoder;
 use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
@@ -233,10 +233,11 @@ impl GfxContext for GfxState {
         };
 
         self.surfaces.insert(surface_id, surface);
-        
+
         // Register surface with progressive decoder
-        self.progressive_decoder.reset_surface(surface_id, width as u32, height as u32);
-        
+        self.progressive_decoder
+            .reset_surface(surface_id, width as u32, height as u32);
+
         self.refresh_output_mapping_dimensions(surface_id, width, height);
         Ok(())
     }
@@ -250,7 +251,7 @@ impl GfxContext for GfxState {
                 .retain(|_, mapping| mapping.surface_id != surface_id);
             self.active_codec_contexts
                 .retain(|(surf, _)| *surf != surface_id);
-            
+
             // Remove surface from progressive decoder
             self.progressive_decoder.remove_surface(surface_id);
         }
@@ -394,7 +395,7 @@ impl GfxContext for GfxState {
             codec::codec_id::RFX_PROGRESSIVE | codec::codec_id::RFX_PROGRESSIVE_V2 => {
                 // RFX Progressive codec - use the progressive decoder
                 use tracing::info;
-                
+
                 info!(
                     "🎨 RFX Progressive codec (0x{:04X}) decoding {} bytes for surface {}",
                     codec_id,

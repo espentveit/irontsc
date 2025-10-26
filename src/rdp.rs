@@ -2256,7 +2256,10 @@ async fn active_session<T: RdpEventSender + Clone>(
             match out {
                 ActiveStageOutput::ResponseFrame(frame) => {
                     if !frame.is_empty() {
-                        info!("📡 RDP: Writing {} bytes response frame to server", frame.len());
+                        info!(
+                            "📡 RDP: Writing {} bytes response frame to server",
+                            frame.len()
+                        );
                     }
                     writer
                         .write_all(&frame)
