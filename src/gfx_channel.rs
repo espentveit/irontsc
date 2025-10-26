@@ -226,15 +226,16 @@ impl DvcProcessor for GfxDvcProcessor {
         let messages = self.client.ctx.take_outgoing_messages();
         if !messages.is_empty() {
             info!(
-                "📤 RDPEGFX: Sending {} response messages ({} bytes)",
+                "📤 RDPEGFX: Sending {} response messages ({} bytes total)",
                 messages.len(),
                 messages.iter().map(|m| m.len()).sum::<usize>()
             );
-            use tracing::debug;
-            if let Some(first) = messages.first() {
-                debug!(
-                    "RDPEGFX response first bytes: {:02X?}",
-                    &first.get(0..16.min(first.len())).unwrap_or(&[])
+            for (i, msg) in messages.iter().enumerate() {
+                info!(
+                    "  Message {}: {} bytes - {:02X?}",
+                    i,
+                    msg.len(),
+                    &msg[..]
                 );
             }
         }

@@ -2254,10 +2254,15 @@ async fn active_session<T: RdpEventSender + Clone>(
 
         for out in outputs {
             match out {
-                ActiveStageOutput::ResponseFrame(frame) => writer
-                    .write_all(&frame)
-                    .await
-                    .map_err(|e| session::custom_err!("write response", e))?,
+                ActiveStageOutput::ResponseFrame(frame) => {
+                    if !frame.is_empty() {
+                        info!("📡 RDP: Writing {} bytes response frame to server", frame.len());
+                    }
+                    writer
+                        .write_all(&frame)
+                        .await
+                        .map_err(|e| session::custom_err!("write response", e))?
+                }
                 ActiveStageOutput::GraphicsUpdate(region) => {
                     let width = NonZeroU16::new(image.width())
                         .ok_or_else(|| session::general_err!("width is zero"))?;
