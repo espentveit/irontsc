@@ -9,6 +9,8 @@ use ironrdp_gfx::pdu::{MonitorDefinition, Point16, Rectangle};
 use ironrdp_gfx::{GfxContext, codec};
 #[cfg(feature = "h264")]
 use ironrdp_h264::{AvcKind, FfmpegDecoder, H264Decoder};
+use ironrdp_graphics::progressive::ProgressiveDecoder;
+use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use tracing::{debug, trace, warn};
@@ -102,6 +104,8 @@ unsafe impl Send for SendFfmpegDecoder {}
 pub struct GfxState {
     /// ClearCodec decoder
     clearcodec_decoder: ClearCodec,
+    /// Progressive codec decoder
+    progressive_decoder: ProgressiveDecoder,
     /// H.264 decoder (optional, requires h264 feature)
     #[cfg(feature = "h264")]
     h264_decoder: SendFfmpegDecoder,
@@ -143,8 +147,11 @@ impl GfxState {
         #[cfg(not(feature = "h264"))]
         info!("⚠️ RDPEGFX GfxState initialized WITHOUT H.264 support");
 
+        info!("🎨 Initializing RFX Progressive decoder with RLGR1 entropy...");
+
         Ok(Self {
             clearcodec_decoder: ClearCodec::new(),
+            progressive_decoder: ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1),
             #[cfg(feature = "h264")]
             h264_decoder,
             surfaces: HashMap::new(),
@@ -226,6 +233,10 @@ impl GfxContext for GfxState {
         };
 
         self.surfaces.insert(surface_id, surface);
+        
+        // Register surface with progressive decoder
+        self.progressive_decoder.reset_surface(surface_id, width as u32, height as u32);
+        
         self.refresh_output_mapping_dimensions(surface_id, width, height);
         Ok(())
     }
@@ -239,6 +250,9 @@ impl GfxContext for GfxState {
                 .retain(|_, mapping| mapping.surface_id != surface_id);
             self.active_codec_contexts
                 .retain(|(surf, _)| *surf != surface_id);
+            
+            // Remove surface from progressive decoder
+            self.progressive_decoder.remove_surface(surface_id);
         }
         Ok(())
     }
@@ -378,25 +392,50 @@ impl GfxContext for GfxState {
                 Self::blit_raw_to_surface(surface, &dest_rect, bitmap_data)?;
             }
             codec::codec_id::RFX_PROGRESSIVE | codec::codec_id::RFX_PROGRESSIVE_V2 => {
-                // RFX Progressive codec
-                // TODO: Implement full RFX Progressive decoding
-                // For now, just log and skip to avoid flooding with "unsupported" warnings
+                // RFX Progressive codec - use the progressive decoder
+                use tracing::info;
+                
                 info!(
-                    "🌊 RFX Progressive codec (0x{:04X}) received {} bytes - decoder not yet implemented",
+                    "🎨 RFX Progressive codec (0x{:04X}) decoding {} bytes for surface {}",
                     codec_id,
-                    bitmap_data.len()
+                    bitmap_data.len(),
+                    surface_id
                 );
-                // Fill with a placeholder color so we can see the region
-                Self::fill_rect(
-                    surface,
-                    &dest_rect,
-                    ironrdp_gfx::pdu::Color32 {
-                        b: 64,
-                        g: 64,
-                        r: 64,
-                        xa: 255,
-                    },
-                )?;
+
+                // Decode the progressive stream
+                match self.progressive_decoder.decode_surface_update(
+                    surface_id,
+                    0, // frame_index_hint
+                    bitmap_data,
+                ) {
+                    Ok(update) => {
+                        info!(
+                            "✅ Progressive decode successful: {} tiles decoded for frame {}",
+                            update.tiles.len(),
+                            update.frame_index
+                        );
+
+                        // Blit each tile to the surface
+                        for tile in &update.tiles {
+                            Self::blit_tile_to_surface(surface, tile)
+                                .context("Failed to blit progressive tile")?;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("❌ Progressive decode failed: {:?}", e);
+                        // Fill with error indicator color (dark red)
+                        Self::fill_rect(
+                            surface,
+                            &dest_rect,
+                            ironrdp_gfx::pdu::Color32 {
+                                b: 0,
+                                g: 0,
+                                r: 64,
+                                xa: 255,
+                            },
+                        )?;
+                    }
+                }
             }
             _ => {
                 #[cfg(not(feature = "h264"))]
@@ -976,6 +1015,52 @@ impl GfxState {
 
             surface.buffer[dst_offset..dst_offset + rect_width * 4]
                 .copy_from_slice(&data[src_offset..src_offset + rect_width * 4]);
+        }
+
+        Ok(())
+    }
+
+    /// Blit a progressive tile to a surface
+    fn blit_tile_to_surface(
+        surface: &mut GfxSurface,
+        tile: &ironrdp_graphics::progressive::TileUpdate,
+    ) -> Result<()> {
+        let tile_width = tile.rect.width as usize;
+        let tile_height = tile.rect.height as usize;
+        let surface_width = surface.width as usize;
+        let expected_size = tile_width * tile_height * 4;
+
+        if tile.pixels.len() < expected_size {
+            anyhow::bail!(
+                "Not enough progressive tile data: expected {}, got {}",
+                expected_size,
+                tile.pixels.len()
+            );
+        }
+
+        for y in 0..tile_height {
+            let src_offset = y * tile_width * 4;
+            let dst_y = tile.rect.y as usize + y;
+            let dst_x = tile.rect.x as usize;
+            let dst_offset = (dst_y * surface_width + dst_x) * 4;
+
+            // Check bounds
+            if dst_offset + tile_width * 4 > surface.buffer.len() {
+                anyhow::bail!(
+                    "Progressive tile blit out of bounds: tile={}x{} at ({},{}), line={}, offset={}, size={}, buffer={}",
+                    tile_width,
+                    tile_height,
+                    tile.rect.x,
+                    tile.rect.y,
+                    y,
+                    dst_offset,
+                    tile_width * 4,
+                    surface.buffer.len()
+                );
+            }
+
+            surface.buffer[dst_offset..dst_offset + tile_width * 4]
+                .copy_from_slice(&tile.pixels[src_offset..src_offset + tile_width * 4]);
         }
 
         Ok(())
