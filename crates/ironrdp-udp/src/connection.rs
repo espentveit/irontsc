@@ -195,6 +195,11 @@ impl UdpConnection {
     /// Set cookie hash for MS-RDPEMT authentication (required for UDPv3)
     pub fn set_cookie_hash(&mut self, cookie_hash: [u8; 32]) {
         self.cookie_hash = Some(cookie_hash);
+        // Cookie hash requires UDPv3, so ensure protocol version is at least V3
+        if self.config.protocol_version < UdpProtocolVersion::V3 {
+            self.config.protocol_version = UdpProtocolVersion::V3;
+            self.apply_protocol_version_defaults();
+        }
     }
 
     /// Set protocol version (e.g., to use V2 when server doesn't support V3 authentication)
@@ -258,6 +263,11 @@ impl UdpConnection {
         );
 
         self.state = ConnectionState::SynSent;
+
+        // Per MS-RDPEUDP Section 3.1.5.1.4: First DATA packet should have snCoded = ISN + 1
+        // Increment next_send_sequence so first DATA uses ISN + 1
+        self.next_send_sequence = self.next_send_sequence.wrapping_add(1);
+
         Ok(packet.to_padded_bytes())
     }
 
@@ -280,10 +290,11 @@ impl UdpConnection {
             inner.syn_data.downstream_mtu,
         )?;
 
-        self.next_receive_sequence = inner.syn_data.initial_sequence_number;
+        // Per MS-RDPEUDP: next_receive_sequence should be ISN + 1
+        self.next_receive_sequence = inner.syn_data.initial_sequence_number.wrapping_add(1);
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
-        self.reset_receive_state(inner.syn_data.initial_sequence_number);
+        self.reset_receive_state(inner.syn_data.initial_sequence_number.wrapping_add(1));
 
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
@@ -348,6 +359,11 @@ impl UdpConnection {
         );
 
         self.state = ConnectionState::Connected;
+
+        // Per MS-RDPEUDP Section 3.1.5.1.4: First DATA packet should have snCoded = ISN + 1
+        // Increment next_send_sequence so first DATA uses ISN + 1
+        self.next_send_sequence = self.next_send_sequence.wrapping_add(1);
+
         Ok(packet.to_padded_bytes())
     }
     pub fn process_syn_ack(&mut self, bytes: &[u8]) -> UdpResult<()> {
@@ -368,11 +384,13 @@ impl UdpConnection {
             inner.syn_data.downstream_mtu,
         )?;
 
-        self.next_receive_sequence = inner.syn_data.initial_sequence_number;
+        // Per MS-RDPEUDP: next_receive_sequence should be ISN + 1
+        // so that snSourceAck = next_receive_sequence - 1 = ISN
+        self.next_receive_sequence = inner.syn_data.initial_sequence_number.wrapping_add(1);
         self.remote_mtu = inner.syn_data.upstream_mtu;
         self.remote_window_size = inner.header.receive_window_size;
         self.last_ack_received = inner.header.sn_source_ack;
-        self.reset_receive_state(inner.syn_data.initial_sequence_number);
+        self.reset_receive_state(inner.syn_data.initial_sequence_number.wrapping_add(1));
 
         if let Some(ref syn_ex) = inner.syn_data_ex {
             if let Some(their_version) = syn_ex.udp_version {
