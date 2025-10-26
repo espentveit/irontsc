@@ -8,232 +8,179 @@ use thiserror::Error;
 
 #[allow(unused_imports)]
 use crate::{
-    fn progressive_idwt_x(
-        low_band: &[i16],
-        low_step: usize,
-        high_band: &[i16],
-        high_step: usize,
-        dst_band: &mut [i16],
-        dst_step: usize,
-        low_count: usize,
-        high_count: usize,
-        dst_count: usize,
-    ) {
-        debug_assert!(dst_band.len() >= dst_step * dst_count);
-        debug_assert!(low_band.len() >= low_step * low_count);
-        debug_assert!(high_band.len() >= high_step * high_count);
+    color_conversion,
+    dwt,
+    rlgr,
+    subband_reconstruction,
+};
 
-        for row in 0..dst_count {
-            let mut p_l = row * low_step;
-            let mut p_h = row * high_step;
-            let mut p_x = row * dst_step;
+const PROGRESSIVE_MAGIC: u32 = 0xCACCACCA;
+const TILE_SIZE: usize = 64;
+const TILE_PIXELS: usize = TILE_SIZE * TILE_SIZE;
+const COMPONENT_COUNT: usize = 3;
+const RFX_TILE_DIFFERENCE: u8 = 0x01;
+const RFX_DWT_REDUCE_EXTRAPOLATE: u8 = 0x01;
 
-            let mut h0 = high_band[p_h];
-            p_h += 1;
-            let mut l0 = low_band[p_l];
-            p_l += 1;
-            let mut x0 = clamp_i16(i32::from(l0) - i32::from(h0));
-            let mut x2 = x0;
+// Block type constants
+const PROGRESSIVE_WBT_SYNC: u16 = 0xCCC0;
+const PROGRESSIVE_WBT_FRAME_BEGIN: u16 = 0xCCC1;
+const PROGRESSIVE_WBT_FRAME_END: u16 = 0xCCC2;
+const PROGRESSIVE_WBT_CONTEXT: u16 = 0xCCC3;
+const PROGRESSIVE_WBT_REGION: u16 = 0xCCC4;
+const PROGRESSIVE_WBT_TILE_SIMPLE: u16 = 0xCCC5;
+const PROGRESSIVE_WBT_TILE_FIRST: u16 = 0xCCC6;
+const PROGRESSIVE_WBT_TILE_UPGRADE: u16 = 0xCCC7;
 
-            for _ in 0..high_count.saturating_sub(1) {
-                let h1 = high_band[p_h];
-                p_h += 1;
-                l0 = low_band[p_l];
-                p_l += 1;
-                x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
-                let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                dst_band[p_x] = x0;
-                p_x += 1;
-                dst_band[p_x] = x1;
-                p_x += 1;
-                x0 = x2;
-                h0 = h1;
-            }
+type Result<T> = std::result::Result<T, ProgressiveError>;
 
-            if low_count <= high_count + 1 {
-                if low_count <= high_count {
-                    dst_band[p_x] = x2;
-                    p_x += 1;
-                    dst_band[p_x] = clamp_i16(i32::from(x2) + 2 * i32::from(h0));
-                } else {
-                    let l0 = low_band[p_l];
-                    let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
-                    dst_band[p_x] = x2;
-                    p_x += 1;
-                    dst_band[p_x] = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                    p_x += 1;
-                    dst_band[p_x] = x_next;
-                }
-            } else {
-                let l0 = low_band[p_l];
-                let x_next = clamp_i16(i32::from(l0) - (i32::from(h0) / 2));
-                dst_band[p_x] = x2;
-                p_x += 1;
-                dst_band[p_x] = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                p_x += 1;
-                dst_band[p_x] = x_next;
-                p_x += 1;
-                let l0 = low_band[p_l + 1];
-                dst_band[p_x] = clamp_i16((i32::from(x_next) + i32::from(l0)) / 2);
-            }
+#[derive(Debug, Error)]
+pub enum ProgressiveError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("missing {0} block")]
+    MissingBlock(&'static str),
+    #[error("truncated {0}")]
+    Truncated(&'static str),
+    #[error("unknown surface {0}")]
+    UnknownSurface(u16),
+    #[error("unsupported progressive version {0:#06x}")]
+    UnsupportedVersion(u16),
+}
+
+macro_rules! ensure_progressive {
+    ($cond:expr, $err:expr $(,)?) => {
+        if !$cond {
+            return Err($err);
+        }
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockType {
+    Sync,
+    FrameBegin,
+    FrameEnd,
+    Context,
+    Region,
+    TileSimple,
+    TileFirst,
+    TileUpgrade,
+}
+
+impl BlockType {
+    fn from_u16(value: u16) -> Result<Self> {
+        match value {
+            PROGRESSIVE_WBT_SYNC => Ok(BlockType::Sync),
+            PROGRESSIVE_WBT_FRAME_BEGIN => Ok(BlockType::FrameBegin),
+            PROGRESSIVE_WBT_FRAME_END => Ok(BlockType::FrameEnd),
+            PROGRESSIVE_WBT_CONTEXT => Ok(BlockType::Context),
+            PROGRESSIVE_WBT_REGION => Ok(BlockType::Region),
+            PROGRESSIVE_WBT_TILE_SIMPLE => Ok(BlockType::TileSimple),
+            PROGRESSIVE_WBT_TILE_FIRST => Ok(BlockType::TileFirst),
+            PROGRESSIVE_WBT_TILE_UPGRADE => Ok(BlockType::TileUpgrade),
+            _ => Err(ProgressiveError::Invalid(format!(
+                "unknown block type 0x{:04X}",
+                value
+            ))),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BlockHeader {
+    block_type: BlockType,
+    length: usize,
+}
+
+impl BlockHeader {
+    fn parse(data: &mut &[u8]) -> Result<Self> {
+        ensure_progressive!(
+            data.len() >= 6,
+            ProgressiveError::Truncated("block header"),
+        );
+        let block_type_val = u16::from_le_bytes([data[0], data[1]]);
+        let length = u32::from_le_bytes(data[2..6].try_into().unwrap()) as usize;
+        *data = &data[6..];
+        
+        let block_type = BlockType::from_u16(block_type_val)?;
+        ensure_progressive!(
+            length >= 6,
+            ProgressiveError::Invalid(format!("block length {} too short", length)),
+        );
+        
+        Ok(Self { block_type, length })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QuantLevels {
+    hl1: i16,
+    lh1: i16,
+    hh1: i16,
+    hl2: i16,
+    lh2: i16,
+    hh2: i16,
+    hl3: i16,
+    lh3: i16,
+    hh3: i16,
+    ll3: i16,
+}
+
+impl QuantLevels {
+    fn from_quant(quant: &Quant) -> Self {
+        Self {
+            hl1: i16::from(quant.hl1),
+            lh1: i16::from(quant.lh1),
+            hh1: i16::from(quant.hh1),
+            hl2: i16::from(quant.hl2),
+            lh2: i16::from(quant.lh2),
+            hh2: i16::from(quant.hh2),
+            hl3: i16::from(quant.hl3),
+            lh3: i16::from(quant.lh3),
+            hh3: i16::from(quant.hh3),
+            ll3: i16::from(quant.ll3),
         }
     }
 
-    fn progressive_idwt_y(
-        low_band: &[i16],
-        low_step: usize,
-        high_band: &[i16],
-        high_step: usize,
-        dst_band: &mut [i16],
-        dst_step: usize,
-        low_count: usize,
-        high_count: usize,
-        dst_count: usize,
-    ) {
-        debug_assert!(dst_band.len() >= dst_step * dst_count);
-        debug_assert!(low_band.len() >= low_step * low_count);
-        debug_assert!(high_band.len() >= high_step * high_count);
-
-        for col in 0..dst_count {
-            let mut p_l = col;
-            let mut p_h = col;
-            let mut p_x = col;
-
-            let mut h0 = high_band[p_h];
-            p_h += high_step;
-            let mut l0 = low_band[p_l];
-            p_l += low_step;
-            let mut x0 = clamp_i16(i32::from(l0) - i32::from(h0));
-            let mut x2 = x0;
-
-            for _ in 0..high_count.saturating_sub(1) {
-                let h1 = high_band[p_h];
-                p_h += high_step;
-                l0 = low_band[p_l];
-                p_l += low_step;
-                x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
-                let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                dst_band[p_x] = x0;
-                p_x += dst_step;
-                dst_band[p_x] = x1;
-                p_x += dst_step;
-                x0 = x2;
-                h0 = h1;
-            }
-
-            if low_count <= high_count + 1 {
-                if low_count <= high_count {
-                    dst_band[p_x] = x2;
-                    p_x += dst_step;
-                    dst_band[p_x] = clamp_i16(i32::from(x2) + 2 * i32::from(h0));
-                } else {
-                    let l0 = low_band[p_l];
-                    let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
-                    dst_band[p_x] = x2;
-                    p_x += dst_step;
-                    dst_band[p_x] = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                    p_x += dst_step;
-                    dst_band[p_x] = x_next;
-                }
-            } else {
-                let l0 = low_band[p_l];
-                let x_next = clamp_i16(i32::from(l0) - (i32::from(h0) / 2));
-                dst_band[p_x] = x2;
-                p_x += dst_step;
-                dst_band[p_x] = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                p_x += dst_step;
-                dst_band[p_x] = x_next;
-                p_x += dst_step;
-                let l0 = low_band[p_l + low_step];
-                dst_band[p_x] = clamp_i16((i32::from(x_next) + i32::from(l0)) / 2);
-            }
+    fn add(&self, other: &QuantLevels) -> QuantLevels {
+        QuantLevels {
+            hl1: self.hl1 + other.hl1,
+            lh1: self.lh1 + other.lh1,
+            hh1: self.hh1 + other.hh1,
+            hl2: self.hl2 + other.hl2,
+            lh2: self.lh2 + other.lh2,
+            hh2: self.hh2 + other.hh2,
+            hl3: self.hl3 + other.hl3,
+            lh3: self.lh3 + other.lh3,
+            hh3: self.hh3 + other.hh3,
+            ll3: self.ll3 + other.ll3,
         }
     }
 
-    fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usize) {
-        let n_band_l = progressive_get_band_l_count(level);
-        let n_band_h = progressive_get_band_h_count(level);
-
-        let hl_len = n_band_h * n_band_l;
-        let lh_len = n_band_l * n_band_h;
-        let hh_len = n_band_h * n_band_h;
-        let ll_len = n_band_l * n_band_l;
-        let required = hl_len + lh_len + hh_len + ll_len;
-
-        debug_assert!(buffer.len() >= required);
-
-        let dst_step = n_band_l + n_band_h;
-        let dst_len = dst_step * dst_step;
-        debug_assert!(buffer.len() >= dst_len);
-
-        let temp_required = dst_step * (n_band_l + n_band_h);
-        debug_assert!(temp.len() >= temp_required);
-
-        let hl_range = 0..hl_len;
-        let lh_range = hl_len..hl_len + lh_len;
-        let hh_range = lh_range.end..lh_range.end + hh_len;
-        let ll_range = hh_range.end..hh_range.end + ll_len;
-
-        {
-            let ll = &buffer[ll_range.clone()];
-            let hl = &buffer[hl_range.clone()];
-            let lh = &buffer[lh_range.clone()];
-            let hh = &buffer[hh_range.clone()];
-
-            let (l_temp, rest_temp) = temp.split_at_mut(n_band_l * dst_step);
-            let (h_temp, _) = rest_temp.split_at_mut(n_band_h * dst_step);
-
-            progressive_idwt_x(
-                ll,
-                n_band_l,
-                hl,
-                n_band_h,
-                l_temp,
-                dst_step,
-                n_band_l,
-                n_band_h,
-                n_band_l,
-            );
-            progressive_idwt_x(
-                lh,
-                n_band_l,
-                hh,
-                n_band_h,
-                h_temp,
-                dst_step,
-                n_band_l,
-                n_band_h,
-                n_band_h,
-            );
-
-            let llx = &mut buffer[..dst_len];
-            progressive_idwt_y(
-                l_temp,
-                dst_step,
-                h_temp,
-                dst_step,
-                llx,
-                dst_step,
-                n_band_l,
-                n_band_h,
-                dst_step,
-            );
+    fn sub(&self, other: &QuantLevels) -> QuantLevels {
+        QuantLevels {
+            hl1: self.hl1 - other.hl1,
+            lh1: self.lh1 - other.lh1,
+            hh1: self.hh1 - other.hh1,
+            hl2: self.hl2 - other.hl2,
+            lh2: self.lh2 - other.lh2,
+            hh2: self.hh2 - other.hh2,
+            hl3: self.hl3 - other.hl3,
+            lh3: self.lh3 - other.lh3,
+            hh3: self.hh3 - other.hh3,
+            ll3: self.ll3 - other.ll3,
         }
     }
+}
 
-    fn dwt_extrapolate_decode(buffer: &mut [i16], temp: &mut [i16]) {
-        if buffer.len() < 4096 {
-            return;
-        }
+#[derive(Debug, Clone, Copy)]
+pub struct ProgressiveCodecQuant {
+    quality: u8,
+    y: QuantLevels,
+    cb: QuantLevels,
+    cr: QuantLevels,
+}
 
-        if buffer.len() >= 4015 + 289 {
-            progressive_dwt_decode_block(&mut buffer[3807..], temp, 3);
-        }
-        if buffer.len() >= 3007 + 961 {
-            progressive_dwt_decode_block(&mut buffer[3007..], temp, 2);
-        }
-        progressive_dwt_decode_block(buffer, temp, 1);
-    }
 impl ProgressiveCodecQuant {
     fn parse(data: &mut &[u8]) -> Result<Self> {
         ensure_progressive!(
@@ -1228,7 +1175,6 @@ fn progressive_idwt_x(
                 }
             } else {
                 let l0 = *low_band.get(low_idx).unwrap_or(&0);
-                low_idx += 1;
                 let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
                 if dst_idx + 2 < dst_band.len() {
                     dst_band[dst_idx] = x2;
@@ -1240,7 +1186,6 @@ fn progressive_idwt_x(
             }
         } else {
             let l0 = *low_band.get(low_idx).unwrap_or(&0);
-            low_idx += 1;
             let x_next = clamp_i16(i32::from(l0) - (i32::from(h0) / 2));
             if dst_idx + 2 < dst_band.len() {
                 dst_band[dst_idx] = x2;
@@ -1360,27 +1305,35 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
     let ll_len = n_band_l * n_band_l;
     let required = hl_len + lh_len + hh_len + ll_len;
 
-    debug_assert!(buffer.len() >= required);
-
-    let (hl, rest) = buffer.split_at_mut(hl_len);
-    let (lh, rest) = rest.split_at_mut(lh_len);
-    let (hh, ll) = rest.split_at_mut(hh_len);
-    let ll = &mut ll[..ll_len.min(ll.len())];
+    if buffer.len() < required {
+        return;
+    }
 
     let dst_step = n_band_l + n_band_h;
     let dst_len = dst_step * dst_step;
-    debug_assert!(buffer.len() >= dst_len);
-    let (llx, _) = buffer.split_at_mut(dst_len);
+    
+    if buffer.len() < dst_len || temp.len() < dst_step * (n_band_l + n_band_h) {
+        return;
+    }
 
-    let temp_required = dst_step * (n_band_l + n_band_h);
-    debug_assert!(temp.len() >= temp_required);
-    let (l_temp, rest_temp) = temp.split_at_mut(n_band_l * dst_step);
-    let (h_temp, _) = rest_temp.split_at_mut(n_band_h * dst_step);
+    // Create temporary copies of the input subbands since we'll overwrite buffer
+    let mut hl_copy = vec![0i16; hl_len];
+    let mut lh_copy = vec![0i16; lh_len];
+    let mut hh_copy = vec![0i16; hh_len];
+    let mut ll_copy = vec![0i16; ll_len.min(buffer.len() - (hl_len + lh_len + hh_len))];
+    
+    hl_copy.copy_from_slice(&buffer[0..hl_len]);
+    lh_copy.copy_from_slice(&buffer[hl_len..hl_len + lh_len]);
+    hh_copy.copy_from_slice(&buffer[hl_len + lh_len..hl_len + lh_len + hh_len]);
+    let ll_actual_len = ll_copy.len();
+    ll_copy.copy_from_slice(&buffer[hl_len + lh_len + hh_len..hl_len + lh_len + hh_len + ll_actual_len]);
+
+    let (l_temp, h_temp) = temp.split_at_mut(n_band_l * dst_step);
 
     progressive_idwt_x(
-        ll,
+        &ll_copy,
         n_band_l,
-        hl,
+        &hl_copy,
         n_band_h,
         l_temp,
         dst_step,
@@ -1389,9 +1342,9 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
         n_band_l,
     );
     progressive_idwt_x(
-        lh,
+        &lh_copy,
         n_band_l,
-        hh,
+        &hh_copy,
         n_band_h,
         h_temp,
         dst_step,
@@ -1399,6 +1352,8 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
         n_band_h,
         n_band_h,
     );
+    
+    let llx = &mut buffer[0..dst_len];
     progressive_idwt_y(
         l_temp,
         dst_step,
@@ -1417,13 +1372,271 @@ fn dwt_extrapolate_decode(buffer: &mut [i16], temp: &mut [i16]) {
         return;
     }
 
-    {
-        let (tail, _,) = buffer.partition_at_index_mut(3807);
-        // compiler doesn't expose partition_at_index_mut stable; fallback manual
+    progressive_dwt_decode_block(&mut buffer[3807..], temp, 3);
+    progressive_dwt_decode_block(&mut buffer[3007..], temp, 2);
+    progressive_dwt_decode_block(&mut buffer[0..], temp, 1);
+}
+
+struct BitStream<'a> {
+    data: &'a [u8],
+    position: usize,
+    accumulator: u32,
+    mask: u32,
+}
+
+impl<'a> BitStream<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        let mut bs = Self {
+            data,
+            position: 0,
+            accumulator: 0,
+            mask: 0,
+        };
+        bs.fetch();
+        bs
+    }
+
+    fn fetch(&mut self) {
+        let byte_offset = self.position / 8;
+        if byte_offset + 4 <= self.data.len() {
+            self.accumulator = u32::from_be_bytes([
+                self.data[byte_offset],
+                self.data[byte_offset + 1],
+                self.data[byte_offset + 2],
+                self.data[byte_offset + 3],
+            ]);
+        } else {
+            self.accumulator = 0;
+            for i in 0..4 {
+                if byte_offset + i < self.data.len() {
+                    self.accumulator |= (self.data[byte_offset + i] as u32) << (24 - i * 8);
+                }
+            }
+        }
+    }
+
+    fn shift(&mut self, bits: u32) {
+        self.position += bits as usize;
+        if (self.position % 8) == 0 {
+            self.fetch();
+        } else {
+            self.accumulator <<= bits;
+        }
+    }
+
+    fn peek_bit(&self) -> bool {
+        (self.accumulator & 0x80000000) != 0
+    }
+
+    fn read_bits(&mut self, num_bits: u32) -> u32 {
+        self.mask = if num_bits == 32 { 0xFFFFFFFF } else { (1 << num_bits) - 1 };
+        let value = (self.accumulator >> (32 - num_bits)) & self.mask;
+        self.shift(num_bits);
+        value
     }
 }
 
+struct UpgradeState<'a> {
+    non_ll: bool,
+    srl: BitStream<'a>,
+    raw: BitStream<'a>,
+    kp: u32,
+    nz: i32,
+    mode: bool,
+}
 
+impl<'a> UpgradeState<'a> {
+    fn new(srl_data: &'a [u8], raw_data: &'a [u8]) -> Self {
+        Self {
+            non_ll: true,
+            srl: BitStream::new(srl_data),
+            raw: BitStream::new(raw_data),
+            kp: 8,
+            nz: 0,
+            mode: false,
+        }
+    }
+
+    fn srl_read(&mut self, num_bits: u32) -> i16 {
+        if self.nz > 0 {
+            self.nz -= 1;
+            return 0;
+        }
+
+        let k = self.kp / 8;
+
+        if !self.mode {
+            // zero encoding
+            let bit = self.srl.peek_bit();
+            self.srl.shift(1);
+
+            if !bit {
+                // '0' bit, nz >= (1 << k), nz = (1 << k)
+                self.nz = (1 << k) as i32;
+                self.kp += 4;
+                if self.kp > 80 {
+                    self.kp = 80;
+                }
+                self.nz -= 1;
+                return 0;
+            } else {
+                // '1' bit, nz < (1 << k), nz = next k bits
+                self.nz = 0;
+                self.mode = true; // unary encoding is next
+
+                if k > 0 {
+                    self.nz = self.srl.read_bits(k) as i32;
+                }
+
+                if self.nz > 0 {
+                    self.nz -= 1;
+                    return 0;
+                }
+            }
+        }
+
+        self.mode = false; // zero encoding is next
+        
+        // unary encoding - read sign bit
+        let sign = self.srl.peek_bit();
+        self.srl.shift(1);
+
+        if self.kp < 6 {
+            self.kp = 0;
+        } else {
+            self.kp -= 6;
+        }
+
+        if num_bits == 1 {
+            return if sign { -1 } else { 1 };
+        }
+
+        let mut mag = 1u32;
+        let max = (1 << num_bits) - 1;
+
+        while mag < max {
+            let bit = self.srl.peek_bit();
+            self.srl.shift(1);
+            if bit {
+                break;
+            }
+            mag += 1;
+        }
+
+        let mag = mag.min(i16::MAX as u32) as i16;
+        if sign {
+            -mag
+        } else {
+            mag
+        }
+    }
+
+    fn upgrade_block(
+        &mut self,
+        buffer: &mut [i16],
+        sign: &mut [i16],
+        shift: i16,
+        num_bits: i16,
+    ) -> Result<()> {
+        if num_bits == 0 {
+            return Ok(());
+        }
+
+        let num_bits_u32 = num_bits as u32;
+
+        if !self.non_ll {
+            // LL3 block - read directly from raw
+            for i in 0..buffer.len() {
+                let input = self.raw.read_bits(num_bits_u32) as i16;
+                let shifted = (input as i32) << shift;
+                buffer[i] = clamp_i16((buffer[i] as i32) + shifted);
+            }
+        } else {
+            // Non-LL blocks - use sign array to determine source
+            for i in 0..buffer.len() {
+                let input = if sign[i] > 0 {
+                    // sign > 0, read from raw
+                    self.raw.read_bits(num_bits_u32) as i16
+                } else if sign[i] < 0 {
+                    // sign < 0, read from raw and negate
+                    -(self.raw.read_bits(num_bits_u32) as i16)
+                } else {
+                    // sign == 0, read from srl
+                    let val = self.srl_read(num_bits_u32);
+                    sign[i] = val;
+                    val
+                };
+
+                let shifted = (input as i32) << shift;
+                buffer[i] = clamp_i16((buffer[i] as i32) + shifted);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        // Read trailing bits from RAW/SRL bit streams
+        let raw_pad = if self.raw.position % 8 != 0 {
+            8 - (self.raw.position % 8)
+        } else {
+            0
+        };
+        if raw_pad > 0 {
+            self.raw.shift(raw_pad as u32);
+        }
+
+        let srl_pad = if self.srl.position % 8 != 0 {
+            8 - (self.srl.position % 8)
+        } else {
+            0
+        };
+        if srl_pad > 0 {
+            self.srl.shift(srl_pad as u32);
+        }
+
+        // Skip final alignment byte if present
+        if (self.srl.position / 8) + 1 == self.srl.data.len() {
+            self.srl.shift(8);
+        }
+
+        Ok(())
+    }
+}
+
+fn progressive_upgrade_decode(
+    coefficients: &mut [i16],
+    sign: &mut [i16],
+    shift: &QuantLevels,
+    bitpos_delta: &QuantLevels,
+    _extrapolate: bool,
+    _prog_quant: &QuantLevels,
+    srl_data: &[u8],
+    raw_data: &[u8],
+) -> Result<()> {
+    let mut state = UpgradeState::new(srl_data, raw_data);
+
+    // Process all non-LL subbands (extrapolate layout)
+    state.non_ll = true;
+    
+    state.upgrade_block(&mut coefficients[0..1023], &mut sign[0..1023], shift.hl1, bitpos_delta.hl1)?; // HL1
+    state.upgrade_block(&mut coefficients[1023..2046], &mut sign[1023..2046], shift.lh1, bitpos_delta.lh1)?; // LH1
+    state.upgrade_block(&mut coefficients[2046..3007], &mut sign[2046..3007], shift.hh1, bitpos_delta.hh1)?; // HH1
+    state.upgrade_block(&mut coefficients[3007..3279], &mut sign[3007..3279], shift.hl2, bitpos_delta.hl2)?; // HL2
+    state.upgrade_block(&mut coefficients[3279..3551], &mut sign[3279..3551], shift.lh2, bitpos_delta.lh2)?; // LH2
+    state.upgrade_block(&mut coefficients[3551..3807], &mut sign[3551..3807], shift.hh2, bitpos_delta.hh2)?; // HH2
+    state.upgrade_block(&mut coefficients[3807..3879], &mut sign[3807..3879], shift.hl3, bitpos_delta.hl3)?; // HL3
+    state.upgrade_block(&mut coefficients[3879..3951], &mut sign[3879..3951], shift.lh3, bitpos_delta.lh3)?; // LH3
+    state.upgrade_block(&mut coefficients[3951..4015], &mut sign[3951..4015], shift.hh3, bitpos_delta.hh3)?; // HH3
+
+    // Process LL3 subband
+    state.non_ll = false;
+    state.upgrade_block(&mut coefficients[4015..4096], &mut sign[4015..4096], shift.ll3, bitpos_delta.ll3)?; // LL3
+
+    state.finish()?;
+
+    Ok(())
+}
 
 fn parse_tile_simple_block<'a>(
     data: &mut &'a [u8],
