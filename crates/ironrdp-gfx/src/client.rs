@@ -684,9 +684,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         info!(
             "📨 Sending FRAME_ACKNOWLEDGE: frame_id={}, total_decoded={}, queue_depth=0x{:08X}",
-            frame_id,
-            self.total_frames_decoded,
-            queue_depth
+            frame_id, self.total_frames_decoded, queue_depth
         );
 
         self.ctx.send(&ack.to_bytes())

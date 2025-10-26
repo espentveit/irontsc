@@ -117,11 +117,19 @@ impl Processor {
         } else if let Some(svc) = self.static_channels.get_by_channel_id_mut(channel_id) {
             let response_pdus = svc.process(data_ctx.user_data).map_err(SessionError::pdu)?;
             if !response_pdus.is_empty() {
-                info!("📨 X224: SVC channel {} generated {} response PDUs", channel_id, response_pdus.len());
+                info!(
+                    "📨 X224: SVC channel {} generated {} response PDUs",
+                    channel_id,
+                    response_pdus.len()
+                );
             }
             let encoded = process_svc_messages(response_pdus, channel_id, data_ctx.initiator_id)?;
             if !encoded.is_empty() {
-                info!("📨 X224: Sending {} bytes on SVC channel {}", encoded.len(), channel_id);
+                info!(
+                    "📨 X224: Sending {} bytes on SVC channel {}",
+                    encoded.len(),
+                    channel_id
+                );
             }
             Ok(vec![ProcessorOutput::ResponseFrame(encoded)])
         } else if channel_id == 1008 {
