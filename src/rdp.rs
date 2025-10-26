@@ -1937,16 +1937,26 @@ async fn active_session<T: RdpEventSender + Clone>(
                             let req_id = request_id;
                             let protocol = request_info.protocol;
                             let protocol_bits = protocol.as_u16();
-                            let use_lossy = if MultitransportProtocol::contains_known_transport_bits(protocol_bits) {
-                                protocol.has_lossy_bit()
-                            } else {
-                                // Modern Windows builds set proprietary flags instead of the legacy lossy bit.
-                                // Default to lossy to match their DTLS-over-UDP expectation.
-                                info!(
-                                    "   request_id={}, Protocol lacks legacy lossy flag; defaulting to lossy mode for compatibility",
-                                    req_id
-                                );
-                                true
+                            let use_lossy = {
+                                let has_known = MultitransportProtocol::contains_known_transport_bits(protocol_bits);
+                                let lossy = protocol.has_lossy_bit();
+                                if !has_known && req_id == 0 {
+                                    // Special case: Windows sends the zero-cookie probe with protocol==0.
+                                    // Treat it as reliable transport so the server can validate the socket.
+                                    info!(
+                                        "   request_id=0 uses reliable mode for compatibility (protocol bits = 0x{:04x})",
+                                        protocol_bits
+                                    );
+                                    false
+                                } else if has_known {
+                                    lossy
+                                } else {
+                                    info!(
+                                        "   request_id={}, Protocol lacks legacy lossy flag; defaulting to lossy mode for compatibility",
+                                        req_id
+                                    );
+                                    true
+                                }
                             };
 
                             // Wait 2ms to allow TCP ACK to be sent

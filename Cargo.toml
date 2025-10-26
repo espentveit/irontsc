@@ -227,6 +227,12 @@ ironrdp-udp = { path = "crates/ironrdp-udp" }
 rand = "0.8"
 sha2 = "0.10"
 ironrdp-connector = { path = "crates/ironrdp-connector-local" }
+# DTLS support for MS-RDPEMT UDP encryption
+openssl = { version = "0.10", features = ["vendored"] }
+tokio-openssl = "0.6"
+openssl-sys = "0.9"
+foreign-types = "0.3"
+libc = "0.2"
 
 [features]
 default = ["gfx"]
