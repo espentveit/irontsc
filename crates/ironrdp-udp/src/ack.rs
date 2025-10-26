@@ -136,8 +136,9 @@ impl AckVectorHeader {
 
     pub fn decode(cursor: &mut ReadCursor<'_>, version: UdpProtocolVersion) -> UdpResult<Self> {
         match version {
-            UdpProtocolVersion::V1 => Self::decode_v1(cursor),
-            UdpProtocolVersion::V2 => Self::decode_v2(cursor),
+            // V1 and V2 use the same ACK vector format per MS-RDPEUDP Section 1.3.2.2
+            UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => Self::decode_v1(cursor),
+            // V3+ uses the coded ACK vector format per MS-RDPEUDP2
             UdpProtocolVersion::V3 => Self::decode_v2(cursor),
             _ => Err(UdpError::invalid_state(
                 Self::NAME,
@@ -148,11 +149,13 @@ impl AckVectorHeader {
 
     pub fn encode_into(&self, output: &mut Vec<u8>, version: UdpProtocolVersion) -> UdpResult<()> {
         match version {
-            UdpProtocolVersion::V1 => {
+            // V1 and V2 use the same ACK vector format per MS-RDPEUDP Section 1.3.2.2
+            UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => {
                 Self::encode_v1(output, &self.ack_vectors)?;
                 Ok(())
             }
-            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => Self::encode_v2(
+            // V3+ uses the coded ACK vector format per MS-RDPEUDP2
+            UdpProtocolVersion::V3 => Self::encode_v2(
                 output,
                 self.base_sequence_number,
                 self.ack_timestamp,
@@ -359,6 +362,14 @@ impl AckVectorHeader {
         }
 
         output.extend_from_slice(&((base_sequence_number & 0xFFFF) as u16).to_be_bytes());
+
+        if coded_vector.len() > u8::MAX as usize {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "codedAckVecSize",
+                "coded ACK vector too large",
+            ));
+        }
 
         let mut size_and_flag = (coded_vector.len() as u8) & 0x7F;
         if ack_timestamp.is_some() {

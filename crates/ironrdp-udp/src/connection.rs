@@ -409,7 +409,7 @@ impl UdpConnection {
         let ack_vector = if self.first_ack_sent {
             self.build_ack_vector()?
         } else {
-            None // Force no ACK vector for first DATA packet
+            Some(self.initial_ack_vector()?)
         };
         let ack_of_ack = if ack_vector.is_some() {
             self.take_pending_ack_of_ack()
@@ -570,7 +570,10 @@ impl UdpConnection {
 
     /// Create an ACK packet
     pub fn create_ack(&mut self) -> UdpResult<Vec<u8>> {
-        let ack_vector = self.build_ack_vector()?;
+        let ack_vector = match self.build_ack_vector()? {
+            Some(vector) => Some(vector),
+            None => Some(self.initial_ack_vector()?),
+        };
         let ack_of_ack = if ack_vector.is_some() {
             self.take_pending_ack_of_ack()
         } else {
@@ -714,17 +717,30 @@ impl UdpConnection {
         }
 
         let base_sequence_number = self.next_receive_sequence.wrapping_sub(1);
-        let ack_timestamp = match self.config.protocol_version {
-            UdpProtocolVersion::V1 => None,
-            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => Some(current_timestamp_ms()),
-            _ => None,
-        };
+        let ack_timestamp = self.current_ack_timestamp();
 
         Ok(Some(AckVectorHeader::new(
             base_sequence_number,
             ack_timestamp,
             vectors,
         )?))
+    }
+
+    fn initial_ack_vector(&self) -> UdpResult<AckVectorHeader> {
+        let element = AckVectorElement::new(VectorElementState::DatagramNotYetReceived, 1)?;
+        AckVectorHeader::new(
+            self.next_receive_sequence.wrapping_sub(1),
+            self.current_ack_timestamp(),
+            vec![element],
+        )
+    }
+
+    fn current_ack_timestamp(&self) -> Option<u32> {
+        match self.config.protocol_version {
+            UdpProtocolVersion::V1 => None,
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => Some(current_timestamp_ms()),
+            _ => None,
+        }
     }
 
     fn handle_ack_headers(
