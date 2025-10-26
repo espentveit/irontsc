@@ -316,7 +316,7 @@ pub struct RegionBlock<'a> {
 impl<'a> RegionBlock<'a> {
     fn parse(mut data: &'a [u8]) -> Result<Self> {
         ensure_progressive!(
-            data.len() >= 1 + 2 + 1 + 1 + 1 + 2 + 2 + 4,
+            data.len() >= 1 + 2 + 1 + 1 + 1 + 2 + 4,
             ProgressiveError::Truncated("REGION block header"),
         );
         let tile_size = data[0];
@@ -325,14 +325,8 @@ impl<'a> RegionBlock<'a> {
         let num_prog_quant = data[4] as usize;
         let flags = data[5];
         let num_tiles = u16::from_le_bytes([data[6], data[7]]);
-        let used_tiles = u16::from_le_bytes([data[8], data[9]]);
-        let tile_data_size = u32::from_le_bytes(data[10..14].try_into().unwrap()) as usize;
-        data = &data[14..];
-
-        ensure_progressive!(
-            used_tiles <= num_tiles,
-            ProgressiveError::Invalid("usedTiles exceeds numTiles".into()),
-        );
+        let tile_data_size = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        data = &data[12..];
 
         let mut rects = Vec::with_capacity(num_rects as usize);
         for _ in 0..num_rects {
@@ -1872,8 +1866,8 @@ impl ProgressiveDecoder {
         surface.updated_tiles.clear();
 
         let mut cursor = data;
-        let mut sync_seen = false;
-        let mut context_seen = false;
+        let mut _sync_seen = false;
+        let mut _context_seen = false;
         let mut frame_begin: Option<FrameBeginBlock> = None;
         let mut tiles = Vec::new();
 
@@ -1889,7 +1883,7 @@ impl ProgressiveDecoder {
             match header.block_type {
                 BlockType::Sync => {
                     let block = SyncBlock::parse(body)?;
-                    sync_seen = true;
+                    _sync_seen = true;
                     if block.version < 0x0100 {
                         return Err(ProgressiveError::UnsupportedVersion(block.version));
                     }
@@ -1897,7 +1891,7 @@ impl ProgressiveDecoder {
                 BlockType::Context => {
                     let block = ContextBlock::parse(body)?;
                     self.context_flags = block.flags;
-                    context_seen = true;
+                    _context_seen = true;
                 }
                 BlockType::FrameBegin => {
                     let block = FrameBeginBlock::parse(body)?;
@@ -1922,12 +1916,15 @@ impl ProgressiveDecoder {
             }
         }
 
-        ensure_progressive!(sync_seen, ProgressiveError::MissingBlock("SYNC"));
-        ensure_progressive!(context_seen, ProgressiveError::MissingBlock("CONTEXT"));
-        let frame_begin = frame_begin.ok_or(ProgressiveError::MissingBlock("FRAME_BEGIN"))?;
+        // SYNC and CONTEXT are only required in the first frame, not in incremental updates
+        // For incremental updates, we use the previously stored context_flags
+        
+        // Return the frame index from frame_begin, or use the hint if frame_begin wasn't present
+        let frame_index = frame_begin.map(|fb| fb.frame_index).unwrap_or(frame_index_hint);
+        
         Ok(ProgressiveSurfaceUpdate {
             surface_id,
-            frame_index: frame_begin.frame_index,
+            frame_index,
             tiles,
         })
     }
