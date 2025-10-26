@@ -1844,8 +1844,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                     // Check if security cookie is all zeros (server doesn't support/require authentication)
                     let cookie_is_zero = request_info.security_cookie.iter().all(|&b| b == 0);
 
+                    if cookie_is_zero {
+                        // Skip zero-cookie requests - these appear to be probes that the server rejects
+                        warn!("   request_id={}, Skipping zero-cookie multitransport request (appears to be a probe)", request_id);
+                        warn!("   Waiting for subsequent requests with valid security cookies");
+                        continue;
+                    }
+
                     // Calculate SHA-256 hash of security cookie for UDP authentication
-                    // Only compute hash if cookie is non-zero (server supports MS-RDPEMT auth)
                     let cookie_hash = if !cookie_is_zero {
                         let mut hasher = Sha256::new();
                         hasher.update(&request_info.security_cookie);
