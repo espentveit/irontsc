@@ -6,7 +6,7 @@ use crate::pdu::*;
 use anyhow::{bail, Context as _, Result};
 use bytes::Buf;
 use std::time::Instant;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Maximum number of PDUs to process in a single stream to prevent DoS
 const MAX_PDUS_PER_STREAM: usize = 0; // 0 = unlimited
@@ -682,8 +682,8 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
             total_frames_decoded: self.total_frames_decoded,
         };
 
-        trace!(
-            "Sending FRAME_ACKNOWLEDGE: frame_id={}, total_decoded={}, queue_depth=0x{:08X}",
+        info!(
+            "📨 Sending FRAME_ACKNOWLEDGE: frame_id={}, total_decoded={}, queue_depth=0x{:08X}",
             frame_id,
             self.total_frames_decoded,
             queue_depth
