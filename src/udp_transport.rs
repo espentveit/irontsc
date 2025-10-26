@@ -505,11 +505,24 @@ impl UdpTransportManager {
             let mut conn = self.connection.lock().await;
             conn.create_syn()?
         };
+
+        // Log SYN packet details for debugging
+        info!(
+            "📤 Sending SYN packet ({} bytes) to {}",
+            syn_packet.len(),
+            self.server_addr
+        );
+        if syn_packet.len() >= 64 {
+            info!("   First 64 bytes: {:02x?}", &syn_packet[..64]);
+        } else {
+            info!("   Full packet: {:02x?}", syn_packet);
+        }
+
         self.socket
             .send(&syn_packet)
             .await
             .context("Failed to send SYN")?;
-        debug!("Sent SYN packet ({} bytes)", syn_packet.len());
+        info!("✅ SYN packet sent successfully");
 
         // Wait for SYN+ACK with timeout
         let mut buffer = vec![0u8; 2048];

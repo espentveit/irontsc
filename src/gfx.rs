@@ -377,6 +377,27 @@ impl GfxContext for GfxState {
                 // Raw BGRA bitmap
                 Self::blit_raw_to_surface(surface, &dest_rect, bitmap_data)?;
             }
+            codec::codec_id::RFX_PROGRESSIVE | codec::codec_id::RFX_PROGRESSIVE_V2 => {
+                // RFX Progressive codec
+                // TODO: Implement full RFX Progressive decoding
+                // For now, just log and skip to avoid flooding with "unsupported" warnings
+                info!(
+                    "🌊 RFX Progressive codec (0x{:04X}) received {} bytes - decoder not yet implemented",
+                    codec_id,
+                    bitmap_data.len()
+                );
+                // Fill with a placeholder color so we can see the region
+                Self::fill_rect(
+                    surface,
+                    &dest_rect,
+                    ironrdp_gfx::pdu::Color32 {
+                        b: 64,
+                        g: 64,
+                        r: 64,
+                        xa: 255,
+                    },
+                )?;
+            }
             _ => {
                 #[cfg(not(feature = "h264"))]
                 if matches!(
