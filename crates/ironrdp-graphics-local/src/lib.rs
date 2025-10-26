@@ -14,6 +14,7 @@ pub mod diff;
 pub mod dwt;
 pub mod image_processing;
 pub mod pointer;
+pub mod progressive;
 pub mod quantization;
 pub mod rdp6;
 pub mod rectangle_processing;

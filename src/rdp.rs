@@ -1567,6 +1567,7 @@ struct MultitransportHandshakeContext {
 fn detect_multitransport_request(
     action: ironrdp::pdu::Action,
     payload: &[u8],
+    message_channel_id: Option<u16>,
 ) -> Option<MultitransportRequestInfo> {
     use ironrdp::pdu::Action;
     use ironrdp_core::{Decode, ReadCursor};
@@ -1581,6 +1582,20 @@ fn detect_multitransport_request(
     let initiator_id = send_ctx.initiator_id;
     let channel_id = send_ctx.channel_id;
     let user_data = send_ctx.user_data;
+
+    // CRITICAL: MultiTransportRequest PDUs are ONLY sent on the MCS Message Channel!
+    // Scanning other channels (especially Virtual Channels with arbitrary binary data)
+    // causes false positives when random bytes match the security header pattern.
+    if let Some(expected_channel) = message_channel_id {
+        if channel_id != expected_channel {
+            // Not on the message channel - skip scanning to avoid false positives
+            trace!(
+                "Skipping MultiTransport scan on channel 0x{:04x} (expected message channel 0x{:04x})",
+                channel_id, expected_channel
+            );
+            return None;
+        }
+    }
 
     // Search for a BasicSecurityHeader with the TRANSPORT_REQ flag inside the user_data
     for offset in 0..user_data.len().saturating_sub(8) {
@@ -1776,6 +1791,9 @@ async fn active_session<T: RdpEventSender + Clone>(
     // Store ALL transports, not just one! Multiple may be active simultaneously.
     let mut udp_transports: Vec<mpsc::UnboundedReceiver<UdpTransportEvent>> = Vec::new();
 
+    // Track if we're currently establishing a UDP connection to avoid parallel attempts
+    let mut udp_connection_in_progress = false;
+
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
             frame = reader.read_pdu() => {
@@ -1786,7 +1804,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         let mut extra_outputs = Vec::new();
 
                 // Check for multitransport request before processing
-                let outputs = if let Some(request_info) = detect_multitransport_request(action, &payload) {
+                let outputs = if let Some(request_info) = detect_multitransport_request(action, &payload, message_channel_id) {
                     let request_id = request_info.request_id;
 
                     let protocol_bits = request_info.protocol.as_u16();
@@ -1886,7 +1904,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                     };
 
                     // Only start UDP handshake if this is a new request (not a duplicate)
-                    if !is_duplicate {
+                    // AND if we're not already establishing a UDP connection
+                    if !is_duplicate && !udp_connection_in_progress {
+                        udp_connection_in_progress = true;  // Mark connection attempt as in progress
+
                         match encode_multitransport_response_frame(request_info, message_channel_id) {
                             Ok(frame) => {
                                 info!("📨 Sending Initiate Multitransport Response (S_OK) for request_id={}", request_id);
@@ -1957,11 +1978,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 } else if has_known {
                                     lossy
                                 } else {
+                                    // BUG FIX: Windows 11 sends protocol values without known transport bits (e.g., 0x001C).
+                                    // Testing shows servers expect RELIABLE mode (SYN without lossy flag) in these cases.
+                                    // Defaulting to lossy caused the server to ignore SYN packets entirely.
                                     info!(
-                                        "   request_id={}, Protocol lacks legacy lossy flag; defaulting to lossy mode for compatibility",
-                                        req_id
+                                        "   request_id={}, Protocol lacks known transport bits (0x{:04x}); defaulting to RELIABLE mode",
+                                        req_id, protocol_bits
                                     );
-                                    true
+                                    false
                                 }
                             };
 
@@ -1994,6 +2018,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                         req_id
                                     );
                                     udp_transports.push(evt_rx);
+                                    udp_connection_in_progress = false;  // Connection succeeded
                                     // Note: command sender (_cmd_tx) currently unused
                                 }
                                 Err(e) => {
@@ -2001,6 +2026,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                         "❌ Failed to establish UDP transport for request_id={}: {:?}",
                                         req_id, e
                                     );
+                                    udp_connection_in_progress = false;  // Connection failed, allow next attempt
                                 }
                             }
                         } else {
@@ -2009,6 +2035,11 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 request_id
                             );
                         }
+                    } else if !is_duplicate {
+                        info!(
+                            "⏸️  Skipping request_id={} - UDP connection already in progress",
+                            request_id
+                        );
                     }
 
                     // IMPORTANT: Multitransport request PDUs are control PDUs that should NOT be processed
