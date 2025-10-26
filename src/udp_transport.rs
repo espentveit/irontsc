@@ -1,6 +1,7 @@
 /// UDP Transport Manager for RDP
 ///
 /// Handles UDP-based multitransport for RDP, optimized for H.264 video streaming
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,16 +110,37 @@ impl UdpTransportManager {
         mpsc::UnboundedSender<UdpTransportCommand>,
         mpsc::UnboundedReceiver<UdpTransportEvent>,
     )> {
-        // Create UDP socket with specified address
-        let socket = UdpSocket::bind(config.local_addr)
-            .await
-            .context("Failed to bind UDP socket")?;
-        
-        info!(
-            "UDP socket bound to {} for server {}",
-            socket.local_addr()?,
-            config.server_addr
-        );
+        // Create UDP socket
+        let desired_addr = config.local_addr;
+        let socket = match UdpSocket::bind(desired_addr).await {
+            Ok(socket) => {
+                info!(
+                    "UDP socket bound to {} for server {}",
+                    socket.local_addr()?,
+                    config.server_addr
+                );
+                socket
+            }
+            Err(err) if err.kind() == ErrorKind::AddrInUse && desired_addr.port() != 0 => {
+                warn!(
+                    "UDP bind failed for {} ({}); falling back to ephemeral port",
+                    desired_addr, err
+                );
+                let fallback_addr = SocketAddr::new(desired_addr.ip(), 0);
+                let socket = UdpSocket::bind(fallback_addr)
+                    .await
+                    .context("Failed to bind UDP socket with ephemeral port")?;
+                info!(
+                    "UDP socket rebound to {} for server {}",
+                    socket.local_addr()?,
+                    config.server_addr
+                );
+                socket
+            }
+            Err(err) => {
+                return Err(err).context("Failed to bind UDP socket");
+            }
+        };
 
         // Connect to server
         socket
@@ -186,7 +208,9 @@ impl UdpTransportManager {
 
         if cookie_is_zero {
             // Server doesn't require MS-RDPEMT authentication - use UDPv2 without cookie hash
-            warn!("⚠️  Security cookie is all zeros - server doesn't require MS-RDPEMT authentication");
+            warn!(
+                "⚠️  Security cookie is all zeros - server doesn't require MS-RDPEMT authentication"
+            );
             warn!("   Using UDPv2 without cookie hash for compatibility");
 
             // Set protocol version to V2 (doesn't require cookie hash)
@@ -513,6 +537,17 @@ impl UdpTransportManager {
         let (negotiated_version, retransmit_timeout_ms) = {
             let mut conn = self.connection.lock().await;
             conn.process_syn_ack(&syn_ack)
+                .map_err(|e| {
+                    error!("❌ Failed to process SYN+ACK: {}", e);
+                    // Log the first 64 bytes of the packet for debugging
+                    let dump_len = syn_ack.len().min(64);
+                    error!(
+                        "   Packet first {} bytes: {:02x?}",
+                        dump_len,
+                        &syn_ack[..dump_len]
+                    );
+                    e
+                })
                 .context("Failed to process SYN+ACK")?;
             (conn.protocol_version(), conn.retransmit_timeout_ms())
         };

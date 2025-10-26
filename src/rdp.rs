@@ -493,7 +493,7 @@ async fn establish_udp_transport(
 
     let config = UdpTransportConfig {
         server_addr,
-        local_addr: SocketAddr::new(client_addr.ip(), 0), // Use ephemeral port
+        local_addr: SocketAddr::new(client_addr.ip(), client_addr.port()),
         mode: if use_lossy_mode {
             TransportMode::Lossy
         } else {
@@ -556,7 +556,10 @@ async fn establish_rdpudp(
     }
 
     let desired_bind_addr = SocketAddr::new(client_addr.ip(), client_addr.port());
-    debug!("Binding UDP socket to match TCP source: {}", desired_bind_addr);
+    debug!(
+        "Binding UDP socket to match TCP source: {}",
+        desired_bind_addr
+    );
 
     let socket = match UdpSocket::bind(desired_bind_addr).await {
         Ok(socket) => socket,
@@ -582,9 +585,9 @@ async fn establish_rdpudp(
 
                     UdpSocket::bind(SocketAddr::new(fallback_ip, 0))
                         .await
-                        .with_context(|| format!(
-                            "bind fallback UDP socket after error: {fallback_err}"
-                        ))?
+                        .with_context(|| {
+                            format!("bind fallback UDP socket after error: {fallback_err}")
+                        })?
                 }
             }
         }
@@ -1933,7 +1936,18 @@ async fn active_session<T: RdpEventSender + Clone>(
                             let addr_clone = client_addr;
                             let req_id = request_id;
                             let protocol = request_info.protocol;
-                            let use_lossy = matches!(protocol, MultitransportProtocol::UdpFecLossy);
+                            let protocol_bits = protocol.as_u16();
+                            let use_lossy = if MultitransportProtocol::contains_known_transport_bits(protocol_bits) {
+                                protocol.has_lossy_bit()
+                            } else {
+                                // Modern Windows builds set proprietary flags instead of the legacy lossy bit.
+                                // Default to lossy to match their DTLS-over-UDP expectation.
+                                info!(
+                                    "   request_id={}, Protocol lacks legacy lossy flag; defaulting to lossy mode for compatibility",
+                                    req_id
+                                );
+                                true
+                            };
 
                             // Wait 2ms to allow TCP ACK to be sent
                             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
@@ -1952,21 +1966,19 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 Some(request_info.security_cookie),
                                 selected_protocol,
                             ).await {
-                                Ok((cmd_tx, evt_rx)) => {
+                                Ok((_cmd_tx, evt_rx)) => {
                                     info!(
                                         "✅ UDP transport established successfully for request_id={}!",
                                         req_id
                                     );
                                     info!("   UDP transport manager running with keepalive and FEC");
-
-                                    // Store ALL transports - multiple can be active simultaneously
                                     info!(
                                         "📌 Storing UDP transport #{} for request_id={}",
                                         udp_transports.len() + 1,
                                         req_id
                                     );
                                     udp_transports.push(evt_rx);
-                                    // Note: We don't store cmd_tx - currently unused
+                                    // Note: command sender (_cmd_tx) currently unused
                                 }
                                 Err(e) => {
                                     error!(
@@ -2035,7 +2047,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                     // Poll all transports simultaneously using select_all
                     use futures_util::stream::StreamExt;
 
-                    // Create futures for all transports
                     let mut futures = udp_transports
                         .iter_mut()
                         .enumerate()
@@ -2047,7 +2058,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                         })
                         .collect::<futures_util::stream::FuturesUnordered<_>>();
 
-                    // Wait for the first one to complete
                     futures.next().await.flatten()
                 }
             } => {
@@ -2065,7 +2075,6 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                         // Route UDP data to GFX processor via DVC
                         if let Some(dvc) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
-                            // Get the channel ID for the GFX channel
                             let channel_id = dvc.channel_id();
 
                             if let Some(gfx) = dvc.channel_processor_downcast_mut::<GfxDvcProcessor>() {
@@ -2074,7 +2083,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                                         if !dvc_messages.is_empty() {
                                             debug!("✅ Processed UDP GFX data, sending {} response messages via DVC", dvc_messages.len());
 
-                                            // Convert DVC messages to SVC messages
                                             if let Some(channel_id) = channel_id {
                                                 match ironrdp_dvc::encode_dvc_messages(
                                                     channel_id,
@@ -2114,8 +2122,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                     Some((transport_idx, UdpTransportEvent::Disconnected(reason))) => {
                         warn!("⚠️  UDP transport #{} disconnected: {}", transport_idx + 1, reason);
-                        // Note: We don't remove the transport from the vec
-                        // It will just keep returning None
                         vec![]
                     }
                     None => {

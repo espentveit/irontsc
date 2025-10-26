@@ -20,8 +20,9 @@ pub enum MultitransportProtocol {
 }
 
 impl MultitransportProtocol {
-    pub const KNOWN_TRANSPORT_MASK: u16 =
-        Self::UdpFecReliable.as_u16() | Self::UdpFecLossy.as_u16();
+    pub const RELIABLE_BIT: u16 = 0x0001;
+    pub const LOSSY_BIT: u16 = 0x0002;
+    pub const KNOWN_TRANSPORT_MASK: u16 = Self::RELIABLE_BIT | Self::LOSSY_BIT;
 
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
@@ -45,6 +46,16 @@ impl MultitransportProtocol {
 
     pub const fn extra_bits(value: u16) -> u16 {
         value & !Self::KNOWN_TRANSPORT_MASK
+    }
+
+    /// Returns true if the requestedProtocol bitmask asked for a reliable tunnel.
+    pub const fn has_reliable_bit(self) -> bool {
+        self.as_u16() & Self::RELIABLE_BIT != 0
+    }
+
+    /// Returns true if the requestedProtocol bitmask asked for a lossy tunnel.
+    pub const fn has_lossy_bit(self) -> bool {
+        self.as_u16() & Self::LOSSY_BIT != 0
     }
 }
 

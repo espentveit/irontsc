@@ -119,7 +119,7 @@ impl SynAckPacket {
     pub fn decode(bytes: &[u8]) -> UdpResult<Self> {
         let packet = HandshakePacket::decode(bytes)?;
         let flags = packet.header.flags;
-        
+
         // Server must send SYN flag in the handshake response
         if !flags.contains(DatagramFlags::SYN) {
             return Err(UdpError::invalid_field(
@@ -128,7 +128,7 @@ impl SynAckPacket {
                 "SYN+ACK packet missing required SYN flag",
             ));
         }
-        
+
         // MS-RDPEUDP spec requires ACK flag, but some servers (e.g., Windows 11)
         // may send SYN+DATA instead. Accept either ACK or DATA as valid handshake response.
         if !flags.contains(DatagramFlags::ACK) && !flags.contains(DatagramFlags::DATA) {
@@ -138,7 +138,7 @@ impl SynAckPacket {
                 "SYN+ACK packet missing required ACK or DATA flag",
             ));
         }
-        
+
         Ok(Self(packet))
     }
 

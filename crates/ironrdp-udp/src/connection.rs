@@ -421,15 +421,12 @@ impl UdpConnection {
         // to complete the 3-way handshake (Section 1.4)
         let include_ack = !self.first_ack_sent;
 
-        // snSourceAck should acknowledge the last SOURCE (DATA) packet received
-        // For the first DATA packet, we use next_receive_sequence - 1 which is the
-        // server's Initial Sequence Number from the SYN+ACK
-        // (We decrement because next_receive_sequence was already incremented during reset)
+        // snSourceAck should acknowledge the last SOURCE (DATA) packet received.
+        // Before any data arrives (only SYN+ACK), we report "ISN - 1".
         let sn_source_ack = if self.first_ack_sent {
             // Normal case: acknowledge the last DATA packet we received
             self.next_receive_sequence.wrapping_sub(1)
         } else {
-            // No data has been received yet, so acknowledge "prior to" the server's first DATA
             self.next_receive_sequence.wrapping_sub(1)
         };
 
