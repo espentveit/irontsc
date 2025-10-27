@@ -2256,7 +2256,7 @@ async fn active_session<T: RdpEventSender + Clone>(
             match out {
                 ActiveStageOutput::ResponseFrame(frame) => {
                     if !frame.is_empty() {
-                        info!(
+                        debug!(
                             "📡 RDP: Writing {} bytes response frame to server",
                             frame.len()
                         );

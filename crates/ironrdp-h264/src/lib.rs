@@ -96,7 +96,7 @@ pub struct H264Metablock {
 impl H264Metablock {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
         let data_start = data.len();
-        tracing::info!(
+        tracing::debug!(
             "🎬 H264Metablock parsing: starting with {} bytes",
             data_start
         );
@@ -109,7 +109,7 @@ impl H264Metablock {
         }
 
         let num_regions = data.get_u32_le();
-        tracing::info!(
+        tracing::debug!(
             "🎬 H264Metablock: num_regions={}, {} bytes remaining",
             num_regions,
             data.len()
@@ -148,7 +148,7 @@ impl H264Metablock {
             quant_quality.push(H264QuantQuality::from_bytes(qp_val, quality_val));
         }
 
-        tracing::info!(
+        tracing::debug!(
             "🎬 H264Metablock parsed successfully, {} bytes remaining",
             data.len()
         );
@@ -170,10 +170,10 @@ pub struct Avc420Bitstream {
 impl Avc420Bitstream {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
         let data_start = data.len();
-        tracing::info!("🎬 AVC420 parsing: starting with {} bytes", data_start);
+        tracing::debug!("🎬 AVC420 parsing: starting with {} bytes", data_start);
 
         let meta = H264Metablock::parse(data)?;
-        tracing::info!(
+        tracing::debug!(
             "🎬 AVC420 parsed metablock, {} bytes remaining for H.264 data",
             data.len()
         );
@@ -186,7 +186,7 @@ impl Avc420Bitstream {
         let h264_data = data.to_vec();
         data.advance(data.len());
 
-        tracing::info!(
+        tracing::debug!(
             "🎬 AVC420 parsed successfully: metablock + {} bytes of H.264 data",
             h264_data.len()
         );
@@ -255,7 +255,7 @@ impl Avc444Bitstream {
             data.len()
         };
 
-        tracing::info!(
+        tracing::debug!(
             "🎬 AVC444 header parsed: LC={:?} len_field={} actual_len={} bytes, data_remaining={} bytes (header=0x{:08X})",
             lc,
             bitstream1_len_field,

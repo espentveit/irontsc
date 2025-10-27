@@ -168,7 +168,7 @@ impl DvcProcessor for GfxDvcProcessor {
     }
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
-        use tracing::info;
+        use tracing::{debug, info};
 
         // If UDP is active, ignore TCP GFX data
         if self.udp_active {
@@ -180,14 +180,14 @@ impl DvcProcessor for GfxDvcProcessor {
             return Ok(Vec::new());
         }
 
-        info!(
+        debug!(
             "📥 RDPEGFX: Received {} bytes on channel {}",
             payload.len(),
             channel_id
         );
 
         // Decompress with zGFX (preserving error details in log)
-        info!(
+        debug!(
             "📦 RDPEGFX: processing payload len={} bytes (first: {:02X?})",
             payload.len(),
             &payload[..payload.len().min(16)]
@@ -196,7 +196,7 @@ impl DvcProcessor for GfxDvcProcessor {
         let mut decompressed = Vec::new();
         match self.zgfx.decompress(payload, &mut decompressed) {
             Ok(_) => {
-                info!(
+                debug!(
                     "📦 RDPEGFX: Decompressed {} -> {} bytes (first: {:02X?})",
                     payload.len(),
                     decompressed.len(),
@@ -204,7 +204,7 @@ impl DvcProcessor for GfxDvcProcessor {
                 );
             }
             Err(ZgfxError::InvalidSegmentedDescriptor) => {
-                info!(
+                debug!(
                     "📦 RDPEGFX: Payload not segmented/compressed, using raw ({} bytes)",
                     payload.len()
                 );
@@ -225,13 +225,13 @@ impl DvcProcessor for GfxDvcProcessor {
         // Get any outgoing messages (acknowledgements, etc.)
         let messages = self.client.ctx.take_outgoing_messages();
         if !messages.is_empty() {
-            info!(
+            debug!(
                 "📤 RDPEGFX: Sending {} response messages ({} bytes total)",
                 messages.len(),
                 messages.iter().map(|m| m.len()).sum::<usize>()
             );
             for (i, msg) in messages.iter().enumerate() {
-                info!("  Message {}: {} bytes - {:02X?}", i, msg.len(), &msg[..]);
+                debug!("  Message {}: {} bytes - {:02X?}", i, msg.len(), &msg[..]);
             }
         }
         Ok(messages

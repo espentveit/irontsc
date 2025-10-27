@@ -11,7 +11,7 @@ use ironrdp_pdu::x224::X224;
 use ironrdp_svc::{
     client_encode_svc_messages, StaticChannelSet, SvcMessage, SvcProcessor, SvcProcessorMessages,
 };
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{reason_err, SessionError, SessionErrorExt as _, SessionResult};
 
@@ -117,7 +117,7 @@ impl Processor {
         } else if let Some(svc) = self.static_channels.get_by_channel_id_mut(channel_id) {
             let response_pdus = svc.process(data_ctx.user_data).map_err(SessionError::pdu)?;
             if !response_pdus.is_empty() {
-                info!(
+                debug!(
                     "📨 X224: SVC channel {} generated {} response PDUs",
                     channel_id,
                     response_pdus.len()
@@ -125,7 +125,7 @@ impl Processor {
             }
             let encoded = process_svc_messages(response_pdus, channel_id, data_ctx.initiator_id)?;
             if !encoded.is_empty() {
-                info!(
+                debug!(
                     "📨 X224: Sending {} bytes on SVC channel {}",
                     encoded.len(),
                     channel_id
