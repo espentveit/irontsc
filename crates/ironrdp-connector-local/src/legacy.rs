@@ -147,7 +147,7 @@ pub fn decode_share_control(ctx: SendDataIndicationCtx<'_>) -> ConnectorResult<S
 
 /// Attempts to detect and decode an InitiateMultitransportRequest PDU.
 /// Returns Some(request) if the data is a valid multitransport request, None otherwise.
-/// 
+///
 /// The InitiateMultitransportRequest can appear in two forms:
 /// 1. Raw PDU (24 bytes): sent during capabilities exchange
 /// 2. With security header (28 bytes): 4-byte BasicSecurityHeader + 24-byte PDU
@@ -161,7 +161,7 @@ pub fn detect_multitransport_request(
     // - securityCookie: 16 bytes
     const MULTITRANSPORT_PDU_SIZE: usize = 24;
     const SECURITY_HEADER_SIZE: usize = 4;
-    
+
     let pdu_data = match ctx.user_data.len() {
         MULTITRANSPORT_PDU_SIZE => {
             // Case 1: Raw PDU without security header (during capabilities exchange)
@@ -189,7 +189,10 @@ pub fn detect_multitransport_request(
             Some(request)
         }
         Err(e) => {
-            eprintln!("❌ Failed to decode as InitiateMultitransportRequest: {:?}", e);
+            eprintln!(
+                "❌ Failed to decode as InitiateMultitransportRequest: {:?}",
+                e
+            );
             None
         }
     }
@@ -197,7 +200,7 @@ pub fn detect_multitransport_request(
 
 /// Encodes an InitiateMultitransportResponse PDU to be sent to the server.
 /// This should be called in response to an InitiateMultitransportRequest.
-/// 
+///
 /// Per MS-RDPBCGR spec, the response must be sent on the MCS Message Channel
 /// (from ServerMessageChannelData in GCC Conference Create Response).
 pub fn encode_multitransport_response(
@@ -207,12 +210,12 @@ pub fn encode_multitransport_response(
     buf: &mut WriteBuf,
 ) -> ConnectorResult<usize> {
     let response = rdp::multitransport::InitiateMultitransportResponse::success(request_id);
-    
+
     eprintln!("📨 Encoding InitiateMultitransportResponse:");
     eprintln!("   Request ID: {}", request_id);
     eprintln!("   User Channel: 0x{:04x}", user_channel_id);
     eprintln!("   Message Channel: 0x{:04x}", message_channel_id);
-    
+
     encode_send_data_request(user_channel_id, message_channel_id, &response, buf)
 }
 

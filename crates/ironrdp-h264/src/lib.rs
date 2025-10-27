@@ -96,21 +96,35 @@ pub struct H264Metablock {
 impl H264Metablock {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
         let data_start = data.len();
-        tracing::info!("🎬 H264Metablock parsing: starting with {} bytes", data_start);
-        
+        tracing::info!(
+            "🎬 H264Metablock parsing: starting with {} bytes",
+            data_start
+        );
+
         if data.len() < 4 {
-            bail!("Not enough data for H264Metablock (need 4, got {})", data.len());
+            bail!(
+                "Not enough data for H264Metablock (need 4, got {})",
+                data.len()
+            );
         }
 
         let num_regions = data.get_u32_le();
-        tracing::info!("🎬 H264Metablock: num_regions={}, {} bytes remaining", num_regions, data.len());
+        tracing::info!(
+            "🎬 H264Metablock: num_regions={}, {} bytes remaining",
+            num_regions,
+            data.len()
+        );
 
         let mut region_rects = Vec::with_capacity(num_regions as usize);
         let mut quant_quality = Vec::with_capacity(num_regions as usize);
 
         for i in 0..num_regions {
             if data.len() < 8 {
-                bail!("Not enough data for region rect {} (need 8, got {})", i, data.len());
+                bail!(
+                    "Not enough data for region rect {} (need 8, got {})",
+                    i,
+                    data.len()
+                );
             }
 
             let left = data.get_u16_le();
@@ -122,7 +136,11 @@ impl H264Metablock {
 
         for i in 0..num_regions {
             if data.len() < 2 {
-                bail!("Not enough data for quant/quality {} (need 2, got {})", i, data.len());
+                bail!(
+                    "Not enough data for quant/quality {} (need 2, got {})",
+                    i,
+                    data.len()
+                );
             }
 
             let qp_val = data.get_u8();
@@ -130,7 +148,10 @@ impl H264Metablock {
             quant_quality.push(H264QuantQuality::from_bytes(qp_val, quality_val));
         }
 
-        tracing::info!("🎬 H264Metablock parsed successfully, {} bytes remaining", data.len());
+        tracing::info!(
+            "🎬 H264Metablock parsed successfully, {} bytes remaining",
+            data.len()
+        );
         Ok(Self {
             num_regions,
             region_rects,
@@ -150,19 +171,25 @@ impl Avc420Bitstream {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
         let data_start = data.len();
         tracing::info!("🎬 AVC420 parsing: starting with {} bytes", data_start);
-        
+
         let meta = H264Metablock::parse(data)?;
-        tracing::info!("🎬 AVC420 parsed metablock, {} bytes remaining for H.264 data", data.len());
+        tracing::info!(
+            "🎬 AVC420 parsed metablock, {} bytes remaining for H.264 data",
+            data.len()
+        );
 
         // Per MS-RDPEGFX spec: avc420EncodedBitstream is a variable-length array of bytes
         // representing H.264 Annex B format data. There is NO length field - the data
         // extends to the end of the parent structure (determined by caller).
         // The H.264 data should start with NAL unit start codes (00 00 00 01 or 00 00 01)
-        
+
         let h264_data = data.to_vec();
         data.advance(data.len());
 
-        tracing::info!("🎬 AVC420 parsed successfully: metablock + {} bytes of H.264 data", h264_data.len());
+        tracing::info!(
+            "🎬 AVC420 parsed successfully: metablock + {} bytes of H.264 data",
+            h264_data.len()
+        );
         Ok(Self { meta, h264_data })
     }
 }
@@ -202,9 +229,12 @@ pub struct Avc444Bitstream {
 impl Avc444Bitstream {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
         let original_len = data.len();
-        
+
         if data.len() < 4 {
-            bail!("Not enough data for AVC444 header (need 4, got {})", data.len());
+            bail!(
+                "Not enough data for AVC444 header (need 4, got {})",
+                data.len()
+            );
         }
 
         // Read first 32 bits
@@ -212,28 +242,40 @@ impl Avc444Bitstream {
 
         // Extract LC (bits 30-31) and length (bits 0-29)
         let lc = Avc444Lc::try_from(((header >> 30) & 0x03) as u8)?;
-        let bitstream1_len = (header & 0x3FFFFFFF) as usize;
+        let bitstream1_len_field = (header & 0x3FFFFFFF) as usize;
+
+        // FreeRDP behavior: For non-dual-stream modes (LC != 0), the length field is ignored
+        // and all remaining data is used. This handles Progressive1/Progressive2 modes where
+        // the length field may be 0 but data is present.
+        let bitstream1_len = if lc == Avc444Lc::DualStream {
+            // Dual-stream mode: use the length field
+            bitstream1_len_field
+        } else {
+            // Progressive modes: use all remaining data
+            data.len()
+        };
 
         tracing::info!(
-            "🎬 AVC444 header parsed: LC={:?} bitstream1_len={} bytes, data_remaining={} bytes (header=0x{:08X})",
+            "🎬 AVC444 header parsed: LC={:?} len_field={} actual_len={} bytes, data_remaining={} bytes (header=0x{:08X})",
             lc,
+            bitstream1_len_field,
             bitstream1_len,
             data.len(),
             header
         );
 
-        // Handle zero-length bitstream (empty frame or invalid)
+        // Validate we have data
         if bitstream1_len == 0 {
-            tracing::warn!(
-                "⚠️ AVC444 bitstream1_len is 0 - skipping frame (LC={:?}, remaining={} bytes)",
+            bail!(
+                "AVC444 bitstream1 has no data (LC={:?}, len_field={}, remaining={})",
                 lc,
+                bitstream1_len_field,
                 data.len()
             );
-            bail!("AVC444 bitstream1 has zero length (empty frame)");
         }
 
-        // Validate length
-        if data.len() < bitstream1_len {
+        // Validate length for dual-stream mode
+        if lc == Avc444Lc::DualStream && data.len() < bitstream1_len {
             bail!(
                 "Not enough data for AVC444 bitstream1: need {} bytes, got {} (total was {})",
                 bitstream1_len,
@@ -265,6 +307,13 @@ impl Avc444Bitstream {
     }
 }
 
+/// AVC444 stream information with LC mode
+#[derive(Debug)]
+pub struct Avc444StreamInfo {
+    pub h264_streams: Vec<Vec<u8>>,
+    pub lc_mode: Avc444Lc,
+}
+
 /// Parse RDPEGFX AVC stream to extract raw H.264 NAL units
 pub fn parse_gfx_avc_stream(kind: AvcKind, gfx_payload: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut data = gfx_payload;
@@ -284,6 +333,36 @@ pub fn parse_gfx_avc_stream(kind: AvcKind, gfx_payload: &[u8]) -> Result<Vec<Vec
             }
 
             Ok(streams)
+        }
+    }
+}
+
+/// Parse RDPEGFX AVC444 stream with LC mode information
+pub fn parse_gfx_avc444_stream(kind: AvcKind, gfx_payload: &[u8]) -> Result<Avc444StreamInfo> {
+    let mut data = gfx_payload;
+
+    match kind {
+        AvcKind::Avc420 => {
+            let bitstream = Avc420Bitstream::parse(&mut data)?;
+            Ok(Avc444StreamInfo {
+                h264_streams: vec![bitstream.h264_data],
+                lc_mode: Avc444Lc::Progressive1, // Treat AVC420 as Progressive1 (luma)
+            })
+        }
+        AvcKind::Avc444 | AvcKind::Avc444v2 => {
+            let bitstream = Avc444Bitstream::parse(&mut data)?;
+            let lc_mode = bitstream.lc;
+
+            let mut streams = vec![bitstream.bitstream1.h264_data];
+
+            if let Some(bs2) = bitstream.bitstream2 {
+                streams.push(bs2.h264_data);
+            }
+
+            Ok(Avc444StreamInfo {
+                h264_streams: streams,
+                lc_mode,
+            })
         }
     }
 }
