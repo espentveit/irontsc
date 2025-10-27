@@ -1782,6 +1782,9 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut last_frame_dimensions = (image.width(), image.height());
     let mut frame_ready = false;
 
+    // Track pending initial resize request (to be sent once DisplayControl channel is ready)
+    let mut pending_initial_resize: Option<(u16, u16, u32, Option<(u32, u32)>)> = None;
+
     // Track multitransport requests with their authentication data
     // Maps request_id -> metadata needed for TCP response and UDP handshake
     // Each request_id represents a separate UDP transport channel
@@ -2182,10 +2185,22 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                 match input_event {
                     RdpInputEvent::Resize { width, height, scale_factor, physical_size } => {
-                        info!(width, height, scale_factor, ?physical_size, "⏸️  Resize event ignored (fast reconnect disabled for UDP debugging)");
-                        // TODO: Re-enable resize support after UDP multitransport is working
-                        // For now, skip resize to avoid multiple connections that interfere with UDP handshake
-                        vec![]
+                        info!(width, height, scale_factor, ?physical_size, "📐 Resize event received");
+
+                        // Attempt to encode the resize request
+                        if let Some(result) = active_stage.encode_resize(
+                            width as u32,
+                            height as u32,
+                            Some(scale_factor),
+                            physical_size,
+                        ) {
+                            vec![ActiveStageOutput::ResponseFrame(result?)]
+                        } else {
+                            // Display Control channel not available yet - queue for later
+                            debug!("Resize requested but Display Control channel not available, queueing");
+                            pending_initial_resize = Some((width, height, scale_factor, physical_size));
+                            vec![]
+                        }
                     },
                     RdpInputEvent::FastPath(events) => {
                         trace!(?events);
@@ -2453,6 +2468,35 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                 }
                 ActiveStageOutput::Terminate(reason) => break 'outer reason,
+            }
+        }
+
+        // Check if we have a pending resize and DisplayControl is now available
+        if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
+            if let Some(result) = active_stage.encode_resize(
+                width as u32,
+                height as u32,
+                Some(scale_factor),
+                physical_size,
+            ) {
+                info!(
+                    width,
+                    height, scale_factor, "📐 Sending queued initial resize request"
+                );
+                match result {
+                    Ok(frame) => {
+                        writer
+                            .write_all(&frame)
+                            .await
+                            .map_err(|e| session::custom_err!("write pending resize", e))?;
+                    }
+                    Err(e) => {
+                        warn!("Failed to encode queued resize: {}", e);
+                    }
+                }
+            } else {
+                // Still not available, put it back
+                pending_initial_resize = Some((width, height, scale_factor, physical_size));
             }
         }
     };
