@@ -44,11 +44,9 @@ fn normalize_pixel_format(pixel: ffmpeg::format::Pixel) -> (ffmpeg::format::Pixe
     }
 }
 
-struct Yuv444Frame {
+struct ChromaState {
     width: usize,
     height: usize,
-    stride: usize,
-    y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
     full_range: bool,
@@ -409,20 +407,43 @@ unsafe extern "C" fn hw_get_format(
     *pix_fmts
 }
 
-fn yuv420_frame_to_yuv444(frame: &ffmpeg::util::frame::Video) -> Result<Yuv444Frame> {
+fn copy_luma(frame: &ffmpeg::util::frame::Video) -> Result<Vec<u8>> {
     let width = frame.width() as usize;
     let height = frame.height() as usize;
 
     ensure!(width > 0 && height > 0, "Invalid frame dimensions");
 
     let stride_y = frame.stride(0) as usize;
-    let stride_u = frame.stride(1) as usize;
-    let stride_v = frame.stride(2) as usize;
-
     ensure!(
         stride_y >= width,
         "Y plane stride ({stride_y}) too small for width ({width})"
     );
+
+    let data_y = frame.data(0);
+    ensure!(
+        data_y.len() >= stride_y * height,
+        "Y plane buffer shorter than expected"
+    );
+
+    let mut luma = vec![0u8; width * height];
+    for row in 0..height {
+        let src_offset = row * stride_y;
+        let dst_offset = row * width;
+        luma[dst_offset..dst_offset + width]
+            .copy_from_slice(&data_y[src_offset..src_offset + width]);
+    }
+
+    Ok(luma)
+}
+
+fn yuv420_to_chroma_state(frame: &ffmpeg::util::frame::Video) -> Result<ChromaState> {
+    let width = frame.width() as usize;
+    let height = frame.height() as usize;
+
+    ensure!(width > 0 && height > 0, "Invalid frame dimensions");
+
+    let stride_u = frame.stride(1) as usize;
+    let stride_v = frame.stride(2) as usize;
 
     let half_width = (width + 1) / 2;
     let half_height = (height + 1) / 2;
@@ -436,14 +457,9 @@ fn yuv420_frame_to_yuv444(frame: &ffmpeg::util::frame::Video) -> Result<Yuv444Fr
         "V plane stride ({stride_v}) too small for width/2 ({half_width})"
     );
 
-    let data_y = frame.data(0);
     let data_u = frame.data(1);
     let data_v = frame.data(2);
 
-    ensure!(
-        data_y.len() >= stride_y * height,
-        "Y plane buffer shorter than expected"
-    );
     ensure!(
         data_u.len() >= stride_u * half_height,
         "U plane buffer shorter than expected"
@@ -453,15 +469,8 @@ fn yuv420_frame_to_yuv444(frame: &ffmpeg::util::frame::Video) -> Result<Yuv444Fr
         "V plane buffer shorter than expected"
     );
 
-    let mut y = vec![0u8; width * height];
-    let mut u = vec![0u8; width * height];
-    let mut v = vec![0u8; width * height];
-
-    for row in 0..height {
-        let src_offset = row * stride_y;
-        let dst_offset = row * width;
-        y[dst_offset..dst_offset + width].copy_from_slice(&data_y[src_offset..src_offset + width]);
-    }
+    let mut u = vec![128u8; width * height];
+    let mut v = vec![128u8; width * height];
 
     for block_y in 0..half_height {
         let src_u_row_offset = block_y * stride_u;
@@ -502,75 +511,17 @@ fn yuv420_frame_to_yuv444(frame: &ffmpeg::util::frame::Video) -> Result<Yuv444Fr
         }
     }
 
-    Ok(Yuv444Frame {
+    Ok(ChromaState {
         width,
         height,
-        stride: width,
-        y,
         u,
         v,
         full_range: is_full_range(frame.format()),
     })
 }
 
-fn yuv444_to_ffmpeg_frame(frame: &Yuv444Frame) -> Result<ffmpeg::util::frame::Video> {
-    let mut video = ffmpeg::util::frame::Video::empty();
-    let pixel_format = ffmpeg::format::Pixel::YUV444P;
-    let width = frame.width as u32;
-    let height = frame.height as u32;
-
-    video.set_format(pixel_format);
-    video.set_width(width);
-    video.set_height(height);
-    video.set_color_range(if frame.full_range {
-        Range::JPEG
-    } else {
-        Range::MPEG
-    });
-
-    unsafe {
-        video.alloc(pixel_format, width, height);
-    }
-
-    let dst_stride_y = video.stride(0) as usize;
-    let dst_stride_u = video.stride(1) as usize;
-    let dst_stride_v = video.stride(2) as usize;
-
-    {
-        let data_y = video.data_mut(0);
-        for row in 0..frame.height {
-            let src_offset = row * frame.stride;
-            let dst_offset = row * dst_stride_y;
-            data_y[dst_offset..dst_offset + frame.width]
-                .copy_from_slice(&frame.y[src_offset..src_offset + frame.width]);
-        }
-    }
-
-    {
-        let data_u = video.data_mut(1);
-        for row in 0..frame.height {
-            let src_offset = row * frame.stride;
-            let dst_offset = row * dst_stride_u;
-            data_u[dst_offset..dst_offset + frame.width]
-                .copy_from_slice(&frame.u[src_offset..src_offset + frame.width]);
-        }
-    }
-
-    {
-        let data_v = video.data_mut(2);
-        for row in 0..frame.height {
-            let src_offset = row * frame.stride;
-            let dst_offset = row * dst_stride_v;
-            data_v[dst_offset..dst_offset + frame.width]
-                .copy_from_slice(&frame.v[src_offset..src_offset + frame.width]);
-        }
-    }
-
-    Ok(video)
-}
-
 fn apply_progressive2_chroma_to_yuv444(
-    state: &mut Yuv444Frame,
+    state: &mut ChromaState,
     chroma_frame: &ffmpeg::util::frame::Video,
 ) -> Result<()> {
     let width = state.width;
@@ -636,10 +587,14 @@ fn apply_progressive2_chroma_to_yuv444(
     // Update odd column chroma samples (B4/B5 in FreeRDP implementation)
     for y in 0..height {
         let src_offset = y * src_stride_y;
-        let row = &src_y[src_offset..src_offset + n_total_width];
+        let slice_end = (src_offset + n_total_width).min(src_y.len());
+        if slice_end <= src_offset {
+            continue;
+        }
+        let row = &src_y[src_offset..slice_end];
         let (left_half, right_half) = row.split_at(n_total_width / 2);
 
-        let dst_offset = y * state.stride;
+        let dst_offset = y * width;
         let dst_u_row = &mut state.u[dst_offset..dst_offset + width];
         let dst_v_row = &mut state.v[dst_offset..dst_offset + width];
 
@@ -682,7 +637,7 @@ fn apply_progressive2_chroma_to_yuv444(
             .min(v_left.len())
             .min(v_right.len());
 
-        let dst_offset = dst_row * state.stride;
+        let dst_offset = dst_row * width;
         let dst_u_row = &mut state.u[dst_offset..dst_offset + width];
         let dst_v_row = &mut state.v[dst_offset..dst_offset + width];
 
@@ -702,6 +657,76 @@ fn apply_progressive2_chroma_to_yuv444(
     }
 
     Ok(())
+}
+fn chroma_state_to_ffmpeg_frame(
+    luma: &[u8],
+    chroma: &ChromaState,
+) -> Result<ffmpeg::util::frame::Video> {
+    let width = chroma.width;
+    let height = chroma.height;
+    let expected = width * height;
+
+    ensure!(
+        luma.len() >= expected && chroma.u.len() >= expected && chroma.v.len() >= expected,
+        "Luma/chroma buffers smaller than expected ({}x{})",
+        width,
+        height
+    );
+
+    let mut video = ffmpeg::util::frame::Video::empty();
+    let pixel_format = if chroma.full_range {
+        ffmpeg::format::Pixel::YUVJ444P
+    } else {
+        ffmpeg::format::Pixel::YUV444P
+    };
+
+    video.set_format(pixel_format);
+    video.set_width(width as u32);
+    video.set_height(height as u32);
+    video.set_color_range(if chroma.full_range {
+        Range::JPEG
+    } else {
+        Range::MPEG
+    });
+
+    unsafe {
+        video.alloc(pixel_format, width as u32, height as u32);
+    }
+
+    let stride_y = video.stride(0) as usize;
+    {
+        let data_y = video.data_mut(0);
+        for row in 0..height {
+            let src_offset = row * width;
+            let dst_offset = row * stride_y;
+            data_y[dst_offset..dst_offset + width]
+                .copy_from_slice(&luma[src_offset..src_offset + width]);
+        }
+    }
+
+    let stride_u = video.stride(1) as usize;
+    {
+        let data_u = video.data_mut(1);
+        for row in 0..height {
+            let src_offset = row * width;
+            let dst_offset = row * stride_u;
+            data_u[dst_offset..dst_offset + width]
+                .copy_from_slice(&chroma.u[src_offset..src_offset + width]);
+        }
+    }
+
+    let stride_v = video.stride(2) as usize;
+    {
+        let data_v = video.data_mut(2);
+        for row in 0..height {
+            let src_offset = row * width;
+            let dst_offset = row * stride_v;
+            data_v[dst_offset..dst_offset + width]
+                .copy_from_slice(&chroma.v[src_offset..src_offset + width]);
+        }
+    }
+
+    Ok(video)
 }
 
 /// Initialize FFmpeg library (call once)
@@ -729,9 +754,8 @@ fn init_ffmpeg() -> Result<()> {
 pub struct FfmpegDecoder {
     decoder: ffmpeg::codec::decoder::Video,
     converter: Option<ffmpeg::software::scaling::Context>,
-    /// Previous decoded YUV frame for Progressive2 chroma updates
-    previous_yuv_frame: Option<ffmpeg::util::frame::Video>,
-    previous_yuv444_frame: Option<Yuv444Frame>,
+    prev_luma: Option<Vec<u8>>,
+    prev_chroma: Option<ChromaState>,
     converter_src_format: Option<ffmpeg::format::Pixel>,
     converter_width: Option<u32>,
     converter_height: Option<u32>,
@@ -769,8 +793,8 @@ impl FfmpegDecoder {
         Ok(Self {
             decoder,
             converter: None,
-            previous_yuv_frame: None,
-            previous_yuv444_frame: None,
+            prev_luma: None,
+            prev_chroma: None,
             converter_src_format: None,
             converter_width: None,
             converter_height: None,
@@ -887,27 +911,6 @@ impl FfmpegDecoder {
         })
     }
 
-    /// Combine chroma from Progressive2 frame with luma from previous frame
-    ///
-    /// For Progressive2 frames, we take the Y (luma) plane from the previous frame
-    /// and the U/V (chroma) planes from the current frame.
-    fn combine_progressive2_chroma(
-        &mut self,
-        chroma_frame: &ffmpeg::util::frame::Video,
-    ) -> Result<ffmpeg::util::frame::Video> {
-        if self.previous_yuv_frame.is_none() {
-            bail!("Progressive2 frame received before any base frame");
-        }
-
-        let prev444 = match self.previous_yuv444_frame.as_mut() {
-            Some(frame) => frame,
-            None => bail!("Missing cached YUV444 state for Progressive2 frame"),
-        };
-
-        apply_progressive2_chroma_to_yuv444(prev444, chroma_frame)?;
-        yuv444_to_ffmpeg_frame(prev444)
-    }
-
     fn normalize_decoded_frame(
         &mut self,
         mut frame: ffmpeg::util::frame::Video,
@@ -939,11 +942,12 @@ impl H264Decoder for FfmpegDecoder {
                     bail!("No H.264 data in AVC420 stream");
                 }
 
-                let mut frame = self.decode_h264_stream(&h264_streams[0])?;
-                let cached_yuv444 = yuv420_frame_to_yuv444(&frame)?;
+                let frame = self.decode_h264_stream(&h264_streams[0])?;
+                let luma = copy_luma(&frame)?;
+                let chroma_state = yuv420_to_chroma_state(&frame)?;
                 let decoded = self.convert_to_bgra(&frame)?;
-                self.previous_yuv444_frame = Some(cached_yuv444);
-                self.previous_yuv_frame = Some(frame);
+                self.prev_luma = Some(luma);
+                self.prev_chroma = Some(chroma_state);
                 Ok(decoded)
             }
             AvcKind::Avc444 | AvcKind::Avc444v2 => {
@@ -955,11 +959,8 @@ impl H264Decoder for FfmpegDecoder {
                 }
 
                 // Decode first stream
-                let mut frame1 = self.decode_h264_stream(&stream_info.h264_streams[0])?;
-                let mut cache_next_base = None::<Yuv444Frame>;
-                let mut store_previous = false;
-
-                let final_frame = match stream_info.lc_mode {
+                let frame1 = self.decode_h264_stream(&stream_info.h264_streams[0])?;
+                match stream_info.lc_mode {
                     Avc444Lc::DualStream => {
                         // op=0: YUV420 in stream 1, Chroma420 in stream 2
                         if stream_info.h264_streams.len() == 2 {
@@ -967,45 +968,46 @@ impl H264Decoder for FfmpegDecoder {
                             // TODO: Implement dual-stream chroma merging
                             trace!("AVC444 dual-stream: using primary stream (chroma merge TODO)");
                         }
-                        frame1
+                        let luma = copy_luma(&frame1)?;
+                        let chroma_state = yuv420_to_chroma_state(&frame1)?;
+                        let decoded = self.convert_to_bgra(&frame1)?;
+                        self.prev_luma = Some(luma);
+                        self.prev_chroma = Some(chroma_state);
+                        Ok(decoded)
                     }
                     Avc444Lc::Progressive1 => {
                         // op=1: YUV420 in stream 1 (luma + chroma update)
                         // This is a full frame update - save for future Progressive2 frames
-                        cache_next_base = Some(yuv420_frame_to_yuv444(&frame1)?);
-                        store_previous = true;
-                        frame1
+                        let luma = copy_luma(&frame1)?;
+                        let chroma_state = yuv420_to_chroma_state(&frame1)?;
+                        let decoded = self.convert_to_bgra(&frame1)?;
+                        self.prev_luma = Some(luma);
+                        self.prev_chroma = Some(chroma_state);
+                        Ok(decoded)
                     }
                     Avc444Lc::Progressive2 => {
                         // op=2: Chroma420 only in stream 1
-                        // Combine with previous luma (like FreeRDP's AVC444_CHROMAv2)
-                        if let (Some(prev_frame), Some(_)) = (
-                            self.previous_yuv_frame.as_ref(),
-                            self.previous_yuv444_frame.as_ref(),
-                        ) {
+                        if let (Some(ref luma), Some(ref mut chroma_state)) =
+                            (&self.prev_luma, &mut self.prev_chroma)
+                        {
                             debug!(
-                                "Progressive2: Combining chroma frame ({}x{}, fmt={:?}) with previous luma ({}x{}, fmt={:?})",
-                                frame1.width(), frame1.height(), frame1.format(),
-                                prev_frame.width(), prev_frame.height(), prev_frame.format()
+                                "Progressive2: applying chroma update for frame {}x{}",
+                                frame1.width(),
+                                frame1.height()
                             );
-                            self.combine_progressive2_chroma(&frame1)?
+                            apply_progressive2_chroma_to_yuv444(chroma_state, &frame1)?;
+                            let yuv_frame = chroma_state_to_ffmpeg_frame(luma, chroma_state)?;
+                            let decoded = self.convert_to_bgra(&yuv_frame)?;
+                            Ok(decoded)
                         } else {
-                            debug!("Progressive2 frame without previous luma - using chroma-only (will appear pink/green)");
-                            frame1
+                            debug!(
+                                "Progressive2 frame without cached base - falling back to direct decode"
+                            );
+                            let decoded = self.convert_to_bgra(&frame1)?;
+                            Ok(decoded)
                         }
                     }
-                };
-
-                let decoded = self.convert_to_bgra(&final_frame)?;
-
-                if store_previous {
-                    if let Some(cached) = cache_next_base {
-                        self.previous_yuv444_frame = Some(cached);
-                    }
-                    self.previous_yuv_frame = Some(final_frame);
                 }
-
-                Ok(decoded)
             }
         }
     }
