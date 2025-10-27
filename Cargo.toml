@@ -235,7 +235,7 @@ foreign-types = "0.3"
 libc = "0.2"
 
 [features]
-default = ["gfx"]
+default = ["gfx", "video-redirection", "h264"]
 gfx = []
 h264 = ["ironrdp-h264", "ironrdp-gfx/h264"]
 video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264", "ironrdp-gfx/h264"]

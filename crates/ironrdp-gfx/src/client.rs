@@ -356,8 +356,8 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
     fn handle_start_frame(&mut self, data: &mut &[u8]) -> Result<()> {
         let frame = StartFrame::parse(data)?;
 
-        trace!(
-            "START_FRAME: id={}, timestamp={}",
+        info!(
+            "🎬 START_FRAME: id={}, timestamp={}",
             frame.frame_id,
             frame.timestamp
         );
@@ -376,7 +376,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
     fn handle_end_frame(&mut self, data: &mut &[u8]) -> Result<()> {
         let frame = EndFrame::parse(data)?;
 
-        trace!("END_FRAME: id={}", frame.frame_id);
+        info!("🏁 END_FRAME: id={}", frame.frame_id);
 
         // Get frame state
         let frame_state = self
