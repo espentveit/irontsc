@@ -370,7 +370,7 @@ impl GfxContext for GfxState {
                     .context("Failed to decode AVC420 frame")?;
 
                 debug!("✅ H.264 decode complete, blitting to surface");
-                Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
+                Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
             }
             #[cfg(feature = "h264")]
             codec::codec_id::AVC444 | codec::codec_id::AVC444V2 => {
@@ -383,7 +383,7 @@ impl GfxContext for GfxState {
 
                 match self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data) {
                     Ok(frame) => {
-                        Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
+                        Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
@@ -941,25 +941,59 @@ impl GfxState {
     fn blit_frame_to_surface(
         surface: &mut GfxSurface,
         dest_rect: &Rectangle,
-        frame: &ironrdp_h264::DecodedFrame,
+        frame: ironrdp_h264::DecodedFrame,
     ) -> Result<()> {
         // Ensure frame format is BGRA
-        if !matches!(frame.format, ironrdp_h264::PixelFormat::Bgra) {
-            anyhow::bail!("Expected BGRA frame format, got {:?}", frame.format);
+        let ironrdp_h264::DecodedFrame {
+            width: frame_width,
+            height: frame_height,
+            format,
+            planes,
+            line_sizes,
+        } = frame;
+
+        if !matches!(format, ironrdp_h264::PixelFormat::Bgra) {
+            anyhow::bail!("Expected BGRA frame format, got {:?}", format);
         }
 
-        if frame.planes.is_empty() {
+        if planes.is_empty() {
             anyhow::bail!("Decoded frame has no data");
         }
 
-        let frame_data = &frame.planes[0];
-        let frame_stride = frame.line_sizes[0];
-
-        // Blit to surface buffer
+        let frame_stride = *line_sizes
+            .get(0)
+            .ok_or_else(|| anyhow::anyhow!("Decoded frame missing stride information"))?;
         let rect_width = dest_rect.width() as usize;
         let rect_height = dest_rect.height() as usize;
         let surface_width = surface.width as usize;
+        let frame_width_usize = frame_width as usize;
+        let frame_height_usize = frame_height as usize;
 
+        // Fast path: full-surface update with tightly packed BGRA buffer.
+        let is_full_surface = dest_rect.left == 0
+            && dest_rect.top == 0
+            && rect_width == surface_width
+            && rect_height == surface.height as usize
+            && frame_width_usize == rect_width
+            && frame_height_usize == rect_height
+            && frame_stride == rect_width * 4;
+
+        if is_full_surface {
+            if planes.len() != 1 {
+                anyhow::bail!(
+                    "Expected single-plane BGRA data for fast blit, got {} planes",
+                    planes.len()
+                );
+            }
+            surface.buffer = planes.into_iter().next().unwrap_or_default();
+            return Ok(());
+        }
+
+        let frame_data = planes
+            .get(0)
+            .ok_or_else(|| anyhow::anyhow!("Decoded frame missing BGRA data plane"))?;
+
+        // Blit to surface buffer
         for y in 0..rect_height {
             let src_offset = y * frame_stride;
             let dst_y = dest_rect.top as usize + y;
@@ -1414,6 +1448,25 @@ impl GfxState {
 
         let surface_len = surface.buffer.len();
         let output_len = output.buffer.len();
+
+        let is_identity_blit =
+            target_width_full == surface_width && target_height_full == surface_height;
+
+        if is_identity_blit {
+            for dy in 0..dest_height {
+                let src_y = dy.min(surface_height.saturating_sub(1));
+                let dst_row = origin_y + dy;
+                let src_index = src_y * surface_width * 4;
+                let dst_index = (dst_row * output_width + origin_x) * 4;
+                let copy_len = dest_width * 4;
+
+                if src_index + copy_len <= surface_len && dst_index + copy_len <= output_len {
+                    output.buffer[dst_index..dst_index + copy_len]
+                        .copy_from_slice(&surface.buffer[src_index..src_index + copy_len]);
+                }
+            }
+            return Ok(());
+        }
 
         for dy in 0..dest_height {
             let src_y =

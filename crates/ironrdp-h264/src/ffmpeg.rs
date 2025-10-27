@@ -939,13 +939,12 @@ impl H264Decoder for FfmpegDecoder {
                     bail!("No H.264 data in AVC420 stream");
                 }
 
-                let frame = self.decode_h264_stream(&h264_streams[0])?;
-
-                // Save as previous frame for potential Progressive2 updates
-                self.previous_yuv_frame = Some(frame.clone());
-                self.previous_yuv444_frame = Some(yuv420_frame_to_yuv444(&frame)?);
-
-                self.convert_to_bgra(&frame)
+                let mut frame = self.decode_h264_stream(&h264_streams[0])?;
+                let cached_yuv444 = yuv420_frame_to_yuv444(&frame)?;
+                let decoded = self.convert_to_bgra(&frame)?;
+                self.previous_yuv444_frame = Some(cached_yuv444);
+                self.previous_yuv_frame = Some(frame);
+                Ok(decoded)
             }
             AvcKind::Avc444 | AvcKind::Avc444v2 => {
                 // Parse with LC mode information
@@ -956,7 +955,9 @@ impl H264Decoder for FfmpegDecoder {
                 }
 
                 // Decode first stream
-                let frame1 = self.decode_h264_stream(&stream_info.h264_streams[0])?;
+                let mut frame1 = self.decode_h264_stream(&stream_info.h264_streams[0])?;
+                let mut cache_next_base = None::<Yuv444Frame>;
+                let mut store_previous = false;
 
                 let final_frame = match stream_info.lc_mode {
                     Avc444Lc::DualStream => {
@@ -971,16 +972,17 @@ impl H264Decoder for FfmpegDecoder {
                     Avc444Lc::Progressive1 => {
                         // op=1: YUV420 in stream 1 (luma + chroma update)
                         // This is a full frame update - save for future Progressive2 frames
-                        self.previous_yuv_frame = Some(frame1.clone());
-                        self.previous_yuv444_frame = Some(yuv420_frame_to_yuv444(&frame1)?);
+                        cache_next_base = Some(yuv420_frame_to_yuv444(&frame1)?);
+                        store_previous = true;
                         frame1
                     }
                     Avc444Lc::Progressive2 => {
                         // op=2: Chroma420 only in stream 1
                         // Combine with previous luma (like FreeRDP's AVC444_CHROMAv2)
-                        if self.previous_yuv_frame.is_some() && self.previous_yuv444_frame.is_some()
-                        {
-                            let prev_frame = self.previous_yuv_frame.as_ref().unwrap();
+                        if let (Some(prev_frame), Some(_)) = (
+                            self.previous_yuv_frame.as_ref(),
+                            self.previous_yuv444_frame.as_ref(),
+                        ) {
                             debug!(
                                 "Progressive2: Combining chroma frame ({}x{}, fmt={:?}) with previous luma ({}x{}, fmt={:?})",
                                 frame1.width(), frame1.height(), frame1.format(),
@@ -994,7 +996,16 @@ impl H264Decoder for FfmpegDecoder {
                     }
                 };
 
-                self.convert_to_bgra(&final_frame)
+                let decoded = self.convert_to_bgra(&final_frame)?;
+
+                if store_previous {
+                    if let Some(cached) = cache_next_base {
+                        self.previous_yuv444_frame = Some(cached);
+                    }
+                    self.previous_yuv_frame = Some(final_frame);
+                }
+
+                Ok(decoded)
             }
         }
     }
