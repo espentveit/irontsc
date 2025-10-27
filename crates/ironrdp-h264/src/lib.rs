@@ -95,18 +95,22 @@ pub struct H264Metablock {
 
 impl H264Metablock {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        let data_start = data.len();
+        tracing::info!("🎬 H264Metablock parsing: starting with {} bytes", data_start);
+        
         if data.len() < 4 {
-            bail!("Not enough data for H264Metablock");
+            bail!("Not enough data for H264Metablock (need 4, got {})", data.len());
         }
 
         let num_regions = data.get_u32_le();
+        tracing::info!("🎬 H264Metablock: num_regions={}, {} bytes remaining", num_regions, data.len());
 
         let mut region_rects = Vec::with_capacity(num_regions as usize);
         let mut quant_quality = Vec::with_capacity(num_regions as usize);
 
-        for _ in 0..num_regions {
+        for i in 0..num_regions {
             if data.len() < 8 {
-                bail!("Not enough data for region rect");
+                bail!("Not enough data for region rect {} (need 8, got {})", i, data.len());
             }
 
             let left = data.get_u16_le();
@@ -116,9 +120,9 @@ impl H264Metablock {
             region_rects.push((left, top, right, bottom));
         }
 
-        for _ in 0..num_regions {
+        for i in 0..num_regions {
             if data.len() < 2 {
-                bail!("Not enough data for quant/quality");
+                bail!("Not enough data for quant/quality {} (need 2, got {})", i, data.len());
             }
 
             let qp_val = data.get_u8();
@@ -126,6 +130,7 @@ impl H264Metablock {
             quant_quality.push(H264QuantQuality::from_bytes(qp_val, quality_val));
         }
 
+        tracing::info!("🎬 H264Metablock parsed successfully, {} bytes remaining", data.len());
         Ok(Self {
             num_regions,
             region_rects,
@@ -143,21 +148,21 @@ pub struct Avc420Bitstream {
 
 impl Avc420Bitstream {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        let data_start = data.len();
+        tracing::info!("🎬 AVC420 parsing: starting with {} bytes", data_start);
+        
         let meta = H264Metablock::parse(data)?;
+        tracing::info!("🎬 AVC420 parsed metablock, {} bytes remaining for H.264 data", data.len());
 
-        if data.len() < 4 {
-            bail!("Not enough data for H.264 length");
-        }
+        // Per MS-RDPEGFX spec: avc420EncodedBitstream is a variable-length array of bytes
+        // representing H.264 Annex B format data. There is NO length field - the data
+        // extends to the end of the parent structure (determined by caller).
+        // The H.264 data should start with NAL unit start codes (00 00 00 01 or 00 00 01)
+        
+        let h264_data = data.to_vec();
+        data.advance(data.len());
 
-        let length = data.get_u32_le() as usize;
-
-        if data.len() < length {
-            bail!("Not enough data for H.264 bitstream");
-        }
-
-        let h264_data = data[..length].to_vec();
-        data.advance(length);
-
+        tracing::info!("🎬 AVC420 parsed successfully: metablock + {} bytes of H.264 data", h264_data.len());
         Ok(Self { meta, h264_data })
     }
 }
@@ -196,8 +201,10 @@ pub struct Avc444Bitstream {
 
 impl Avc444Bitstream {
     pub fn parse(data: &mut &[u8]) -> Result<Self> {
+        let original_len = data.len();
+        
         if data.len() < 4 {
-            bail!("Not enough data for AVC444 header");
+            bail!("Not enough data for AVC444 header (need 4, got {})", data.len());
         }
 
         // Read first 32 bits
@@ -207,9 +214,32 @@ impl Avc444Bitstream {
         let lc = Avc444Lc::try_from(((header >> 30) & 0x03) as u8)?;
         let bitstream1_len = (header & 0x3FFFFFFF) as usize;
 
+        tracing::info!(
+            "🎬 AVC444 header parsed: LC={:?} bitstream1_len={} bytes, data_remaining={} bytes (header=0x{:08X})",
+            lc,
+            bitstream1_len,
+            data.len(),
+            header
+        );
+
+        // Handle zero-length bitstream (empty frame or invalid)
+        if bitstream1_len == 0 {
+            tracing::warn!(
+                "⚠️ AVC444 bitstream1_len is 0 - skipping frame (LC={:?}, remaining={} bytes)",
+                lc,
+                data.len()
+            );
+            bail!("AVC444 bitstream1 has zero length (empty frame)");
+        }
+
         // Validate length
         if data.len() < bitstream1_len {
-            bail!("Not enough data for AVC444 bitstream1");
+            bail!(
+                "Not enough data for AVC444 bitstream1: need {} bytes, got {} (total was {})",
+                bitstream1_len,
+                data.len(),
+                original_len
+            );
         }
 
         // Parse first bitstream

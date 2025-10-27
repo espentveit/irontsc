@@ -148,8 +148,9 @@ pub trait GfxContext {
 #[derive(Debug)]
 struct FrameState {
     frame_id: u32,
-    timestamp: u32,
+    server_timestamp: u32,  // Server's timestamp from START_FRAME (not used in QOE)
     start_time: Instant,
+    client_timestamp_ms: u32,  // Client's timestamp for QOE (ms since first frame)
 }
 
 /// RDPEGFX client
@@ -158,6 +159,8 @@ pub struct GfxClient<Ctx: GfxContext> {
     pub ctx: Ctx,
     /// Negotiated capability version
     cap_version: Option<u32>,
+    /// Client-side timestamp origin for QOE measurements
+    qoe_timestamp_origin: Option<Instant>,
     /// Negotiated capability flags
     cap_flags: u32,
     /// Current frame state
@@ -187,6 +190,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
             small_cache,
             suspend_acks,
             send_qoe_acks: true,
+            qoe_timestamp_origin: None,
         }
     }
 
@@ -343,11 +347,12 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
         // Enable QoE for 10.0+
         self.send_qoe_acks = caps.version >= caps::cap_version::V10;
 
-        debug!(
-            "CAPS_CONFIRM: version={} ({}), flags=0x{:08X}",
+        info!(
+            "📋 CAPS_CONFIRM: version={} (0x{:08X}), flags=0x{:08X}, QoE_enabled={}",
             caps::version_string(caps.version),
             caps.version,
-            caps.flags
+            caps.flags,
+            self.send_qoe_acks
         );
 
         Ok(())
@@ -362,10 +367,25 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
             frame.timestamp
         );
 
+        let now = Instant::now();
+        
+        // Initialize QOE timestamp origin on first frame
+        // Per MS-RDPEGFX: "The value of the first timestamp sent by the client implicitly 
+        // defines the origin for all subsequent timestamps"
+        let client_timestamp_ms = if let Some(origin) = self.qoe_timestamp_origin {
+            // Calculate elapsed time since first frame's START_FRAME
+            origin.elapsed().as_millis() as u32
+        } else {
+            // First frame - set origin to current time and use timestamp 0
+            self.qoe_timestamp_origin = Some(now);
+            0
+        };
+
         self.current_frame = Some(FrameState {
             frame_id: frame.frame_id,
-            timestamp: frame.timestamp,
-            start_time: Instant::now(),
+            server_timestamp: frame.timestamp,
+            start_time: now,
+            client_timestamp_ms,
         });
 
         self.unacknowledged_frames += 1;
@@ -707,15 +727,17 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         let qoe = QoeFrameAcknowledge {
             frame_id: frame_state.frame_id,
-            timestamp: frame_state.timestamp,
+            timestamp: frame_state.client_timestamp_ms,  // Use client's timestamp, not server's!
             time_diff_se,
             time_diff_edr,
         };
 
-        trace!(
-            "Sending QOE_FRAME_ACKNOWLEDGE: frame_id={}, time_diff={}ms",
+        info!(
+            "📨 Sending QOE_FRAME_ACKNOWLEDGE: frame_id={}, client_timestamp={}ms, time_diff_se={}ms, time_diff_edr={}ms",
             frame_state.frame_id,
-            time_diff_se
+            frame_state.client_timestamp_ms,
+            time_diff_se,
+            time_diff_edr
         );
 
         self.ctx.send(&qoe.to_bytes())
