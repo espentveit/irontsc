@@ -1173,34 +1173,23 @@ impl GtkRdpWidget {
                 None => {
                     debug_assert_eq!(buffer.len(), frame_len);
 
-                    if let Some(staging) = state.staging.as_mut() {
-                        if staging.len() != frame_len {
-                            staging.resize(frame_len, 0);
-                        }
-
-                        staging.copy_from_slice(buffer.as_slice());
-                        state.staging_ready = true;
-                    } else {
-                        state.staging_ready = false;
-                    }
-
                     state.frame = buffer.clone();
+                    state.staging = Some(buffer);
+                    state.staging_ready = true;
                     state.frame_version = state.frame_version.wrapping_add(1);
                 }
                 Some(region) => {
-                    let FrameState {
-                        frame,
-                        staging,
-                        staging_ready,
-                        frame_version,
-                        ..
-                    } = &mut *state;
+                    if state.frame.len() != frame_len {
+                        state.frame = Arc::new(vec![0; frame_len]);
+                    }
 
-                    let frame_vec = Arc::make_mut(frame);
+                    state.staging = None;
+                    state.staging_ready = false;
+
+                    let frame_vec = Arc::make_mut(&mut state.frame);
 
                     if frame_vec.len() != frame_len {
                         frame_vec.resize(frame_len, 0);
-                        *staging_ready = false;
                     }
 
                     let region_width = usize::from(region.width.get());
@@ -1209,58 +1198,16 @@ impl GtkRdpWidget {
 
                     debug_assert_eq!(buffer.len(), bytes_per_row * region_height);
 
-                    match staging {
-                        Some(staging) if staging.len() == frame_len => {
-                            if !*staging_ready {
-                                staging.copy_from_slice(frame_vec);
-                            }
+                    for row in 0..region_height {
+                        let src_offset = row * bytes_per_row;
+                        let dst_offset =
+                            (usize::from(region.y) + row) * stride + usize::from(region.x) * 4;
 
-                            for row in 0..region_height {
-                                let src_offset = row * bytes_per_row;
-                                let dst_offset = (usize::from(region.y) + row) * stride
-                                    + usize::from(region.x) * 4;
-
-                                frame_vec[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
-                                    &buffer[src_offset..src_offset + bytes_per_row],
-                                );
-                                staging[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
-                                    &buffer[src_offset..src_offset + bytes_per_row],
-                                );
-                            }
-
-                            *staging_ready = true;
-                        }
-                        Some(staging) => {
-                            staging.resize(frame_len, 0);
-
-                            for row in 0..region_height {
-                                let src_offset = row * bytes_per_row;
-                                let dst_offset = (usize::from(region.y) + row) * stride
-                                    + usize::from(region.x) * 4;
-
-                                frame_vec[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
-                                    &buffer[src_offset..src_offset + bytes_per_row],
-                                );
-                            }
-
-                            *staging_ready = false;
-                        }
-                        None => {
-                            for row in 0..region_height {
-                                let src_offset = row * bytes_per_row;
-                                let dst_offset = (usize::from(region.y) + row) * stride
-                                    + usize::from(region.x) * 4;
-
-                                frame_vec[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
-                                    &buffer[src_offset..src_offset + bytes_per_row],
-                                );
-                            }
-
-                            *staging_ready = false;
-                        }
+                        frame_vec[dst_offset..dst_offset + bytes_per_row]
+                            .copy_from_slice(&buffer[src_offset..src_offset + bytes_per_row]);
                     }
 
-                    *frame_version = frame_version.wrapping_add(1);
+                    state.frame_version = state.frame_version.wrapping_add(1);
                 }
             }
         }
@@ -1316,36 +1263,25 @@ impl GtkRdpWidget {
         let bytes = {
             let mut state = self.framebuffer.lock().expect("framebuffer mutex poisoned");
 
-            {
-                let frame_vec = Arc::make_mut(&mut state.frame);
-
-                if frame_vec.len() != frame_len {
-                    frame_vec.resize(frame_len, 0);
-                    state.staging_ready = false;
-                }
-            }
-
-            let mut staging = state.staging.take().unwrap_or_else(|| vec![0u8; frame_len]);
-
-            if staging.len() != frame_len {
-                staging.resize(frame_len, 0);
+            if state.frame.len() != frame_len {
+                state.frame = Arc::new(vec![0; frame_len]);
                 state.staging_ready = false;
             }
 
-            if !state.staging_ready {
-                let frame_vec = Arc::make_mut(&mut state.frame);
-                staging.copy_from_slice(frame_vec);
+            if !state.staging_ready
+                || state
+                    .staging
+                    .as_ref()
+                    .map(|arc| arc.len() != frame_len)
+                    .unwrap_or(true)
+            {
+                state.staging = Some(state.frame.clone());
                 state.staging_ready = true;
             }
 
-            let upload_version = state.frame_version;
-            state.latest_upload_version = upload_version;
+            let staging_arc = state.staging.as_ref().unwrap().clone();
 
-            gtk::glib::Bytes::from_owned(FrameBytes::new(
-                staging,
-                Arc::clone(&self.framebuffer),
-                upload_version,
-            ))
+            gtk::glib::Bytes::from_owned(FrameBytes::new(staging_arc))
         };
 
         let texture = gtk::gdk::MemoryTexture::new(
@@ -1440,21 +1376,17 @@ impl GtkRdpWidget {
 
 struct FrameState {
     frame: Arc<Vec<u8>>,
-    staging: Option<Vec<u8>>,
+    staging: Option<Arc<Vec<u8>>>,
     staging_ready: bool,
     frame_version: u64,
-    latest_upload_version: u64,
 }
 
 impl FrameState {
     fn clear(&mut self) {
         self.frame = Arc::new(Vec::new());
-        if let Some(staging) = self.staging.as_mut() {
-            staging.clear();
-        }
+        self.staging = None;
         self.staging_ready = false;
         self.frame_version = 0;
-        self.latest_upload_version = 0;
     }
 }
 
@@ -1465,7 +1397,6 @@ impl Default for FrameState {
             staging: None,
             staging_ready: false,
             frame_version: 0,
-            latest_upload_version: 0,
         }
     }
 }
@@ -1477,40 +1408,18 @@ struct PendingUpload {
 }
 
 struct FrameBytes {
-    data: Option<Vec<u8>>,
-    state: Arc<Mutex<FrameState>>,
-    version: u64,
+    data: Arc<Vec<u8>>,
 }
 
 impl FrameBytes {
-    fn new(data: Vec<u8>, state: Arc<Mutex<FrameState>>, version: u64) -> Self {
-        Self {
-            data: Some(data),
-            state,
-            version,
-        }
+    fn new(data: Arc<Vec<u8>>) -> Self {
+        Self { data }
     }
 }
 
 impl AsRef<[u8]> for FrameBytes {
     fn as_ref(&self) -> &[u8] {
-        self.data
-            .as_deref()
-            .expect("framebuffer contents should be available")
-    }
-}
-
-impl Drop for FrameBytes {
-    fn drop(&mut self) {
-        if let Some(buffer) = self.data.take() {
-            if let Ok(mut state) = self.state.lock() {
-                if state.staging.is_none() && state.latest_upload_version == self.version {
-                    let is_current = state.frame_version == self.version;
-                    state.staging_ready = is_current;
-                    state.staging = Some(buffer);
-                }
-            }
-        }
+        self.data.as_slice()
     }
 }
 
