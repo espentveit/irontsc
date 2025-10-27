@@ -92,7 +92,7 @@ pub struct ImageRegion {
 #[derive(Debug)]
 pub enum RdpOutputEvent {
     Image {
-        buffer: Vec<u8>,
+        buffer: Arc<Vec<u8>>,
         width: NonZeroU16,
         height: NonZeroU16,
         region: Option<ImageRegion>,
@@ -2299,7 +2299,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         && region.height() == height.get();
 
                     if !frame_ready || is_full_frame {
-                        let buffer = image.data().to_vec();
+                        let buffer = Arc::new(image.data().to_vec());
 
                         event_loop_proxy
                             .send_event(RdpOutputEvent::Image {
@@ -2340,7 +2340,7 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                         event_loop_proxy
                             .send_event(RdpOutputEvent::Image {
-                                buffer,
+                                buffer: Arc::new(buffer),
                                 width,
                                 height,
                                 region: Some(region),
@@ -2397,7 +2397,7 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                         event_loop_proxy
                             .send_event(RdpOutputEvent::Image {
-                                buffer: output.data.clone(),
+                                buffer: Arc::new(output.data.clone()),
                                 width,
                                 height,
                                 region: None,
