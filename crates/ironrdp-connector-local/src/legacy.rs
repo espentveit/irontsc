@@ -145,6 +145,77 @@ pub fn decode_share_control(ctx: SendDataIndicationCtx<'_>) -> ConnectorResult<S
     })
 }
 
+/// Attempts to detect and decode an InitiateMultitransportRequest PDU.
+/// Returns Some(request) if the data is a valid multitransport request, None otherwise.
+/// 
+/// The InitiateMultitransportRequest can appear in two forms:
+/// 1. Raw PDU (24 bytes): sent during capabilities exchange
+/// 2. With security header (28 bytes): 4-byte BasicSecurityHeader + 24-byte PDU
+pub fn detect_multitransport_request(
+    ctx: &SendDataIndicationCtx<'_>,
+) -> Option<rdp::multitransport::InitiateMultitransportRequest> {
+    // InitiateMultitransportRequest has a fixed size of 24 bytes:
+    // - requestId: 4 bytes
+    // - protocol: 2 bytes
+    // - reserved: 2 bytes
+    // - securityCookie: 16 bytes
+    const MULTITRANSPORT_PDU_SIZE: usize = 24;
+    const SECURITY_HEADER_SIZE: usize = 4;
+    
+    let pdu_data = match ctx.user_data.len() {
+        MULTITRANSPORT_PDU_SIZE => {
+            // Case 1: Raw PDU without security header (during capabilities exchange)
+            eprintln!("🔍 Attempting to decode 24-byte PDU as raw InitiateMultitransportRequest");
+            ctx.user_data
+        }
+        size if size == MULTITRANSPORT_PDU_SIZE + SECURITY_HEADER_SIZE => {
+            // Case 2: PDU with 4-byte security header prefix
+            eprintln!("🔍 Attempting to decode 28-byte PDU as InitiateMultitransportRequest with security header");
+            &ctx.user_data[SECURITY_HEADER_SIZE..]
+        }
+        _ => {
+            // Not the right size for a multitransport request
+            return None;
+        }
+    };
+
+    // Try to decode as InitiateMultitransportRequest
+    match decode::<rdp::multitransport::InitiateMultitransportRequest>(pdu_data) {
+        Ok(request) => {
+            eprintln!("✅ Successfully decoded InitiateMultitransportRequest");
+            eprintln!("   Request ID: {}", request.request_id);
+            eprintln!("   Protocol: {:?}", request.requested_protocol);
+            eprintln!("   Security Cookie: {:02x?}", &request.security_cookie[..]);
+            Some(request)
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to decode as InitiateMultitransportRequest: {:?}", e);
+            None
+        }
+    }
+}
+
+/// Encodes an InitiateMultitransportResponse PDU to be sent to the server.
+/// This should be called in response to an InitiateMultitransportRequest.
+/// 
+/// Per MS-RDPBCGR spec, the response must be sent on the MCS Message Channel
+/// (from ServerMessageChannelData in GCC Conference Create Response).
+pub fn encode_multitransport_response(
+    user_channel_id: u16,
+    message_channel_id: u16,
+    request_id: u32,
+    buf: &mut WriteBuf,
+) -> ConnectorResult<usize> {
+    let response = rdp::multitransport::InitiateMultitransportResponse::success(request_id);
+    
+    eprintln!("📨 Encoding InitiateMultitransportResponse:");
+    eprintln!("   Request ID: {}", request_id);
+    eprintln!("   User Channel: 0x{:04x}", user_channel_id);
+    eprintln!("   Message Channel: 0x{:04x}", message_channel_id);
+    
+    encode_send_data_request(user_channel_id, message_channel_id, &response, buf)
+}
+
 pub fn encode_share_data(
     initiator_id: u16,
     channel_id: u16,

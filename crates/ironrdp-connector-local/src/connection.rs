@@ -660,6 +660,7 @@ impl Sequence for ClientConnector {
                         self.config.clone(),
                         io_channel_id,
                         user_channel_id,
+                        self.message_channel_id,
                     ),
                 },
             ),

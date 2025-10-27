@@ -25,16 +25,18 @@ use crate::{
 pub struct ConnectionActivationSequence {
     pub state: ConnectionActivationState,
     config: Config,
+    message_channel_id: Option<u16>,
 }
 
 impl ConnectionActivationSequence {
-    pub fn new(config: Config, io_channel_id: u16, user_channel_id: u16) -> Self {
+    pub fn new(config: Config, io_channel_id: u16, user_channel_id: u16, message_channel_id: Option<u16>) -> Self {
         Self {
             state: ConnectionActivationState::CapabilitiesExchange {
                 io_channel_id,
                 user_channel_id,
             },
             config,
+            message_channel_id,
         }
     }
 
@@ -112,18 +114,58 @@ impl Sequence for ConnectionActivationSequence {
                     send_data_indication_ctx.user_data.len()
                 );
 
-                // IMPORTANT: During CapabilitiesExchange, the server sends us:
-                // 1. ServerDemandActive (mandatory, MS-RDPBCGR section 2.2.1.4)
+                // IMPORTANT: During CapabilitiesExchange, the server may send us:
+                // 1. InitiateMultitransportRequest (optional, if multitransport is supported)
+                // 2. ServerDemandActive (mandatory, MS-RDPBCGR section 2.2.1.4)
                 //
                 // Per MS-RDPBCGR section 2.2.1.4:
                 // "When the server has completed reading the ClientConfirmActivePDU, it MUST send
                 // a ServerDemandActivePDU followed by a ServerSynchronizePDU..."
                 //
-                // All data in this state should be interpreted as ShareControlHeaders wrapping ShareData.
-                // Do NOT attempt to parse as licensing PDU or multitransport here - these come in
-                // different connection states or are wrapped differently.
+                // We MUST check for InitiateMultitransportRequest BEFORE attempting to decode as
+                // ShareControlHeader, because the multitransport PDU is NOT a ShareControlHeader
+                // and will cause decode_share_control to fail.
 
-                // Decode as ShareControlHeader (normal capabilities exchange)
+                // First, check if this is an InitiateMultitransportRequest
+                if let Some(multitransport_request) =
+                    legacy::detect_multitransport_request(&send_data_indication_ctx)
+                {
+                    debug!(
+                        "Received InitiateMultitransportRequest: request_id={}, protocol={:?}",
+                        multitransport_request.request_id, multitransport_request.requested_protocol
+                    );
+
+                    // Send InitiateMultitransportResponse
+                    // Per MS-RDPBCGR spec, the response MUST be sent on the MCS Message Channel
+                    let message_channel = self.message_channel_id.unwrap_or_else(|| {
+                        warn!(
+                            "No message_channel_id available for multitransport response, using io_channel_id as fallback"
+                        );
+                        io_channel_id
+                    });
+
+                    let written = legacy::encode_multitransport_response(
+                        user_channel_id,
+                        message_channel,
+                        multitransport_request.request_id,
+                        output,
+                    )?;
+
+                    debug!(
+                        "Sent InitiateMultitransportResponse: request_id={}, written={} bytes",
+                        multitransport_request.request_id, written
+                    );
+
+                    // Stay in CapabilitiesExchange state to wait for ServerDemandActive
+                    self.state = ConnectionActivationState::CapabilitiesExchange {
+                        io_channel_id,
+                        user_channel_id,
+                    };
+
+                    return Ok(Written::from_size(written)?);
+                }
+
+                // Not a multitransport request - decode as ShareControlHeader (normal capabilities exchange)
                 let share_control_ctx = legacy::decode_share_control(send_data_indication_ctx)?;
 
                 debug!(message = ?share_control_ctx.pdu, "Received");
@@ -324,6 +366,7 @@ fn create_client_confirm_active(
             major_platform_type: config.platform,
             extra_flags: GeneralExtraFlags::FASTPATH_OUTPUT_SUPPORTED
                 | GeneralExtraFlags::NO_BITMAP_COMPRESSION_HDR
+                | GeneralExtraFlags::LONG_CREDENTIALS_SUPPORTED
                 | GeneralExtraFlags::MULTITRANSPORT_SUPPORTED, // Enable UDP multitransport
             ..Default::default()
         }),
