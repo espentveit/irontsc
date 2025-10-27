@@ -16,7 +16,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::dtls_udp::{DtlsConfig, DtlsUdpSocket};
+use crate::dtls_udp::{DtlsConfig, DtlsUdpSocket, TransportSecurityMode};
 
 /// UDP transport configuration
 #[derive(Debug, Clone)]
@@ -262,103 +262,117 @@ impl UdpTransportManager {
         let _ = self.event_tx.send(UdpTransportEvent::Connected);
 
         // ═══════════════════════════════════════════════════════════════════════
-        // DTLS HANDSHAKE (MS-RDPEMT Requirement with Enhanced RDP Security)
+        // TLS/DTLS HANDSHAKE (MS-RDPEMT Requirement with Enhanced RDP Security)
         // ═══════════════════════════════════════════════════════════════════════
         //
         // Per MS-RDPEMT Section 1.5 and Appendix A Footnote <1>:
-        // - DTLS is REQUIRED when Enhanced RDP Security (TLS/CredSSP/RDSTLS) is used
-        // - DTLS handshake MUST complete before sending MS-RDPEMT tunnel PDUs
+        // - TLS/DTLS is REQUIRED when Enhanced RDP Security (TLS/CredSSP/RDSTLS) is used
+        // - Handshake MUST complete before sending MS-RDPEMT tunnel PDUs
         // - Standard RDP Security (RC4) connections use unencrypted UDP (spec-compliant)
         //
-        // Windows behavior with Standard Security:
-        // - No DTLS handshake performed
-        // - UDP packets sent/received in plaintext
-        // - Tunnel creation and data transfer work without encryption
-        //
-        // Windows behavior with Enhanced Security (observed in some environments):
-        // - DTLS 1.2 handshake initiated
-        // - All tunnel PDUs encrypted with negotiated cipher
-        // - Failure to complete DTLS causes tunnel creation to fail
+        // Per MS-RDPEMT Section 1.5:
+        // - TLS for reliable UDP transport (RDP-UDP-R mode)
+        // - DTLS for lossy UDP transport (RDP-UDP-L mode)
         // ═══════════════════════════════════════════════════════════════════════
 
-        // DTLS handshake handling moved to event loop - will be performed after UDP handshake
-        // by sending/receiving DTLS messages wrapped in RDP UDP DATA packets
-        if self.use_dtls {
-            info!("🔐 DTLS required (Enhanced RDP Security in effect)");
-            info!("   DTLS handshake will be performed via RDP UDP DATA packets");
-
-            // Create DTLS layer (encryption only, no socket I/O)
-            let dtls_config = DtlsConfig {
-                server_name: self.server_name.clone(),
-                verify_certificate: false, // TODO: Enable in production
-            };
-
-            match DtlsUdpSocket::new(self.server_addr, dtls_config) {
-                Ok(mut dtls) => {
-                    // Start DTLS handshake to get ClientHello
-                    match dtls.start_handshake() {
-                        Ok(client_hello) => {
-                            info!(
-                                "📤 Sending DTLS ClientHello ({} bytes) in RDP UDP DATA packet",
-                                client_hello.len()
-                            );
-                            // Send ClientHello wrapped in RDP UDP DATA packet
-                            if let Err(e) = self.send_data(client_hello).await {
-                                error!("Failed to send DTLS ClientHello: {}", e);
-                                return Err(e);
-                            }
-                            self.dtls_socket = Some(dtls);
-                            // Note: Tunnel creation will happen after DTLS handshake completes
-                            // (handled in the event loop when we receive DTLS ServerHello response)
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to start DTLS handshake: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Failed to create DTLS layer: {}", e);
-                    let _ = self.event_tx.send(UdpTransportEvent::Disconnected(format!(
-                        "DTLS initialization failed: {}",
-                        e
-                    )));
-                    return Err(e);
-                }
-            }
-        } else {
-            info!("ℹ️  DTLS not required (Standard RDP Security)");
-            info!("   UDP tunnel will use unencrypted datagrams per MS-RDPEMT Appendix A");
-        }
-
-        // Create tunnel if parameters provided (only if DTLS not required)
-        // If DTLS is required, tunnel will be created after DTLS handshake completes
-        if !self.use_dtls {
-            if let (Some(request_id), Some(security_cookie)) =
-                (self.request_id, self.security_cookie)
-            {
-                if let Err(e) = self.create_tunnel(request_id, security_cookie).await {
-                    error!("Tunnel creation failed: {}", e);
-                    let _ = self.event_tx.send(UdpTransportEvent::Disconnected(format!(
-                        "Tunnel creation failed: {}",
-                        e
-                    )));
-                    return Err(e);
-                }
-                // Note: Tunnel will be marked as established when TunnelCreateResponse is received
-                // in handle_tunnel_pdu() - look for "✅ Tunnel creation succeeded" message
-            } else {
-                warn!("No tunnel parameters provided, skipping tunnel creation");
-            }
-        } else {
-            info!("⏸️  Tunnel creation deferred until DTLS handshake completes");
-        }
+        // Flag to track if we need to create tunnel (only for non-TLS connections!)
+        // TLS connections send TLS data DIRECTLY in RDPUDP DATA packets (no tunnel)
+        let mut tunnel_creation_pending = !self.use_dtls
+            && self.request_id.is_some() 
+            && self.security_cookie.is_some();
+        
+        // Flag to track if we need to initiate TLS/DTLS handshake
+        // TLS handshake sends data DIRECTLY in RDPUDP (no tunnel wrapping)
+        let mut tls_handshake_pending = self.use_dtls;
 
         // Main event loop
         let mut recv_buffer = vec![0u8; 65536];
         let mut check_retransmit_interval = tokio::time::interval(Duration::from_millis(100));
 
         loop {
+            // Create tunnel on first iteration ONLY for non-TLS connections
+            // TLS connections DO NOT use MS-RDPEMT tunnels - they send TLS directly in RDPUDP
+            if tunnel_creation_pending {
+                tunnel_creation_pending = false;
+                
+                info!("ℹ️  TLS/DTLS not required (Standard RDP Security)");
+                info!("   Creating UDP tunnel with unencrypted datagrams per MS-RDPEMT Appendix A");
+                
+                if let (Some(request_id), Some(security_cookie)) = (self.request_id, self.security_cookie) {
+                    if let Err(e) = self.create_tunnel(request_id, security_cookie).await {
+                        error!("Tunnel creation failed: {}", e);
+                        let _ = self.event_tx.send(UdpTransportEvent::Disconnected(format!(
+                            "Tunnel creation failed: {}",
+                            e
+                        )));
+                        break;
+                    }
+                } else {
+                    warn!("No tunnel parameters provided, skipping tunnel creation");
+                }
+            }
+
+            // Initiate TLS/DTLS handshake if required
+            // TLS data is sent DIRECTLY in RDPUDP DATA packets (NOT wrapped in tunnel PDUs)
+            // This is per MS-RDPEMT spec - tunnels are only for non-TLS connections
+            if tls_handshake_pending {
+                tls_handshake_pending = false;
+
+                info!("🔐 Starting TLS handshake over RDPUDP");
+                info!("   TLS data will be sent DIRECTLY in RDPUDP DATA packets (no tunnel wrapping)");
+
+                // Per MS-RDPEMT Section 1.5: TLS for reliable, DTLS for lossy
+                let dtls_config = DtlsConfig {
+                    server_name: self.server_name.clone(),
+                    verify_certificate: false, // TODO: Enable in production
+                    mode: TransportSecurityMode::Tls, // TLS for reliable UDP (RDP-UDP-R)
+                };
+
+                match DtlsUdpSocket::new(self.server_addr, dtls_config) {
+                    Ok(mut dtls) => {
+                        // Start TLS handshake to get ClientHello
+                        match dtls.start_handshake() {
+                            Ok(client_hello) => {
+                                info!(
+                                    "📤 Sending TLS ClientHello ({} bytes) directly in RDPUDP DATA",
+                                    client_hello.len()
+                                );
+                                debug!("   TLS ClientHello bytes: {:02x?}", &client_hello[..client_hello.len().min(32)]);
+                                
+                                // IMPORTANT: Set dtls_socket BEFORE sending so encryption is active
+                                self.dtls_socket = Some(dtls);
+                                
+                                // Send ClientHello DIRECTLY via send_data (no tunnel wrapping!)
+                                // This matches FreeRDP behavior
+                                match self.send_data(client_hello.clone()).await {
+                                    Ok(()) => {
+                                        info!("✅ TLS ClientHello sent successfully");
+                                    }
+                                    Err(e) => {
+                                        error!("❌ Failed to send TLS ClientHello: {}", e);
+                                        self.dtls_socket = None;
+                                        break;
+                                    }
+                                }
+                                // Server response will be handled in recv_from branch below
+                            }
+                            Err(e) => {
+                                error!("❌ Failed to start TLS handshake: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ Failed to create TLS layer: {}", e);
+                        let _ = self.event_tx.send(UdpTransportEvent::Disconnected(format!(
+                            "TLS initialization failed: {}",
+                            e
+                        )));
+                        break;
+                    }
+                }
+            }
+
             tokio::select! {
                 // Handle incoming UDP packets
                 result = self.socket.recv_from(&mut recv_buffer) => {
@@ -453,8 +467,12 @@ impl UdpTransportManager {
     }
 
     async fn send_over_udp(&mut self, payload: &[u8]) -> Result<()> {
+        debug!("send_over_udp called with {} bytes", payload.len());
+        debug!("   First 32 bytes: {:02x?}", &payload[..payload.len().min(32)]);
+        
         // Check if DTLS is required and handshake is complete
         if let Some(dtls) = self.dtls_socket.as_mut() {
+            debug!("   DTLS socket exists, handshake_complete={}", dtls.is_handshake_complete());
             if dtls.is_handshake_complete() {
                 // DTLS handshake complete - encrypt the payload
                 let packets = dtls.encrypt(payload)?;
@@ -476,21 +494,24 @@ impl UdpTransportManager {
             } else {
                 // DTLS handshake not complete - send payload unencrypted
                 // (This is for DTLS handshake messages wrapped in RDP UDP DATA packets)
-                trace!(
+                debug!(
                     "Sending unencrypted packet ({} bytes) - DTLS handshake in progress",
                     payload.len()
                 );
-                self.socket
+                let sent_bytes = self.socket
                     .send(payload)
                     .await
                     .context("Failed to send UDP packet")?;
+                debug!("   Actually sent {} bytes over socket", sent_bytes);
             }
         } else {
+            debug!("   No DTLS socket - sending unencrypted");
             // No DTLS - send payload unencrypted
-            self.socket
+            let sent_bytes = self.socket
                 .send(payload)
                 .await
                 .context("Failed to send UDP packet")?;
+            debug!("   Actually sent {} bytes over socket", sent_bytes);
         }
 
         Ok(())
@@ -784,14 +805,18 @@ impl UdpTransportManager {
 
     /// Send data over UDP
     async fn send_data(&mut self, data: Vec<u8>) -> Result<()> {
+        debug!("send_data called with {} bytes", data.len());
         trace!("Sending data ({} bytes)", data.len());
 
         let mut fec_packet: Option<Vec<u8>> = None;
         let packet = {
             let mut conn = self.connection.lock().await;
+            debug!("Connection state: {:?}", conn.state());
             let packet = conn
                 .send_data(data)
                 .context("Failed to create source packet")?;
+
+            debug!("Created source packet: {} bytes", packet.len());
 
             if let Some(fec) = conn
                 .check_fec_block()
@@ -803,9 +828,10 @@ impl UdpTransportManager {
             packet
         };
 
+        debug!("Sending UDP packet: {} bytes", packet.len());
         self.send_over_udp(&packet).await?;
 
-        trace!("Sent source packet ({} bytes)", packet.len());
+        debug!("Sent source packet ({} bytes)", packet.len());
 
         if let Some(fec_packet) = fec_packet {
             self.send_over_udp(&fec_packet).await?;
@@ -867,6 +893,43 @@ impl UdpTransportManager {
 
         // For initial implementation, assume tunnel will be established
         // (response handling will be added in next iteration)
+        Ok(())
+    }
+
+    /// Send data through the MS-RDPEMT tunnel
+    /// This wraps the data in a TunnelPdu::Data and sends it over UDP
+    async fn send_tunnel_data(&mut self, data: Vec<u8>) -> Result<()> {
+        if !self.tunnel_established {
+            return Err(anyhow::anyhow!("Cannot send tunnel data: tunnel not established"));
+        }
+
+        debug!("📤 Sending {} bytes through MS-RDPEMT tunnel", data.len());
+
+        // Create TunnelPdu::Data with the payload
+        let tunnel_pdu = TunnelPdu::data(data);
+
+        // Encode the tunnel PDU
+        let mut buf = vec![0u8; tunnel_pdu.size()];
+        let mut cursor = WriteCursor::new(&mut buf);
+        tunnel_pdu
+            .encode(&mut cursor)
+            .context("Failed to encode TunnelPdu::Data")?;
+
+        debug!("   Tunnel PDU total: {} bytes", buf.len());
+        debug!("   Tunnel PDU bytes: {:02x?}", &buf[..buf.len().min(32)]);
+
+        // Send through UDP connection
+        let mut conn = self.connection.lock().await;
+        let udp_packet = conn
+            .send_data(buf)
+            .context("Failed to create UDP packet for tunnel data")?;
+        drop(conn); // Release lock
+
+        self.send_over_udp(&udp_packet)
+            .await
+            .context("Failed to send tunnel data")?;
+
+        debug!("✅ Sent {} bytes through tunnel", udp_packet.len());
         Ok(())
     }
 }

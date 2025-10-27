@@ -136,7 +136,8 @@ impl Processor {
             // Channel 1008 is used for multitransport/UDP protocol data during handshake
             // This is not a registered static or dynamic channel - it's a special protocol channel
             // Just ignore the data as it's handled at a different layer
-            debug!("Received data on multitransport channel {channel_id}, ignoring");
+            debug!("Received data on multitransport channel {channel_id}, {} bytes: {:02x?}", 
+                data_ctx.user_data.len(), &data_ctx.user_data[..data_ctx.user_data.len().min(32)]);
             Ok(Vec::new())
         } else if self.get_dvc_by_channel_id(channel_id.into()).is_some() {
             // This is a dynamic virtual channel (DVC) managed by drdynvc
