@@ -361,7 +361,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
     fn handle_start_frame(&mut self, data: &mut &[u8]) -> Result<()> {
         let frame = StartFrame::parse(data)?;
 
-        info!(
+        debug!(
             "🎬 START_FRAME: id={}, timestamp={}",
             frame.frame_id, frame.timestamp
         );
@@ -395,7 +395,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
     fn handle_end_frame(&mut self, data: &mut &[u8]) -> Result<()> {
         let frame = EndFrame::parse(data)?;
 
-        info!("🏁 END_FRAME: id={}", frame.frame_id);
+        debug!("🏁 END_FRAME: id={}", frame.frame_id);
 
         // Get frame state
         let frame_state = self
@@ -708,7 +708,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
             total_frames_decoded: self.total_frames_decoded,
         };
 
-        info!(
+        debug!(
             "📨 Sending FRAME_ACKNOWLEDGE: frame_id={}, total_decoded={}, queue_depth=0x{:08X}",
             frame_id, self.total_frames_decoded, queue_depth
         );
@@ -731,7 +731,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
             time_diff_edr,
         };
 
-        info!(
+        debug!(
             "📨 Sending QOE_FRAME_ACKNOWLEDGE: frame_id={}, client_timestamp={}ms, time_diff_se={}ms, time_diff_edr={}ms",
             frame_state.frame_id,
             frame_state.client_timestamp_ms,

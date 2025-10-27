@@ -317,9 +317,9 @@ impl GfxContext for GfxState {
         dest_rect: Rectangle,
         bitmap_data: &[u8],
     ) -> Result<()> {
-        use tracing::info;
+        use tracing::debug;
 
-        info!(
+        debug!(
             "🎨 RDPEGFX: WIRE_TO_SURFACE surface={} codec=0x{:04X} ({}) rect={}x{} at ({},{}) data={} bytes (first 32: {:02X?})",
             surface_id,
             codec_id,
@@ -339,7 +339,7 @@ impl GfxContext for GfxState {
 
         match codec_id {
             codec::codec_id::CLEARCODEC => {
-                info!(
+                debug!(
                     "🧹 Decoding ClearCodec frame ({} bytes)...",
                     bitmap_data.len()
                 );
@@ -353,12 +353,12 @@ impl GfxContext for GfxState {
                     .decompress(bitmap_data, width, height, &mut decoded_buffer)
                     .context("Failed to decode ClearCodec frame")?;
 
-                info!("✅ ClearCodec decode complete, blitting to surface");
+                debug!("✅ ClearCodec decode complete, blitting to surface");
                 Self::blit_raw_to_surface(surface, &dest_rect, &decoded_buffer)?;
             }
             #[cfg(feature = "h264")]
             codec::codec_id::AVC420 => {
-                info!(
+                debug!(
                     "🎬 Decoding H.264/AVC420 frame ({} bytes)...",
                     bitmap_data.len()
                 );
@@ -369,7 +369,7 @@ impl GfxContext for GfxState {
                     .decode_gfx_stream(AvcKind::Avc420, bitmap_data)
                     .context("Failed to decode AVC420 frame")?;
 
-                info!("✅ H.264 decode complete, blitting to surface");
+                debug!("✅ H.264 decode complete, blitting to surface");
                 Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
             }
             #[cfg(feature = "h264")]
@@ -395,7 +395,7 @@ impl GfxContext for GfxState {
                             || err_msg.contains("End of file")
                             || err_msg.contains("Invalid data found")
                         {
-                            info!("⏭️ Skipping AVC444 frame that can't be decoded: {}", e);
+                            debug!("⏭️ Skipping AVC444 frame that can't be decoded: {}", e);
                         } else {
                             // Other errors are still fatal
                             return Err(e).context("Failed to decode AVC444 frame");
@@ -409,9 +409,9 @@ impl GfxContext for GfxState {
             }
             codec::codec_id::RFX_PROGRESSIVE | codec::codec_id::RFX_PROGRESSIVE_V2 => {
                 // RFX Progressive codec - use the progressive decoder
-                use tracing::info;
+                use tracing::debug;
 
-                info!(
+                debug!(
                     "🎨 RFX Progressive codec (0x{:04X}) decoding {} bytes for surface {}",
                     codec_id,
                     bitmap_data.len(),
@@ -425,7 +425,7 @@ impl GfxContext for GfxState {
                     bitmap_data,
                 ) {
                     Ok(update) => {
-                        info!(
+                        debug!(
                             "✅ Progressive decode successful: {} tiles decoded for frame {}",
                             update.tiles.len(),
                             update.frame_index
@@ -486,7 +486,7 @@ impl GfxContext for GfxState {
                 .iter()
                 .any(|m| m.surface_id == surface_id)
             {
-                info!(
+                debug!(
                     "📺 Updating graphics output with decoded surface {}",
                     surface_id
                 );
@@ -503,7 +503,7 @@ impl GfxContext for GfxState {
             }
         } else {
             // Fallback: send surface directly if no graphics output composition
-            info!("📺 Sending surface {} directly to UI", surface_id);
+            debug!("📺 Sending surface {} directly to UI", surface_id);
             if let Some(surf) = self.surfaces.get(&surface_id) {
                 self.send_surface_to_ui(surf)?;
             }
@@ -1265,8 +1265,8 @@ impl GfxState {
         let height = NonZeroU16::new(output.height)
             .ok_or_else(|| anyhow::anyhow!("Graphics output height is zero"))?;
 
-        use tracing::info;
-        info!(
+        use tracing::debug;
+        debug!(
             "🖼️ Sending graphics output to UI: {}x{} ({} bytes)",
             width,
             height,

@@ -1805,7 +1805,7 @@ fn create_remote_desktop_window(
                     height,
                     region,
                 } => {
-                    tracing::info!(
+                    tracing::debug!(
                         "🎨 GTK: Received Image event: {}x{} ({} bytes) region={:?}",
                         width.get(),
                         height.get(),
