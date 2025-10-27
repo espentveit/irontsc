@@ -381,23 +381,20 @@ impl GfxContext for GfxState {
                     AvcKind::Avc444v2
                 };
 
-                match self
-                    .h264_decoder
-                    .0
-                    .decode_gfx_stream(kind, bitmap_data)
-                {
+                match self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data) {
                     Ok(frame) => {
                         Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
                         // Skip frames that can't be decoded (empty, corrupted, or unsupported)
-                        if err_msg.contains("zero length") 
+                        if err_msg.contains("zero length")
                             || err_msg.contains("empty frame")
                             || err_msg.contains("Failed to receive frame")
                             || err_msg.contains("Failed to send packet")
                             || err_msg.contains("End of file")
-                            || err_msg.contains("Invalid data found") {
+                            || err_msg.contains("Invalid data found")
+                        {
                             info!("⏭️ Skipping AVC444 frame that can't be decoded: {}", e);
                         } else {
                             // Other errors are still fatal

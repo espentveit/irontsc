@@ -538,7 +538,7 @@ pub fn create_client_data(
         }),
         monitor: None,
         message_channel: Some(ClientMessageChannelData),
-        multi_transport_channel: None,  // Disable UDP transport - use TCP only for now
+        multi_transport_channel: None, // Disable UDP transport - use TCP only for now
         monitor_extended: None,
     };
 

@@ -29,7 +29,12 @@ pub struct ConnectionActivationSequence {
 }
 
 impl ConnectionActivationSequence {
-    pub fn new(config: Config, io_channel_id: u16, user_channel_id: u16, message_channel_id: Option<u16>) -> Self {
+    pub fn new(
+        config: Config,
+        io_channel_id: u16,
+        user_channel_id: u16,
+        message_channel_id: Option<u16>,
+    ) -> Self {
         Self {
             state: ConnectionActivationState::CapabilitiesExchange {
                 io_channel_id,
@@ -132,7 +137,8 @@ impl Sequence for ConnectionActivationSequence {
                 {
                     debug!(
                         "Received InitiateMultitransportRequest: request_id={}, protocol={:?}",
-                        multitransport_request.request_id, multitransport_request.requested_protocol
+                        multitransport_request.request_id,
+                        multitransport_request.requested_protocol
                     );
 
                     // Send InitiateMultitransportResponse

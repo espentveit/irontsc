@@ -148,9 +148,9 @@ pub trait GfxContext {
 #[derive(Debug)]
 struct FrameState {
     frame_id: u32,
-    server_timestamp: u32,  // Server's timestamp from START_FRAME (not used in QOE)
+    server_timestamp: u32, // Server's timestamp from START_FRAME (not used in QOE)
     start_time: Instant,
-    client_timestamp_ms: u32,  // Client's timestamp for QOE (ms since first frame)
+    client_timestamp_ms: u32, // Client's timestamp for QOE (ms since first frame)
 }
 
 /// RDPEGFX client
@@ -363,14 +363,13 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         info!(
             "🎬 START_FRAME: id={}, timestamp={}",
-            frame.frame_id,
-            frame.timestamp
+            frame.frame_id, frame.timestamp
         );
 
         let now = Instant::now();
-        
+
         // Initialize QOE timestamp origin on first frame
-        // Per MS-RDPEGFX: "The value of the first timestamp sent by the client implicitly 
+        // Per MS-RDPEGFX: "The value of the first timestamp sent by the client implicitly
         // defines the origin for all subsequent timestamps"
         let client_timestamp_ms = if let Some(origin) = self.qoe_timestamp_origin {
             // Calculate elapsed time since first frame's START_FRAME
@@ -727,7 +726,7 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
         let qoe = QoeFrameAcknowledge {
             frame_id: frame_state.frame_id,
-            timestamp: frame_state.client_timestamp_ms,  // Use client's timestamp, not server's!
+            timestamp: frame_state.client_timestamp_ms, // Use client's timestamp, not server's!
             time_diff_se,
             time_diff_edr,
         };
