@@ -1761,6 +1761,7 @@ async fn active_session<T: RdpEventSender + Clone>(
     let correlation_id = connection_result.correlation_id;
     let message_channel_id = connection_result.message_channel_id;
     let selected_protocol = connection_result.selected_protocol;
+    let multitransport_request = connection_result.multitransport_request.clone();
 
     let mut active_stage = ActiveStage::new(connection_result);
 
@@ -1796,6 +1797,42 @@ async fn active_session<T: RdpEventSender + Clone>(
 
     // Track if we're currently establishing a UDP connection to avoid parallel attempts
     let mut udp_connection_in_progress = false;
+
+    // If we received a multitransport request during connection, establish UDP now
+    if let Some(mt_req) = multitransport_request {
+        info!("🎯 Multitransport request received during connection phase!");
+        info!("   Request ID: {}", mt_req.request_id);
+        info!("   Protocol: {:?} (raw=0x{:04x})", mt_req.protocol, mt_req.protocol.as_u16());
+        info!("   Security Cookie: {:02x?}", &mt_req.security_cookie[..]);
+
+        if let Some(corr_id) = correlation_id {
+            // Determine transport mode from protocol
+            let use_lossy = mt_req.protocol.has_lossy_bit();
+            
+            info!("🚀 Establishing UDP transport (lossy={})", use_lossy);
+            
+            // Establish UDP transport with the stored authentication data
+            match establish_udp_transport(
+                destination.clone(),
+                client_addr,
+                corr_id,
+                use_lossy,
+                Some(mt_req.request_id),
+                Some(mt_req.security_cookie),
+                selected_protocol,
+            ).await {
+                Ok((_cmd_tx, evt_rx)) => {
+                    info!("✅ UDP transport established from connection-phase multitransport request!");
+                    udp_transports.push(evt_rx);
+                }
+                Err(e) => {
+                    error!("❌ Failed to establish UDP transport from connection-phase request: {:?}", e);
+                }
+            }
+        } else {
+            warn!("⚠️  Multitransport requested but no correlation_id available");
+        }
+    }
 
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
@@ -2440,6 +2477,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                             desktop_size,
                             enable_server_pointer,
                             pointer_software_rendering,
+                            ..
                         } = connection_activation.state
                         {
                             debug!(
