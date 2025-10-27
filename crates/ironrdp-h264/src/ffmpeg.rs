@@ -5,6 +5,7 @@ use crate::{
     PixelFormat,
 };
 use anyhow::{bail, ensure, Context, Result};
+use ffmpeg::color::Range;
 use ffmpeg_next as ffmpeg;
 use std::sync::Once;
 use tracing::{debug, trace};
@@ -23,6 +24,19 @@ fn is_full_range(pixel: ffmpeg::format::Pixel) -> bool {
     use ffmpeg::format::Pixel::*;
 
     matches!(pixel, YUVJ420P | YUVJ422P | YUVJ444P | YUVJ440P | YUVJ411P)
+}
+
+fn normalize_pixel_format(pixel: ffmpeg::format::Pixel) -> (ffmpeg::format::Pixel, Option<Range>) {
+    use ffmpeg::format::Pixel::*;
+
+    match pixel {
+        YUVJ420P => (YUV420P, Some(Range::JPEG)),
+        YUVJ422P => (YUV422P, Some(Range::JPEG)),
+        YUVJ444P => (YUV444P, Some(Range::JPEG)),
+        YUVJ440P => (YUV440P, Some(Range::JPEG)),
+        YUVJ411P => (YUV411P, Some(Range::JPEG)),
+        _ => (pixel, Option::<Range>::None),
+    }
 }
 
 struct Yuv444Frame {
@@ -141,17 +155,18 @@ fn yuv420_frame_to_yuv444(frame: &ffmpeg::util::frame::Video) -> Result<Yuv444Fr
 
 fn yuv444_to_ffmpeg_frame(frame: &Yuv444Frame) -> Result<ffmpeg::util::frame::Video> {
     let mut video = ffmpeg::util::frame::Video::empty();
-    let pixel_format = if frame.full_range {
-        ffmpeg::format::Pixel::YUVJ444P
-    } else {
-        ffmpeg::format::Pixel::YUV444P
-    };
+    let pixel_format = ffmpeg::format::Pixel::YUV444P;
     let width = frame.width as u32;
     let height = frame.height as u32;
 
     video.set_format(pixel_format);
     video.set_width(width);
     video.set_height(height);
+    video.set_color_range(if frame.full_range {
+        Range::JPEG
+    } else {
+        Range::MPEG
+    });
 
     unsafe {
         video.alloc(pixel_format, width, height);
@@ -425,11 +440,25 @@ impl FfmpegDecoder {
     /// gets interpreted as B,G,R,A when displayed by the graphics system
     /// (due to little-endian interpretation of 32-bit pixels).
     fn convert_to_bgra(&mut self, frame: &ffmpeg::util::frame::Video) -> Result<DecodedFrame> {
-        let width = frame.width();
-        let height = frame.height();
+        let (src_format, color_range) = normalize_pixel_format(frame.format());
+        let mut owned_frame: Option<ffmpeg::util::frame::Video> = None;
+
+        if src_format != frame.format() || color_range.is_some() {
+            let mut clone = frame.clone();
+            clone.set_format(src_format);
+            if let Some(range) = color_range {
+                clone.set_color_range(range);
+            }
+            owned_frame = Some(clone);
+        }
+
+        let input_frame = owned_frame.as_ref().unwrap_or(frame);
+
+        let width = input_frame.width();
+        let height = input_frame.height();
 
         // Reset converter if source parameters changed
-        if self.converter_src_format != Some(frame.format())
+        if self.converter_src_format != Some(src_format)
             || self.converter_width != Some(width)
             || self.converter_height != Some(height)
         {
@@ -441,7 +470,7 @@ impl FfmpegDecoder {
         if self.converter.is_none() {
             self.converter = Some(
                 ffmpeg::software::scaling::Context::get(
-                    frame.format(),
+                    src_format,
                     width,
                     height,
                     ffmpeg::format::Pixel::RGBA,
@@ -451,7 +480,7 @@ impl FfmpegDecoder {
                 )
                 .context("Failed to create scaler")?,
             );
-            self.converter_src_format = Some(frame.format());
+            self.converter_src_format = Some(src_format);
             self.converter_width = Some(width);
             self.converter_height = Some(height);
         }
@@ -460,7 +489,7 @@ impl FfmpegDecoder {
         let converter = self.converter.as_mut().unwrap();
         let mut rgba_frame = ffmpeg::util::frame::Video::empty();
         converter
-            .run(frame, &mut rgba_frame)
+            .run(input_frame, &mut rgba_frame)
             .context("Failed to convert frame")?;
 
         // Extract RGBA data
