@@ -3,7 +3,7 @@
 //! This module bridges IronRDP's DVC system with our RDPEGFX implementation.
 
 use ironrdp_core::AsAny;
-use ironrdp_dvc::{DvcMessage, DvcProcessor};
+use ironrdp_dvc::{DvcMessage, DvcProcessor, pdu::SoftSyncTunnelType};
 use ironrdp_gfx::GfxClient;
 use ironrdp_graphics::zgfx::{Decompressor as ZgfxDecompressor, ZgfxError};
 use ironrdp_pdu::PduResult;
@@ -244,6 +244,12 @@ impl DvcProcessor for GfxDvcProcessor {
         use tracing::info;
         info!("🔌 RDPEGFX channel closed (ID: {})", channel_id);
         self.channel_id = None;
+    }
+
+    fn on_soft_sync(&mut self, _channel_id: u32, _tunnel_type: SoftSyncTunnelType) {
+        use tracing::info;
+        info!("🔄 RDPEGFX: SoftSync request received, enabling UDP mode");
+        self.enable_udp_mode();
     }
 }
 

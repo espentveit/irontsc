@@ -11,6 +11,8 @@ use ironrdp_pdu::utils::{
 };
 use ironrdp_svc::SvcEncode;
 
+use alloc::collections::BTreeSet;
+
 use crate::{DynamicChannelId, String, Vec};
 
 /// Dynamic Virtual Channel PDU's that are sent by both client and server.
@@ -62,6 +64,7 @@ pub enum DrdynvcClientPdu {
     Create(CreateResponsePdu),
     Close(ClosePdu),
     Data(DrdynvcDataPdu),
+    SoftSyncResponse(SoftSyncResponsePdu),
 }
 
 impl Encode for DrdynvcClientPdu {
@@ -71,6 +74,7 @@ impl Encode for DrdynvcClientPdu {
             DrdynvcClientPdu::Create(pdu) => pdu.encode(dst),
             DrdynvcClientPdu::Data(pdu) => pdu.encode(dst),
             DrdynvcClientPdu::Close(pdu) => pdu.encode(dst),
+            DrdynvcClientPdu::SoftSyncResponse(pdu) => pdu.encode(dst),
         }
     }
 
@@ -80,6 +84,7 @@ impl Encode for DrdynvcClientPdu {
             DrdynvcClientPdu::Create(_) => CreateResponsePdu::name(),
             DrdynvcClientPdu::Data(pdu) => pdu.name(),
             DrdynvcClientPdu::Close(_) => ClosePdu::name(),
+            DrdynvcClientPdu::SoftSyncResponse(_) => SoftSyncResponsePdu::name(),
         }
     }
 
@@ -89,6 +94,7 @@ impl Encode for DrdynvcClientPdu {
             DrdynvcClientPdu::Create(pdu) => pdu.size(),
             DrdynvcClientPdu::Data(pdu) => pdu.size(),
             DrdynvcClientPdu::Close(pdu) => pdu.size(),
+            DrdynvcClientPdu::SoftSyncResponse(pdu) => pdu.size(),
         }
     }
 }
@@ -120,6 +126,7 @@ pub enum DrdynvcServerPdu {
     Create(CreateRequestPdu),
     Close(ClosePdu),
     Data(DrdynvcDataPdu),
+    SoftSyncRequest(SoftSyncRequestPdu),
 }
 
 impl Encode for DrdynvcServerPdu {
@@ -129,6 +136,7 @@ impl Encode for DrdynvcServerPdu {
             DrdynvcServerPdu::Capabilities(pdu) => pdu.encode(dst),
             DrdynvcServerPdu::Create(pdu) => pdu.encode(dst),
             DrdynvcServerPdu::Close(pdu) => pdu.encode(dst),
+            DrdynvcServerPdu::SoftSyncRequest(pdu) => pdu.encode(dst),
         }
     }
 
@@ -138,6 +146,7 @@ impl Encode for DrdynvcServerPdu {
             DrdynvcServerPdu::Capabilities(pdu) => pdu.name(),
             DrdynvcServerPdu::Create(_) => CreateRequestPdu::name(),
             DrdynvcServerPdu::Close(_) => ClosePdu::name(),
+            DrdynvcServerPdu::SoftSyncRequest(_) => SoftSyncRequestPdu::name(),
         }
     }
 
@@ -147,6 +156,7 @@ impl Encode for DrdynvcServerPdu {
             DrdynvcServerPdu::Capabilities(pdu) => pdu.size(),
             DrdynvcServerPdu::Create(pdu) => pdu.size(),
             DrdynvcServerPdu::Close(pdu) => pdu.size(),
+            DrdynvcServerPdu::SoftSyncRequest(pdu) => pdu.size(),
         }
     }
 }
@@ -166,6 +176,9 @@ impl Decode<'_> for DrdynvcServerPdu {
             Cmd::Capability => Ok(Self::Capabilities(CapabilitiesRequestPdu::decode(
                 header, src,
             )?)),
+            Cmd::SoftSyncRequest => Ok(Self::SoftSyncRequest(SoftSyncRequestPdu::decode(
+                header, src,
+            )?)),
             _ => Err(unsupported_value_err!("Cmd", header.cmd.into())),
         }
     }
@@ -179,7 +192,7 @@ impl SvcEncode for DrdynvcServerPdu {}
 /// [2.2] Message Syntax
 ///
 /// [2.2]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedyc/0b07a750-bf51-4042-bcf2-a991b6729d6e
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Header {
     cb_id: FieldType, // 2 bit
     sp: FieldType,    // 2 bit; meaning depends on the cmd field
@@ -803,6 +816,182 @@ impl CapabilitiesRequestPdu {
             Self::V2 { .. } => "DYNVC_CAPS_VERSION2",
             Self::V3 { .. } => "DYNVC_CAPS_VERSION3",
         }
+    }
+}
+
+pub const SOFT_SYNC_TCP_FLUSHED: u16 = 0x0001;
+pub const SOFT_SYNC_CHANNEL_LIST_PRESENT: u16 = 0x0002;
+
+pub type SoftSyncTunnelType = u32;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftSyncChannelListEntry {
+    pub tunnel_type: SoftSyncTunnelType,
+    pub channel_ids: Vec<DynamicChannelId>,
+}
+
+/// 2.2.5.1 Soft-Sync Request PDU (DYNVC_SOFT_SYNC_REQUEST)
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftSyncRequestPdu {
+    header: Header,
+    pub length: u32,
+    pub flags: u16,
+    pub tunnels: Vec<SoftSyncChannelListEntry>,
+}
+
+impl SoftSyncRequestPdu {
+    const PAD_SIZE: usize = 1;
+
+    fn new(flags: u16, tunnels: Vec<SoftSyncChannelListEntry>) -> Self {
+        let mut this = Self {
+            header: Header::new(0, 0, Cmd::SoftSyncRequest),
+            length: 0,
+            flags,
+            tunnels,
+        };
+        this.length = this.payload_length();
+        this
+    }
+
+    fn decode(header: Header, src: &mut ReadCursor<'_>) -> DecodeResult<Self> {
+        ensure_size!(in: src, size: 1 + 4 + 2 + 2);
+        let _pad = src.read_u8();
+        let length = src.read_u32();
+        let flags = src.read_u16();
+        let tunnel_count = src.read_u16();
+
+        let mut tunnels = Vec::new();
+        if (flags & SOFT_SYNC_CHANNEL_LIST_PRESENT) != 0 {
+            tunnels.reserve(tunnel_count as usize);
+            for _ in 0..tunnel_count {
+                ensure_size!(in: src, size: 6);
+                let tunnel_type = src.read_u32();
+                let dvc_count = src.read_u16();
+                let mut channel_ids = Vec::with_capacity(dvc_count as usize);
+                for _ in 0..dvc_count {
+                    ensure_size!(in: src, size: 4);
+                    channel_ids.push(src.read_u32());
+                }
+                tunnels.push(SoftSyncChannelListEntry {
+                    tunnel_type,
+                    channel_ids,
+                });
+            }
+        } else if length > 4 {
+            let to_skip = length as usize - 4;
+            ensure_size!(in: src, size: to_skip);
+            src.advance(to_skip);
+        }
+
+        Ok(Self {
+            header,
+            length,
+            flags,
+            tunnels,
+        })
+    }
+
+    fn payload_length(&self) -> u32 {
+        let mut len = 2 /* flags */ + 2 /* tunnel count */;
+        for tunnel in &self.tunnels {
+            len += 4 /* tunnel type */ + 2 /* channel count */
+                + tunnel.channel_ids.len() * 4;
+        }
+        len as u32
+    }
+
+    fn total_size(&self) -> usize {
+        Header::size()
+            + Self::PAD_SIZE
+            + 4 /* length */
+            + self.payload_length() as usize
+    }
+
+    fn name() -> &'static str {
+        "DYNVC_SOFT_SYNC_REQUEST"
+    }
+}
+
+impl Encode for SoftSyncRequestPdu {
+    fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
+        ensure_size!(in: dst, size: self.total_size());
+        self.header.encode(dst)?;
+        dst.write_u8(0);
+        dst.write_u32(self.payload_length());
+        dst.write_u16(self.flags);
+        dst.write_u16(self.tunnels.len() as u16);
+        for tunnel in &self.tunnels {
+            dst.write_u32(tunnel.tunnel_type);
+            dst.write_u16(tunnel.channel_ids.len() as u16);
+            for &channel_id in &tunnel.channel_ids {
+                dst.write_u32(channel_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        Self::name()
+    }
+
+    fn size(&self) -> usize {
+        self.total_size()
+    }
+}
+
+/// 2.2.5.2 Soft-Sync Response PDU (DYNVC_SOFT_SYNC_RESPONSE)
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftSyncResponsePdu {
+    header: Header,
+    pub tunnels_to_switch: Vec<SoftSyncTunnelType>,
+}
+
+impl SoftSyncResponsePdu {
+    fn new(tunnels_to_switch: Vec<SoftSyncTunnelType>) -> Self {
+        Self {
+            header: Header::new(0, 0, Cmd::SoftSyncResponse),
+            tunnels_to_switch,
+        }
+    }
+
+    pub fn from_request(request: &SoftSyncRequestPdu) -> Self {
+        let mut seen = BTreeSet::new();
+        let mut tunnels = Vec::new();
+        for tunnel in &request.tunnels {
+            if seen.insert(tunnel.tunnel_type) {
+                tunnels.push(tunnel.tunnel_type);
+            }
+        }
+        Self::new(tunnels)
+    }
+
+    fn total_size(&self) -> usize {
+        Header::size() + 1 + 4 + self.tunnels_to_switch.len() * 4
+    }
+
+    fn name() -> &'static str {
+        "DYNVC_SOFT_SYNC_RESPONSE"
+    }
+}
+
+impl Encode for SoftSyncResponsePdu {
+    fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
+        ensure_size!(in: dst, size: self.total_size());
+        self.header.encode(dst)?;
+        dst.write_u8(0);
+        dst.write_u32(self.tunnels_to_switch.len() as u32);
+        for tunnel in &self.tunnels_to_switch {
+            dst.write_u32(*tunnel);
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        Self::name()
+    }
+
+    fn size(&self) -> usize {
+        self.total_size()
     }
 }
 

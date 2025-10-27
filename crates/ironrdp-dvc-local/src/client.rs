@@ -13,7 +13,7 @@ use tracing::debug;
 
 use crate::pdu::{
     CapabilitiesResponsePdu, CapsVersion, ClosePdu, CreateResponsePdu, CreationStatus,
-    DrdynvcClientPdu, DrdynvcServerPdu,
+    DrdynvcClientPdu, DrdynvcServerPdu, SoftSyncRequestPdu, SoftSyncResponsePdu,
 };
 use crate::{encode_dvc_messages, DvcProcessor, DynamicChannelSet, DynamicVirtualChannel};
 
@@ -95,6 +95,31 @@ impl DrdynvcClient {
         debug!("Send DVC Capabilities Response PDU: {caps_response:?}");
         self.cap_handshake_done = true;
         SvcMessage::from(caps_response)
+    }
+
+    fn handle_soft_sync_request(
+        &mut self,
+        request: &SoftSyncRequestPdu,
+        responses: &mut Vec<SvcMessage>,
+    ) -> PduResult<()> {
+        for tunnel in &request.tunnels {
+            for &channel_id in &tunnel.channel_ids {
+                if let Some(channel) = self.dynamic_channels.get_by_channel_id_mut(channel_id) {
+                    channel.on_soft_sync(tunnel.tunnel_type);
+                } else {
+                    debug!(
+                        "SoftSync tunnel references unknown channel_id={channel_id} (tunnel_type=0x{:08X})",
+                        tunnel.tunnel_type
+                    );
+                }
+            }
+        }
+
+        let response =
+            DrdynvcClientPdu::SoftSyncResponse(SoftSyncResponsePdu::from_request(request));
+        debug!("Send DVC SoftSync Response PDU: {response:?}");
+        responses.push(SvcMessage::from(response));
+        Ok(())
     }
 }
 
@@ -192,6 +217,10 @@ impl SvcProcessor for DrdynvcClient {
                     encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
                         .map_err(|e| encode_err!(e))?,
                 );
+            }
+            DrdynvcServerPdu::SoftSyncRequest(request) => {
+                debug!("Got DVC SoftSync Request PDU: {request:?}");
+                self.handle_soft_sync_request(&request, &mut responses)?;
             }
         }
 
