@@ -10,7 +10,9 @@ use ironrdp_svc::{StaticChannelSet, StaticVirtualChannel, SvcClientProcessor};
 use tracing::{debug, error, info, warn};
 
 use crate::channel_connection::{ChannelConnectionSequence, ChannelConnectionState};
-use crate::connection_activation::{ConnectionActivationSequence, ConnectionActivationState};
+use crate::connection_activation::{
+    ConnectionActivationSequence, ConnectionActivationState, MultitransportRequestData,
+};
 use crate::license_exchange::{LicenseExchangeSequence, NoopLicenseCache};
 use crate::{
     encode_x224_packet, general_err, reason_err, Config, ConnectorError, ConnectorErrorExt as _,
@@ -33,6 +35,9 @@ pub struct ConnectionResult {
     pub message_channel_id: Option<u16>,
     /// Selected security protocol from negotiation (for determining DTLS requirement in MS-RDPEMT)
     pub selected_protocol: nego::SecurityProtocol,
+    /// Multitransport request data received from the server (if any)
+    /// This contains the request_id, security_cookie, and protocol needed to establish UDP transport
+    pub multitransport_request: Option<MultitransportRequestData>,
 }
 
 #[derive(Default, Debug)]
@@ -499,8 +504,13 @@ impl Sequence for ClientConnector {
                     warn!("⚠️  No ServerMessageChannelData GCC block - multitransport responses may not work");
                 }
 
-                if server_gcc_blocks.multi_transport_channel.is_some() {
-                    warn!("Unexpected MultiTransportChannelData GCC block (not supported)");
+                if let Some(ref multi_transport_channel_data) = server_gcc_blocks.multi_transport_channel {
+                    warn!(
+                        "Unexpected MultiTransportChannelData GCC block from server - \
+                        client sends this to advertise UDP capabilities, but server should \
+                        respond with ServerMessageChannelData instead. Ignoring server's block."
+                    );
+                    info!("📦 MultiTransportChannelData content: {:?}", multi_transport_channel_data);
                 }
 
                 let static_channel_ids = server_gcc_blocks.network.channel_ids;
@@ -705,6 +715,14 @@ impl Sequence for ClientConnector {
                         connection_activation,
                     }
                 } else {
+                    // Extract multitransport_request before consuming connection_activation
+                    let multitransport_request = match &connection_activation.state {
+                        ConnectionActivationState::Finalized { multitransport_request, .. } => {
+                            multitransport_request.clone()
+                        }
+                        _ => None,
+                    };
+
                     match connection_activation.state {
                         ConnectionActivationState::Finalized {
                             io_channel_id,
@@ -712,6 +730,7 @@ impl Sequence for ClientConnector {
                             desktop_size,
                             enable_server_pointer,
                             pointer_software_rendering,
+                            ..
                         } => ClientConnectorState::Connected {
                             result: ConnectionResult {
                                 io_channel_id,
@@ -724,6 +743,7 @@ impl Sequence for ClientConnector {
                                 correlation_id: self.correlation_id,
                                 message_channel_id: self.message_channel_id,
                                 selected_protocol: self.selected_protocol,
+                                multitransport_request,
                             },
                         },
                         _ => return Err(general_err!("invalid state (this is a bug)")),
