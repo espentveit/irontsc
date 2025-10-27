@@ -195,6 +195,9 @@ impl SvcProcessor for DrdynvcServer {
                     );
                 }
             }
+            DrdynvcClientPdu::SoftSyncResponse(resp_pdu) => {
+                debug!("Got DVC SoftSync Response PDU: {resp_pdu:?}");
+            }
         }
 
         Ok(resp)

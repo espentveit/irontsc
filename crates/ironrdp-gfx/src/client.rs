@@ -272,6 +272,13 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
             let body = &stream[..body_length];
             let mut body_stream = body;
 
+            trace!(
+                "RDPEGFX dispatch: cmd={:?} offset={} length={}",
+                header.cmd_id,
+                start_pos,
+                header.pdu_length
+            );
+
             // Dispatch PDU
             match header.cmd_id {
                 CmdId::CapsConfirm => self.handle_caps_confirm(&mut body_stream)?,

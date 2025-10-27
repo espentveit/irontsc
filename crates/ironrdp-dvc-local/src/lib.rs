@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::TypeId;
 
-use pdu::DrdynvcDataPdu;
+use pdu::{DrdynvcDataPdu, SoftSyncTunnelType};
 
 use crate::alloc::borrow::ToOwned as _;
 // Re-export ironrdp_pdu crate for convenience
@@ -58,6 +58,8 @@ pub trait DvcProcessor: AsAny + Send {
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>>;
 
     fn close(&mut self, _channel_id: u32) {}
+
+    fn on_soft_sync(&mut self, _channel_id: DynamicChannelId, _tunnel_type: SoftSyncTunnelType) {}
 }
 
 assert_obj_safe!(DvcProcessor);
@@ -163,6 +165,12 @@ impl DynamicVirtualChannel {
             self.channel_processor.process(channel_id, &complete_data)
         } else {
             Ok(Vec::new())
+        }
+    }
+
+    fn on_soft_sync(&mut self, tunnel_type: SoftSyncTunnelType) {
+        if let Some(channel_id) = self.channel_id {
+            self.channel_processor.on_soft_sync(channel_id, tunnel_type);
         }
     }
 
