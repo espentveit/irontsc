@@ -84,19 +84,27 @@ impl FfmpegDecoder {
         }
     }
 
-    /// Convert FFmpeg frame to BGRA
+    /// Convert FFmpeg frame to BGRA format
+    ///
+    /// This matches FreeRDP's approach: convert YUV to RGB first, then the
+    /// data is interpreted as BGRA by the graphics system.
+    /// 
+    /// Note: FFmpeg's RGBA pixel format produces R,G,B,A byte order which
+    /// gets interpreted as B,G,R,A when displayed by the graphics system
+    /// (due to little-endian interpretation of 32-bit pixels).
     fn convert_to_bgra(&mut self, frame: &ffmpeg::util::frame::Video) -> Result<DecodedFrame> {
         let width = frame.width();
         let height = frame.height();
 
         // Initialize converter if needed
+        // Use RGBA pixel format to match FreeRDP's YUV-to-RGB conversion
         if self.converter.is_none() {
             self.converter = Some(
                 ffmpeg::software::scaling::Context::get(
                     frame.format(),
                     width,
                     height,
-                    ffmpeg::format::Pixel::BGRA,
+                    ffmpeg::format::Pixel::RGBA,
                     width,
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
@@ -107,28 +115,28 @@ impl FfmpegDecoder {
 
         // Convert frame
         let converter = self.converter.as_mut().unwrap();
-        let mut bgra_frame = ffmpeg::util::frame::Video::empty();
+        let mut rgba_frame = ffmpeg::util::frame::Video::empty();
         converter
-            .run(frame, &mut bgra_frame)
+            .run(frame, &mut rgba_frame)
             .context("Failed to convert frame")?;
 
-        // Extract BGRA data
-        let stride = bgra_frame.stride(0);
-        let data = bgra_frame.data(0);
+        // Extract RGBA data
+        let stride = rgba_frame.stride(0);
+        let data = rgba_frame.data(0);
 
         // Copy to contiguous buffer
-        let mut bgra_data = Vec::with_capacity((width * height * 4) as usize);
+        let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height as usize {
             let row_start = y * stride;
             let row_end = row_start + (width as usize * 4);
-            bgra_data.extend_from_slice(&data[row_start..row_end]);
+            rgba_data.extend_from_slice(&data[row_start..row_end]);
         }
 
         Ok(DecodedFrame {
             width,
             height,
             format: PixelFormat::Bgra,
-            planes: vec![bgra_data],
+            planes: vec![rgba_data],
             line_sizes: vec![width as usize * 4],
         })
     }

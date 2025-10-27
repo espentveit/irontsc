@@ -538,12 +538,7 @@ pub fn create_client_data(
         }),
         monitor: None,
         message_channel: Some(ClientMessageChannelData),
-        multi_transport_channel: Some(MultiTransportChannelData {
-            flags: MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
-                | MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
-                | MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
-                | MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
-        }),
+        multi_transport_channel: None,  // Disable UDP transport - use TCP only for now
         monitor_extended: None,
     };
 

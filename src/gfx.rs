@@ -320,7 +320,7 @@ impl GfxContext for GfxState {
         use tracing::info;
 
         info!(
-            "🎨 RDPEGFX: WIRE_TO_SURFACE surface={} codec=0x{:04X} ({}) rect={}x{} at ({},{}) data={} bytes",
+            "🎨 RDPEGFX: WIRE_TO_SURFACE surface={} codec=0x{:04X} ({}) rect={}x{} at ({},{}) data={} bytes (first 32: {:02X?})",
             surface_id,
             codec_id,
             codec::codec_name(codec_id),
@@ -328,7 +328,8 @@ impl GfxContext for GfxState {
             dest_rect.height(),
             dest_rect.left,
             dest_rect.top,
-            bitmap_data.len()
+            bitmap_data.len(),
+            &bitmap_data[..bitmap_data.len().min(32)]
         );
 
         let surface = self
@@ -380,13 +381,30 @@ impl GfxContext for GfxState {
                     AvcKind::Avc444v2
                 };
 
-                let frame = self
+                match self
                     .h264_decoder
                     .0
                     .decode_gfx_stream(kind, bitmap_data)
-                    .context("Failed to decode AVC444 frame")?;
-
-                Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
+                {
+                    Ok(frame) => {
+                        Self::blit_frame_to_surface(surface, &dest_rect, &frame)?;
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        // Skip frames that can't be decoded (empty, corrupted, or unsupported)
+                        if err_msg.contains("zero length") 
+                            || err_msg.contains("empty frame")
+                            || err_msg.contains("Failed to receive frame")
+                            || err_msg.contains("Failed to send packet")
+                            || err_msg.contains("End of file")
+                            || err_msg.contains("Invalid data found") {
+                            info!("⏭️ Skipping AVC444 frame that can't be decoded: {}", e);
+                        } else {
+                            // Other errors are still fatal
+                            return Err(e).context("Failed to decode AVC444 frame");
+                        }
+                    }
+                }
             }
             codec::codec_id::UNCOMPRESSED => {
                 // Raw BGRA bitmap
