@@ -13,6 +13,7 @@ use ironrdp_h264::{AvcKind, FfmpegDecoder, H264Decoder};
 use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
 /// Maximum surface dimension (8K resolution)
@@ -31,7 +32,7 @@ struct GfxSurface {
     height: u16,
     pixel_format: u8,
     /// Buffer for decoded frames (BGRA format)
-    buffer: Vec<u8>,
+    buffer: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +47,7 @@ struct CachedBitmap {
 struct GraphicsOutput {
     width: u16,
     height: u16,
-    buffer: Vec<u8>,
+    buffer: Arc<Vec<u8>>,
     monitors: Vec<MonitorDefinition>,
 }
 
@@ -55,7 +56,7 @@ impl GraphicsOutput {
         let mut output = Self {
             width,
             height,
-            buffer: vec![0; (width as usize) * (height as usize) * 4],
+            buffer: Arc::new(vec![0; (width as usize) * (height as usize) * 4]),
             monitors: monitors.to_vec(),
         };
         output.clear();
@@ -66,13 +67,14 @@ impl GraphicsOutput {
         self.width = width;
         self.height = height;
         self.monitors = monitors.to_vec();
-        self.buffer
-            .resize((width as usize) * (height as usize) * 4, 0);
+        let len = (width as usize) * (height as usize) * 4;
+        let buffer = Arc::make_mut(&mut self.buffer);
+        buffer.resize(len, 0);
         self.clear();
     }
 
     fn clear(&mut self) {
-        self.buffer.fill(0);
+        Arc::make_mut(&mut self.buffer).fill(0);
     }
 }
 
@@ -229,7 +231,7 @@ impl GfxContext for GfxState {
             width,
             height,
             pixel_format,
-            buffer: vec![0; buffer_size],
+            buffer: Arc::new(vec![0; buffer_size]),
         };
 
         self.surfaces.insert(surface_id, surface);
@@ -985,7 +987,7 @@ impl GfxState {
                     planes.len()
                 );
             }
-            surface.buffer = planes.into_iter().next().unwrap_or_default();
+            surface.buffer = Arc::new(planes.into_iter().next().unwrap_or_default());
             return Ok(());
         }
 
@@ -994,6 +996,7 @@ impl GfxState {
             .ok_or_else(|| anyhow::anyhow!("Decoded frame missing BGRA data plane"))?;
 
         // Blit to surface buffer
+        let buffer = Arc::make_mut(&mut surface.buffer);
         for y in 0..rect_height {
             let src_offset = y * frame_stride;
             let dst_y = dest_rect.top as usize + y;
@@ -1001,13 +1004,13 @@ impl GfxState {
             let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
             // Fail on bounds violations instead of silently skipping
-            if dst_offset + rect_width * 4 > surface.buffer.len() {
+            if dst_offset + rect_width * 4 > buffer.len() {
                 anyhow::bail!(
                     "Blit destination out of bounds: line={}, offset={}, size={}, buffer={}",
                     y,
                     dst_offset,
                     rect_width * 4,
-                    surface.buffer.len()
+                    buffer.len()
                 );
             }
             if src_offset + rect_width * 4 > frame_data.len() {
@@ -1020,7 +1023,7 @@ impl GfxState {
                 );
             }
 
-            surface.buffer[dst_offset..dst_offset + rect_width * 4]
+            buffer[dst_offset..dst_offset + rect_width * 4]
                 .copy_from_slice(&frame_data[src_offset..src_offset + rect_width * 4]);
         }
 
@@ -1046,6 +1049,8 @@ impl GfxState {
             );
         }
 
+        let buffer = Arc::make_mut(&mut surface.buffer);
+
         for y in 0..rect_height {
             let src_offset = y * rect_width * 4;
             let dst_y = dest_rect.top as usize + y;
@@ -1053,17 +1058,17 @@ impl GfxState {
             let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
             // Fail on bounds violations instead of silently skipping
-            if dst_offset + rect_width * 4 > surface.buffer.len() {
+            if dst_offset + rect_width * 4 > buffer.len() {
                 anyhow::bail!(
                     "Blit destination out of bounds: line={}, offset={}, size={}, buffer={}",
                     y,
                     dst_offset,
                     rect_width * 4,
-                    surface.buffer.len()
+                    buffer.len()
                 );
             }
 
-            surface.buffer[dst_offset..dst_offset + rect_width * 4]
+            buffer[dst_offset..dst_offset + rect_width * 4]
                 .copy_from_slice(&data[src_offset..src_offset + rect_width * 4]);
         }
 
@@ -1088,6 +1093,8 @@ impl GfxState {
             );
         }
 
+        let buffer = Arc::make_mut(&mut surface.buffer);
+
         for y in 0..tile_height {
             let src_offset = y * tile_width * 4;
             let dst_y = tile.rect.y as usize + y;
@@ -1095,7 +1102,7 @@ impl GfxState {
             let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
             // Check bounds
-            if dst_offset + tile_width * 4 > surface.buffer.len() {
+            if dst_offset + tile_width * 4 > buffer.len() {
                 anyhow::bail!(
                     "Progressive tile blit out of bounds: tile={}x{} at ({},{}), line={}, offset={}, size={}, buffer={}",
                     tile_width,
@@ -1105,11 +1112,11 @@ impl GfxState {
                     y,
                     dst_offset,
                     tile_width * 4,
-                    surface.buffer.len()
+                    buffer.len()
                 );
             }
 
-            surface.buffer[dst_offset..dst_offset + tile_width * 4]
+            buffer[dst_offset..dst_offset + tile_width * 4]
                 .copy_from_slice(&tile.pixels[src_offset..src_offset + tile_width * 4]);
         }
 
@@ -1129,6 +1136,8 @@ impl GfxState {
         // Create BGRA pixel
         let pixel = [color.b, color.g, color.r, color.xa];
 
+        let buffer = Arc::make_mut(&mut surface.buffer);
+
         for y in 0..rect_height {
             let dst_y = rect.top as usize + y;
             let dst_x = rect.left as usize;
@@ -1136,8 +1145,8 @@ impl GfxState {
 
             for x in 0..rect_width {
                 let offset = dst_offset + x * 4;
-                if offset + 4 <= surface.buffer.len() {
-                    surface.buffer[offset..offset + 4].copy_from_slice(&pixel);
+                if offset + 4 <= buffer.len() {
+                    buffer[offset..offset + 4].copy_from_slice(&pixel);
                 }
             }
         }
@@ -1244,22 +1253,23 @@ impl GfxState {
         );
 
         let surface_width = usize::from(surface.width);
+        let buffer = Arc::make_mut(&mut surface.buffer);
 
         for y in 0..height {
             let dst_offset = ((dest_y + y) * surface_width + dest_x) * 4;
             let src_offset = y * row_bytes;
 
-            if dst_offset + row_bytes > surface.buffer.len() {
+            if dst_offset + row_bytes > buffer.len() {
                 anyhow::bail!(
                     "Destination write out of bounds: line={}, offset={}, size={}, buffer={}",
                     y,
                     dst_offset,
                     row_bytes,
-                    surface.buffer.len()
+                    buffer.len()
                 );
             }
 
-            surface.buffer[dst_offset..dst_offset + row_bytes]
+            buffer[dst_offset..dst_offset + row_bytes]
                 .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
         }
 
@@ -1453,20 +1463,12 @@ impl GfxState {
             target_width_full == surface_width && target_height_full == surface_height;
 
         if is_identity_blit {
-            for dy in 0..dest_height {
-                let src_y = dy.min(surface_height.saturating_sub(1));
-                let dst_row = origin_y + dy;
-                let src_index = src_y * surface_width * 4;
-                let dst_index = (dst_row * output_width + origin_x) * 4;
-                let copy_len = dest_width * 4;
-
-                if src_index + copy_len <= surface_len && dst_index + copy_len <= output_len {
-                    output.buffer[dst_index..dst_index + copy_len]
-                        .copy_from_slice(&surface.buffer[src_index..src_index + copy_len]);
-                }
-            }
+            output.buffer = surface.buffer.clone();
             return Ok(());
         }
+
+        let src_buffer = &surface.buffer;
+        let dst_buffer = Arc::make_mut(&mut output.buffer);
 
         for dy in 0..dest_height {
             let src_y =
@@ -1480,8 +1482,8 @@ impl GfxState {
                 let dst_index = ((origin_y + dy) * output_width + (origin_x + dx)) * 4;
 
                 if src_index + 4 <= surface_len && dst_index + 4 <= output_len {
-                    output.buffer[dst_index..dst_index + 4]
-                        .copy_from_slice(&surface.buffer[src_index..src_index + 4]);
+                    dst_buffer[dst_index..dst_index + 4]
+                        .copy_from_slice(&src_buffer[src_index..src_index + 4]);
                 }
             }
         }

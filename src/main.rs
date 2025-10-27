@@ -1135,7 +1135,13 @@ impl GtkRdpWidget {
         }
     }
 
-    fn update_image(&self, buffer: Vec<u8>, width: u16, height: u16, region: Option<ImageRegion>) {
+    fn update_image(
+        &self,
+        buffer: Arc<Vec<u8>>,
+        width: u16,
+        height: u16,
+        region: Option<ImageRegion>,
+    ) {
         tracing::debug!(
             "📸 update_image called: {}x{} ({} bytes) region={:?}",
             width,
@@ -1172,13 +1178,13 @@ impl GtkRdpWidget {
                             staging.resize(frame_len, 0);
                         }
 
-                        staging.copy_from_slice(&buffer);
+                        staging.copy_from_slice(buffer.as_slice());
                         state.staging_ready = true;
                     } else {
                         state.staging_ready = false;
                     }
 
-                    state.frame = buffer;
+                    state.frame = buffer.clone();
                     state.frame_version = state.frame_version.wrapping_add(1);
                 }
                 Some(region) => {
@@ -1190,8 +1196,10 @@ impl GtkRdpWidget {
                         ..
                     } = &mut *state;
 
-                    if frame.len() != frame_len {
-                        frame.resize(frame_len, 0);
+                    let frame_vec = Arc::make_mut(frame);
+
+                    if frame_vec.len() != frame_len {
+                        frame_vec.resize(frame_len, 0);
                         *staging_ready = false;
                     }
 
@@ -1204,7 +1212,7 @@ impl GtkRdpWidget {
                     match staging {
                         Some(staging) if staging.len() == frame_len => {
                             if !*staging_ready {
-                                staging.copy_from_slice(frame);
+                                staging.copy_from_slice(frame_vec);
                             }
 
                             for row in 0..region_height {
@@ -1212,7 +1220,7 @@ impl GtkRdpWidget {
                                 let dst_offset = (usize::from(region.y) + row) * stride
                                     + usize::from(region.x) * 4;
 
-                                frame[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
+                                frame_vec[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
                                     &buffer[src_offset..src_offset + bytes_per_row],
                                 );
                                 staging[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
@@ -1230,7 +1238,7 @@ impl GtkRdpWidget {
                                 let dst_offset = (usize::from(region.y) + row) * stride
                                     + usize::from(region.x) * 4;
 
-                                frame[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
+                                frame_vec[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
                                     &buffer[src_offset..src_offset + bytes_per_row],
                                 );
                             }
@@ -1243,7 +1251,7 @@ impl GtkRdpWidget {
                                 let dst_offset = (usize::from(region.y) + row) * stride
                                     + usize::from(region.x) * 4;
 
-                                frame[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
+                                frame_vec[dst_offset..dst_offset + bytes_per_row].copy_from_slice(
                                     &buffer[src_offset..src_offset + bytes_per_row],
                                 );
                             }
@@ -1308,9 +1316,13 @@ impl GtkRdpWidget {
         let bytes = {
             let mut state = self.framebuffer.lock().expect("framebuffer mutex poisoned");
 
-            if state.frame.len() != frame_len {
-                state.frame.resize(frame_len, 0);
-                state.staging_ready = false;
+            {
+                let frame_vec = Arc::make_mut(&mut state.frame);
+
+                if frame_vec.len() != frame_len {
+                    frame_vec.resize(frame_len, 0);
+                    state.staging_ready = false;
+                }
             }
 
             let mut staging = state.staging.take().unwrap_or_else(|| vec![0u8; frame_len]);
@@ -1321,7 +1333,8 @@ impl GtkRdpWidget {
             }
 
             if !state.staging_ready {
-                staging.copy_from_slice(&state.frame);
+                let frame_vec = Arc::make_mut(&mut state.frame);
+                staging.copy_from_slice(frame_vec);
                 state.staging_ready = true;
             }
 
@@ -1425,9 +1438,8 @@ impl GtkRdpWidget {
     }
 }
 
-#[derive(Default)]
 struct FrameState {
-    frame: Vec<u8>,
+    frame: Arc<Vec<u8>>,
     staging: Option<Vec<u8>>,
     staging_ready: bool,
     frame_version: u64,
@@ -1436,13 +1448,25 @@ struct FrameState {
 
 impl FrameState {
     fn clear(&mut self) {
-        self.frame.clear();
+        self.frame = Arc::new(Vec::new());
         if let Some(staging) = self.staging.as_mut() {
             staging.clear();
         }
         self.staging_ready = false;
         self.frame_version = 0;
         self.latest_upload_version = 0;
+    }
+}
+
+impl Default for FrameState {
+    fn default() -> Self {
+        Self {
+            frame: Arc::new(Vec::new()),
+            staging: None,
+            staging_ready: false,
+            frame_version: 0,
+            latest_upload_version: 0,
+        }
     }
 }
 
