@@ -4,11 +4,16 @@ use crate::{
     parse_gfx_avc444_stream, parse_gfx_avc_stream, Avc444Lc, AvcKind, DecodedFrame, H264Decoder,
     PixelFormat,
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use ffmpeg::color::Range;
 use ffmpeg_next as ffmpeg;
+use std::env;
+use std::ffi::CString;
+use std::os::raw::c_void;
+use std::path::Path;
+use std::ptr;
 use std::sync::Once;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 static FFMPEG_INIT: Once = Once::new();
 
@@ -47,6 +52,361 @@ struct Yuv444Frame {
     u: Vec<u8>,
     v: Vec<u8>,
     full_range: bool,
+}
+
+struct HardwareContext {
+    device_ctx: *mut ffmpeg::ffi::AVBufferRef,
+    hw_pix_fmt: ffmpeg::format::Pixel,
+    device_type: ffmpeg::ffi::AVHWDeviceType,
+}
+
+struct DeviceCandidate {
+    device_type: ffmpeg::ffi::AVHWDeviceType,
+    device: Option<String>,
+}
+
+impl HardwareContext {
+    fn try_setup(
+        codec: &ffmpeg::Codec,
+        context: &mut ffmpeg::codec::Context,
+    ) -> Result<Option<Box<Self>>> {
+        let forced = env::var("IRONRDP_FFMPEG_HWACCEL").ok();
+        let candidates = forced
+            .as_deref()
+            .and_then(|raw| HardwareContext::parse_forced_list(raw).transpose())
+            .transpose()?
+            .unwrap_or_else(HardwareContext::default_candidates);
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let mut errors = Vec::new();
+
+        for candidate in candidates {
+            if let Some(hw_pix_fmt) =
+                unsafe { HardwareContext::find_hw_pix_fmt(codec, candidate.device_type) }
+            {
+                match unsafe { HardwareContext::create(&candidate, hw_pix_fmt, context) } {
+                    Ok(ctx) => {
+                        debug!(
+                            "Using FFmpeg hardware decoding backend {} (pix_fmt={:?})",
+                            HardwareContext::candidate_label(&candidate),
+                            ctx.hw_pix_fmt
+                        );
+                        return Ok(Some(ctx));
+                    }
+                    Err(e) => {
+                        let label = HardwareContext::candidate_label(&candidate);
+                        warn!("Hardware decoder init failed for {}: {:#}", label, e);
+                        errors.push((label, e));
+                        continue;
+                    }
+                }
+            } else {
+                trace!(
+                    "Codec does not expose HW configuration for {:?}; skipping candidate",
+                    candidate.device_type
+                );
+            }
+        }
+
+        if let Some(raw) = forced {
+            if !errors.is_empty() {
+                warn!(
+                    "IRONRDP_FFMPEG_HWACCEL={} requested hardware decode but all attempts failed; falling back to software",
+                    raw
+                );
+            }
+        } else if !errors.is_empty() {
+            debug!("All hardware decoders failed; falling back to software decode");
+        }
+
+        Ok(None)
+    }
+
+    fn parse_forced_list(value: &str) -> Result<Option<Vec<DeviceCandidate>>> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if lower == "none" || lower == "software" {
+            return Ok(Some(Vec::new()));
+        }
+
+        let mut devices = Vec::new();
+        for entry in trimmed.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+
+            let (kind, device) = if let Some((prefix, rest)) = entry.split_once(':') {
+                (
+                    prefix.trim().to_ascii_lowercase(),
+                    Some(rest.trim().to_string()),
+                )
+            } else {
+                (entry.to_ascii_lowercase(), None)
+            };
+
+            let device_type = HardwareContext::parse_device_type(&kind)?;
+            devices.push(DeviceCandidate {
+                device_type,
+                device,
+            });
+        }
+
+        Ok(Some(devices))
+    }
+
+    fn parse_device_type(name: &str) -> Result<ffmpeg::ffi::AVHWDeviceType> {
+        let ty = match name {
+            "vaapi" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            "qsv" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_QSV,
+            "vdpau" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU,
+            "cuda" | "nvdec" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            "d3d11va" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            "dxva2" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2,
+            "videotoolbox" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            "drm" => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM,
+            other => bail!("Unknown hardware accel device '{other}'"),
+        };
+        Ok(ty)
+    }
+
+    fn default_candidates() -> Vec<DeviceCandidate> {
+        #[cfg(target_os = "linux")]
+        {
+            let has_display = env::var_os("DISPLAY").is_some();
+            let mut result = Vec::new();
+
+            if has_display {
+                result.push(DeviceCandidate {
+                    device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                    device: None,
+                });
+            } else if let Some(render_node) = HardwareContext::find_render_node() {
+                result.push(DeviceCandidate {
+                    device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                    device: Some(render_node),
+                });
+            }
+
+            if has_display {
+                result.push(DeviceCandidate {
+                    device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU,
+                    device: None,
+                });
+            }
+
+            result.push(DeviceCandidate {
+                device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_QSV,
+                device: None,
+            });
+            result.push(DeviceCandidate {
+                device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                device: None,
+            });
+
+            result
+        }
+        #[cfg(target_os = "windows")]
+        {
+            vec![
+                DeviceCandidate {
+                    device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+                    device: None,
+                },
+                DeviceCandidate {
+                    device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2,
+                    device: None,
+                },
+            ]
+        }
+        #[cfg(target_os = "macos")]
+        {
+            vec![DeviceCandidate {
+                device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                device: None,
+            }]
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        {
+            Vec::new()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn find_render_node() -> Option<String> {
+        for index in 128..=135 {
+            let candidate = format!("/dev/dri/renderD{index}");
+            if Path::new(&candidate).exists() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn find_render_node() -> Option<String> {
+        None
+    }
+
+    fn candidate_label(candidate: &DeviceCandidate) -> String {
+        match &candidate.device {
+            Some(device) => format!("{:?}:{device}", candidate.device_type),
+            None => format!("{:?}", candidate.device_type),
+        }
+    }
+
+    unsafe fn find_hw_pix_fmt(
+        codec: &ffmpeg::Codec,
+        device_type: ffmpeg::ffi::AVHWDeviceType,
+    ) -> Option<ffmpeg::format::Pixel> {
+        let mut index = 0;
+        loop {
+            let config = ffmpeg::ffi::avcodec_get_hw_config(codec.as_ptr(), index);
+            if config.is_null() {
+                break;
+            }
+
+            if (*config).methods & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0
+                && (*config).device_type == device_type
+            {
+                return Some(ffmpeg::format::Pixel::from((*config).pix_fmt));
+            }
+
+            index += 1;
+        }
+
+        None
+    }
+
+    unsafe fn create(
+        candidate: &DeviceCandidate,
+        hw_pix_fmt: ffmpeg::format::Pixel,
+        context: &mut ffmpeg::codec::Context,
+    ) -> Result<Box<Self>> {
+        let device_cstring = match candidate.device.as_ref() {
+            Some(path) => Some(CString::new(path.as_str()).map_err(|_| {
+                anyhow!("Hardware device path contains interior null byte: {}", path)
+            })?),
+            None => None,
+        };
+        let device_ptr = device_cstring
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(ptr::null());
+
+        let mut device_ctx = ptr::null_mut();
+        let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
+            &mut device_ctx,
+            candidate.device_type,
+            device_ptr,
+            ptr::null_mut(),
+            0,
+        );
+
+        if ret < 0 {
+            return Err(anyhow!(
+                "av_hwdevice_ctx_create failed: {:?}",
+                ffmpeg::Error::from(ret)
+            ));
+        }
+
+        let device_ref = ffmpeg::ffi::av_buffer_ref(device_ctx);
+        if device_ref.is_null() {
+            ffmpeg::ffi::av_buffer_unref(&mut device_ctx);
+            bail!("Failed to reference hardware device context");
+        }
+
+        (*context.as_mut_ptr()).hw_device_ctx = device_ref;
+        (*context.as_mut_ptr()).opaque = ptr::null_mut();
+        (*context.as_mut_ptr()).get_format = Some(hw_get_format);
+
+        let mut ctx = Box::new(HardwareContext {
+            device_ctx,
+            hw_pix_fmt,
+            device_type: candidate.device_type,
+        });
+
+        (*context.as_mut_ptr()).opaque = (&mut *ctx) as *mut HardwareContext as *mut c_void;
+
+        Ok(ctx)
+    }
+
+    fn hw_pix_fmt(&self) -> ffmpeg::format::Pixel {
+        self.hw_pix_fmt
+    }
+
+    fn transfer_to_cpu(
+        &self,
+        frame: &ffmpeg::util::frame::Video,
+    ) -> Result<ffmpeg::util::frame::Video> {
+        unsafe {
+            let mut sw_frame = ffmpeg::util::frame::Video::empty();
+            let ret =
+                ffmpeg::ffi::av_hwframe_transfer_data(sw_frame.as_mut_ptr(), frame.as_ptr(), 0);
+            if ret < 0 {
+                bail!(
+                    "av_hwframe_transfer_data failed: {:?}",
+                    ffmpeg::Error::from(ret)
+                );
+            }
+
+            let ret = ffmpeg::ffi::av_frame_copy_props(sw_frame.as_mut_ptr(), frame.as_ptr());
+            if ret < 0 {
+                bail!("av_frame_copy_props failed: {:?}", ffmpeg::Error::from(ret));
+            }
+
+            Ok(sw_frame)
+        }
+    }
+}
+
+impl Drop for HardwareContext {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.device_ctx.is_null() {
+                ffmpeg::ffi::av_buffer_unref(&mut self.device_ctx);
+                self.device_ctx = ptr::null_mut();
+            }
+        }
+    }
+}
+
+unsafe extern "C" fn hw_get_format(
+    context: *mut ffmpeg::ffi::AVCodecContext,
+    pix_fmts: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    if context.is_null() || pix_fmts.is_null() {
+        return ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE;
+    }
+
+    let hw_ctx_ptr = (*context).opaque as *mut HardwareContext;
+    if hw_ctx_ptr.is_null() {
+        return *pix_fmts;
+    }
+
+    let hw_pix_fmt: ffmpeg::ffi::AVPixelFormat = (*hw_ctx_ptr).hw_pix_fmt().into();
+    let mut current = pix_fmts;
+
+    while (*current) != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+        if *current == hw_pix_fmt {
+            trace!("Selected HW pixel format {:?}", hw_pix_fmt);
+            return *current;
+        }
+        current = current.add(1);
+    }
+
+    debug!(
+        "Hardware pixel format {:?} not offered by decoder, falling back to software",
+        hw_pix_fmt
+    );
+    *pix_fmts
 }
 
 fn yuv420_frame_to_yuv444(frame: &ffmpeg::util::frame::Video) -> Result<Yuv444Frame> {
@@ -375,6 +735,7 @@ pub struct FfmpegDecoder {
     converter_src_format: Option<ffmpeg::format::Pixel>,
     converter_width: Option<u32>,
     converter_height: Option<u32>,
+    hardware: Option<Box<HardwareContext>>,
 }
 
 impl FfmpegDecoder {
@@ -386,8 +747,19 @@ impl FfmpegDecoder {
         let codec = ffmpeg::codec::decoder::find(ffmpeg::codec::Id::H264)
             .ok_or_else(|| anyhow::anyhow!("H.264 decoder not found"))?;
 
+        let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
+        let hardware = HardwareContext::try_setup(&codec, &mut context)?;
+
+        if let Some(ref hw) = hardware {
+            debug!(
+                "Using FFmpeg hardware decoding: {:?} (pixel format {:?})",
+                hw.device_type,
+                hw.hw_pix_fmt()
+            );
+        }
+
         // Create decoder context from codec
-        let decoder = ffmpeg::codec::context::Context::new_with_codec(codec)
+        let decoder = context
             .decoder()
             .video()
             .context("Failed to create H.264 decoder")?;
@@ -402,6 +774,7 @@ impl FfmpegDecoder {
             converter_src_format: None,
             converter_width: None,
             converter_height: None,
+            hardware,
         })
     }
 
@@ -429,6 +802,7 @@ impl FfmpegDecoder {
             }
             Err(e) => bail!("Failed to decode frame: {:?}", e),
         }
+        .and_then(|frame| self.normalize_decoded_frame(frame))
     }
 
     /// Convert FFmpeg frame to BGRA format
@@ -533,6 +907,23 @@ impl FfmpegDecoder {
         apply_progressive2_chroma_to_yuv444(prev444, chroma_frame)?;
         yuv444_to_ffmpeg_frame(prev444)
     }
+
+    fn normalize_decoded_frame(
+        &mut self,
+        mut frame: ffmpeg::util::frame::Video,
+    ) -> Result<ffmpeg::util::frame::Video> {
+        if let Some(ref hw) = self.hardware {
+            if frame.format() == hw.hw_pix_fmt() {
+                trace!(
+                    "Transferring hardware frame ({:?}) to system memory",
+                    frame.format()
+                );
+                frame = hw.transfer_to_cpu(&frame)?;
+            }
+        }
+
+        Ok(frame)
+    }
 }
 
 impl H264Decoder for FfmpegDecoder {
@@ -611,6 +1002,17 @@ impl H264Decoder for FfmpegDecoder {
 
 impl Drop for FfmpegDecoder {
     fn drop(&mut self) {
+        if let Some(_hw) = self.hardware.take() {
+            unsafe {
+                let ctx_ptr = self.decoder.as_mut().as_mut_ptr();
+                if !ctx_ptr.is_null() {
+                    ffmpeg::ffi::av_buffer_unref(&mut (*ctx_ptr).hw_device_ctx);
+                    (*ctx_ptr).hw_device_ctx = ptr::null_mut();
+                    (*ctx_ptr).opaque = ptr::null_mut();
+                    (*ctx_ptr).get_format = None;
+                }
+            }
+        }
         // Flush decoder
         if let Err(e) = self.decoder.send_eof() {
             trace!("Error flushing decoder: {:?}", e);
