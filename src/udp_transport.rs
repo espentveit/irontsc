@@ -591,14 +591,31 @@ impl UdpTransportManager {
             negotiated_version, retransmit_timeout_ms
         );
 
-        // Per MS-RDPEUDP: Client-initiated connections require a pure ACK packet
-        // as the third handshake leg (SYN → SYN+ACK → ACK), before sending DATA.
-        // This completes the three-way handshake similar to TCP.
-        debug!("Sending handshake-completing ACK packet ({} bytes)", ack_packet.len());
-        self.send_over_udp(&ack_packet).await
-            .context("Failed to send handshake ACK")?;
+        // ═══════════════════════════════════════════════════════════════════════
+        // TLS HANDSHAKE INTEGRATION WITH UDP HANDSHAKE
+        // ═══════════════════════════════════════════════════════════════════════
+        // Per MS-RDPEUDP and FreeRDP behavior:
+        // - For TLS connections: The third handshake packet (ACK) MUST include
+        //   the TLS ClientHello as DATA payload (ACK+DATA combined)
+        // - For non-TLS: Send pure ACK packet to complete handshake
+        //
+        // The working capture shows: SYN → SYN+ACK → ACK+DATA(TLS ClientHello)
+        // NOT: SYN → SYN+ACK → ACK, then separate DATA(TLS ClientHello)
+        // ═══════════════════════════════════════════════════════════════════════
 
-        info!("UDP handshake complete (SYN → SYN+ACK → ACK), ready for data transfer");
+        if self.use_dtls {
+            info!("🔐 TLS required - will send ACK+DATA with TLS ClientHello");
+            info!("   Skipping pure ACK - handshake will complete with first DATA packet");
+            // DO NOT send pure ACK! The send_data() call with TLS ClientHello
+            // will automatically include ACK information and complete the handshake.
+            // This is stored so run() can detect handshake completion.
+        } else {
+            // Non-TLS connection - send pure ACK to complete handshake
+            debug!("Sending handshake-completing ACK packet ({} bytes)", ack_packet.len());
+            self.send_over_udp(&ack_packet).await
+                .context("Failed to send handshake ACK")?;
+            info!("UDP handshake complete (SYN → SYN+ACK → ACK), ready for data transfer");
+        }
 
         Ok(())
     }
