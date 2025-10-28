@@ -1,8 +1,13 @@
 use std::borrow::Cow;
 
-use ironrdp_core::{decode, encode_vec, Decode, Encode, ReadCursor, WriteBuf};
+use ironrdp_core::{decode, encode_vec, Decode, Encode, ReadCursor, WriteBuf, WriteCursor};
 use ironrdp_pdu::rdp;
-use ironrdp_pdu::rdp::headers::{BasicSecurityHeaderFlags, ServerDeactivateAll};
+use ironrdp_pdu::rdp::client_info;
+use ironrdp_pdu::rdp::finalization_messages::{ControlAction, ControlPdu};
+use ironrdp_pdu::rdp::headers::{
+    BasicSecurityHeaderFlags, CompressionFlags, ServerDeactivateAll, ShareControlHeader,
+    ShareControlPdu, ShareDataHeader, ShareDataPdu, StreamPriority, BASIC_SECURITY_HEADER_SIZE,
+};
 use ironrdp_pdu::x224::X224;
 
 use crate::{general_err, reason_err, ConnectorError, ConnectorErrorExt as _, ConnectorResult};

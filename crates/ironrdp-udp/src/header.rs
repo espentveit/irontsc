@@ -41,6 +41,12 @@ impl FecHeader {
     pub fn encode_into(&self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.sn_source_ack.to_be_bytes());
         output.extend_from_slice(&self.receive_window_size.to_be_bytes());
-        output.extend_from_slice(&self.flags.bits().to_be_bytes());
+        
+        // Per MS-RDPEUDP 2.2.1: flags field is 16 bits with LogWindow in upper 4 bits
+        // Bits 0-12: Datagram flags
+        // Bits 12-15: LogWindow (receive window size indicator)
+        let log_window: u16 = 15; // Maximum window size (0xF = 15)
+        let flags_with_logwindow = self.flags.bits() | (log_window << 12);
+        output.extend_from_slice(&flags_with_logwindow.to_be_bytes());
     }
 }

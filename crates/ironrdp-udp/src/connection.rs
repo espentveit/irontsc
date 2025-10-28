@@ -438,15 +438,19 @@ impl UdpConnection {
         // Build ACK vector if we have received data packets
         let ack_vector = self.build_ack_vector()?;
 
-        // Include ACK-of-ACK if scheduled
-        let ack_of_ack = if ack_vector.is_some() {
-            self.take_pending_ack_of_ack()
+        // Include ACK-of-ACK if scheduled (this happens after handshake)
+        let ack_of_ack = self.take_pending_ack_of_ack();
+
+        // For first DATA packet after handshake, include DelayAck header
+        // Per FreeRDP behavior: MaxDelayedAcks=1, DelayedAckTimeoutInMs=20
+        let delay_ack = if !self.first_ack_sent && ack_of_ack.is_some() {
+            Some(crate::packet::DelayAckHeader::new(1, 20))
         } else {
             None
         };
 
         // DATA packets don't need ACK flag unless piggybacking acknowledgments
-        // The handshake ACK was already sent as a separate packet
+        // When ack_of_ack is present without ack_vector, ACK flag should be FALSE
         let include_ack = false;
 
         // snSourceAck should acknowledge the last SOURCE (DATA) packet received
@@ -458,6 +462,7 @@ impl UdpConnection {
             sn_source_ack,
             self.config.receive_window_size,
             data.clone(),
+            delay_ack,
             ack_vector.clone(),
             ack_of_ack,
             include_ack,
@@ -466,9 +471,10 @@ impl UdpConnection {
         #[cfg(debug_assertions)]
         {
             eprintln!(
-                "[ironrdp-udp] SourcePacket flags=0x{:04x} (include_ack={}, ack_vec={}, ack_of_ack={})",
+                "[ironrdp-udp] SourcePacket flags=0x{:04x} (include_ack={}, delay_ack={}, ack_vec={}, ack_of_ack={})",
                 packet.header.flags.bits(),
                 include_ack,
+                delay_ack.is_some(),
                 ack_vector.is_some(),
                 packet.ack_of_ack.is_some()
             );
@@ -1188,7 +1194,7 @@ mod tests {
         receiver.reset_receive_state(0);
 
         // Simulate receiving sequence 1 before sequence 0
-        let packet1 = SourcePacket::new(1, 1, 0, 256, b"two".to_vec(), None, None, false).unwrap();
+        let packet1 = SourcePacket::new(1, 1, 0, 256, b"two".to_vec(), None, None, None, false).unwrap();
         let encoded1 = packet1
             .encode(UdpProtocolVersion::V1)
             .expect("encode source packet");
@@ -1196,7 +1202,7 @@ mod tests {
         assert!(buffered.is_empty());
 
         // Now receive sequence 0, which should flush both
-        let packet0 = SourcePacket::new(0, 0, 0, 256, b"one".to_vec(), None, None, false).unwrap();
+        let packet0 = SourcePacket::new(0, 0, 0, 256, b"one".to_vec(), None, None, None, false).unwrap();
         let encoded0 = packet0
             .encode(UdpProtocolVersion::V1)
             .expect("encode source packet");

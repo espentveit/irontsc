@@ -21,7 +21,12 @@ use ironrdp::pdu::basic_output::fast_path::FastPathUpdate;
 use ironrdp::pdu::basic_output::orders::DrawingOrder;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
-use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
+use ironrdp::pdu::rdp::client_info;
+use ironrdp::pdu::rdp::finalization_messages::{ControlAction, ControlPdu};
+use ironrdp::pdu::rdp::headers::{
+    BasicSecurityHeaderFlags, CompressionFlags, ShareControlHeader, ShareControlPdu,
+    ShareDataHeader, ShareDataPdu, StreamPriority, BASIC_SECURITY_HEADER_SIZE,
+};
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
@@ -1685,6 +1690,10 @@ fn encode_multitransport_response_frame(
     request: MultitransportRequestInfo,
     message_channel_id: Option<u16>,
 ) -> ConnectorResult<Vec<u8>> {
+    // Per MS-RDPBCGR, the multitransport response is just:
+    // - BasicSecurityHeader (4 bytes)
+    // - InitiateMultitransportResponse (8 bytes)
+    // It does NOT use ShareControl or ShareData headers!
     struct MultitransportResponsePdu {
         security_flags: BasicSecurityHeaderFlags,
         security_flags_hi: u16,
@@ -1695,8 +1704,11 @@ fn encode_multitransport_response_frame(
         fn encode(&self, dst: &mut WriteCursor<'_>) -> ironrdp_core::EncodeResult<()> {
             ironrdp_core::ensure_size!(in: dst, size: self.size());
 
+            // Encode security header
             dst.write_u16(self.security_flags.bits());
             dst.write_u16(self.security_flags_hi);
+
+            // Encode response data
             self.response.encode(dst)
         }
 
@@ -1705,7 +1717,7 @@ fn encode_multitransport_response_frame(
         }
 
         fn size(&self) -> usize {
-            ironrdp::pdu::rdp::headers::BASIC_SECURITY_HEADER_SIZE + self.response.size()
+            BASIC_SECURITY_HEADER_SIZE + self.response.size()
         }
     }
 
