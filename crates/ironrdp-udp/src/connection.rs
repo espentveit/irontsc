@@ -407,6 +407,12 @@ impl UdpConnection {
         self.state = ConnectionState::Connected;
         // Next data packet MUST include ACK flag to complete 3-way handshake per MS-RDPEUDP
         self.first_ack_sent = false;
+
+        // Schedule ACK-of-ACK for the server's SYN+ACK packet to complete the 3-way handshake
+        // Per MS-RDPEUDP, the third handshake leg should include ACK-of-ACK to acknowledge
+        // the server's ACK (implicit in SYN+ACK via snSourceAck)
+        self.schedule_ack_of_ack(inner.header.sn_source_ack);
+
         Ok(())
     }
 
@@ -458,6 +464,17 @@ impl UdpConnection {
             ack_of_ack,
             include_ack,
         )?;
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                "[ironrdp-udp] SourcePacket flags=0x{:04x} (include_ack={}, ack_vec={}, ack_of_ack={})",
+                packet.header.flags.bits(),
+                include_ack,
+                ack_vector.is_some(),
+                packet.ack_of_ack.is_some()
+            );
+        }
 
         let encoded = packet.encode(self.config.protocol_version)?;
 
@@ -919,6 +936,7 @@ fn sequence_gt(a: u32, b: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flags::DatagramFlags;
 
     #[test]
     fn test_connection_initialization_client() {
@@ -1128,6 +1146,8 @@ mod tests {
         );
 
         let syn_bytes = syn.to_padded_bytes();
+        eprintln!("SYN bytes (first 32): {:02x?}", &syn_bytes[..32.min(syn_bytes.len())]);
+        eprintln!("SYN bytes len: {}", syn_bytes.len());
         let decoded = SynPacket::decode(&syn_bytes).expect("decode SYN");
         let syn_ex = decoded
             .inner()
@@ -1193,6 +1213,24 @@ mod tests {
     }
 
     #[test]
+    fn send_data_sets_data_flag() {
+        let mut config = UdpConfig::default();
+        config.protocol_version = UdpProtocolVersion::V3;
+        let mut conn = UdpConnection::new(config);
+        conn.state = ConnectionState::Connected;
+        conn.reset_receive_state(0);
+
+        let packet = conn
+            .send_data(b"hello".to_vec())
+            .expect("create source packet");
+
+        assert!(packet.len() >= 8, "packet too short for header");
+        let flags = u16::from_be_bytes([packet[6], packet[7]]);
+
+        assert_eq!(flags & 0x0004, 0x0004, "DATA flag not set: 0x{flags:04x}");
+    }
+
+    #[test]
     fn ack_of_ack_is_emitted_after_peer_ack() {
         let config = UdpConfig::default();
         let mut conn = UdpConnection::new(config.clone());
@@ -1241,5 +1279,61 @@ mod tests {
         let ack_bytes = conn.create_ack().expect("create ack");
         let parsed = AckPacket::decode(&ack_bytes, version).expect("decode ack");
         assert!(parsed.ack_of_ack.is_none());
+    }
+
+    #[test]
+    fn first_data_packet_includes_ack_of_ack_after_syn_ack() {
+        // Test that ACK-of-ACK is properly included in the first data packet after SYN+ACK
+        // This is required for the RDPUDP2 3-way handshake to complete successfully
+        let config = UdpConfig::default();
+        let mut client = UdpConnection::new(config.clone());
+        let mut server = UdpConnection::new(config.clone());
+
+        // Complete handshake
+        let syn_bytes = client.create_syn().expect("create SYN");
+        server.process_syn(&syn_bytes).expect("server process SYN");
+
+        let syn_ack_bytes = server.create_syn_ack().expect("create SYN+ACK");
+        let syn_ack = crate::handshake::SynAckPacket::decode(&syn_ack_bytes).expect("decode SYN+ACK");
+        let server_sn_source_ack = syn_ack.inner().header.sn_source_ack;
+
+        client
+            .process_syn_ack(&syn_ack_bytes)
+            .expect("client process SYN+ACK");
+
+        // Client sends first data packet
+        let data_bytes = client.send_data(b"ClientHello".to_vec()).expect("send data");
+
+        // Decode and verify the packet includes ACK-of-ACK
+        let version = client.protocol_version();
+        let packet = SourcePacket::decode(&data_bytes, version).expect("decode source packet");
+
+        // Verify flags
+        assert!(
+            packet.header.flags.contains(DatagramFlags::ACK),
+            "First data packet must have ACK flag"
+        );
+        assert!(
+            packet.header.flags.contains(DatagramFlags::DATA),
+            "First data packet must have DATA flag"
+        );
+        assert!(
+            packet.header.flags.contains(DatagramFlags::ACK_VEC),
+            "First data packet must have ACK_VEC flag"
+        );
+        assert!(
+            packet.header.flags.contains(DatagramFlags::ACK_OF_ACKS),
+            "First data packet must have ACK_OF_ACKS flag to complete 3-way handshake"
+        );
+
+        // Verify ACK-of-ACK header is present and has correct sequence number
+        let ack_of_ack = packet
+            .ack_of_ack
+            .expect("First data packet must include ACK-of-ACK header");
+
+        assert_eq!(
+            ack_of_ack.sequence_number, server_sn_source_ack,
+            "ACK-of-ACK must acknowledge server's snSourceAck from SYN+ACK"
+        );
     }
 }

@@ -52,11 +52,14 @@ impl SynPacket {
                 "SYN flag not set",
             ));
         }
-        if packet.header.flags.contains(DatagramFlags::ACK) {
+        // Note: Don't check for ACK flag here - SYN and ACK share bit 0,
+        // so SYN packets will naturally have the ACK bit set from bitflags perspective.
+        // The distinction is made by presence/absence of DATA flag.
+        if packet.header.flags.contains(DatagramFlags::DATA) {
             return Err(UdpError::invalid_field(
                 HandshakePacket::NAME,
                 "uFlags",
-                "unexpected ACK flag in SYN packet",
+                "SYN packet should not have DATA flag",
             ));
         }
         Ok(Self(packet))
