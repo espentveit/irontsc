@@ -1809,6 +1809,9 @@ async fn active_session<T: RdpEventSender + Clone>(
 
     // Track if we're currently establishing a UDP connection to avoid parallel attempts
     let mut udp_connection_in_progress = false;
+    
+    // Track if UDP tunnel is established - when true, stop processing TCP frames
+    let mut udp_tunnel_active = false;
 
     // If we received a multitransport request during connection, establish UDP now
     if let Some(mt_req) = multitransport_request {
@@ -1848,7 +1851,9 @@ async fn active_session<T: RdpEventSender + Clone>(
 
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
-            frame = reader.read_pdu() => {
+            // Only read TCP frames if UDP tunnel is not active
+            // Once UDP tunnel is established, all data flows via UDP
+            frame = reader.read_pdu(), if !udp_tunnel_active => {
                 match frame {
                     Ok((action, payload)) => {
                         trace!(?action, frame_length = payload.len(), "Frame received");
@@ -2162,11 +2167,21 @@ async fn active_session<T: RdpEventSender + Clone>(
             } => {
                 match udp_event {
                     Some((transport_idx, UdpTransportEvent::Connected)) => {
-                        info!("✅ UDP transport #{} connected!", transport_idx + 1);
+                        info!("╔═══════════════════════════════════════════════════════════════╗");
+                        info!("║  ✅ UDP HANDSHAKE COMPLETE - Transport #{}                   ║", transport_idx + 1);
+                        info!("╚═══════════════════════════════════════════════════════════════╝");
+                        info!("   📡 UDP connection established (SYN → SYN+ACK → ACK)");
+                        info!("   🔐 Starting TLS/DTLS handshake over UDP...");
                         vec![]
                     }
                     Some((transport_idx, UdpTransportEvent::TunnelEstablished)) => {
-                        info!("🔐 MS-RDPEMT tunnel established on transport #{}", transport_idx + 1);
+                        info!("╔═══════════════════════════════════════════════════════════════╗");
+                        info!("║  ✅ UDP TUNNEL ESTABLISHED - MULTITRANSPORT ACTIVE           ║");
+                        info!("╚═══════════════════════════════════════════════════════════════╝");
+                        info!("   🔐 MS-RDPEMT Tunnel #{} is now active", transport_idx + 1);
+                        info!("   📡 All graphics data will now flow via UDP (reliable mode)");
+                        info!("   🚫 TCP frame processing stopped - UDP tunnel handles all data");
+                        udp_tunnel_active = true;
                         vec![]
                     }
                     Some((transport_idx, UdpTransportEvent::DataReceived(data))) => {
@@ -2220,7 +2235,12 @@ async fn active_session<T: RdpEventSender + Clone>(
                         }
                     }
                     Some((transport_idx, UdpTransportEvent::Disconnected(reason))) => {
-                        warn!("⚠️  UDP transport #{} disconnected: {}", transport_idx + 1, reason);
+                        info!("╔═══════════════════════════════════════════════════════════════╗");
+                        info!("║  ⚠️  UDP TRANSPORT DISCONNECTED - Transport #{}              ║", transport_idx + 1);
+                        info!("╚═══════════════════════════════════════════════════════════════╝");
+                        info!("   ❌ Reason: {}", reason);
+                        info!("   🔄 Falling back to TCP for data transfer");
+                        udp_tunnel_active = false;
                         vec![]
                     }
                     None => {
