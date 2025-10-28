@@ -567,10 +567,10 @@ impl UdpTransportManager {
 
         debug!("Received SYN+ACK ({} bytes)", syn_ack.len());
 
-        // Process SYN+ACK and capture negotiated parameters
-        let (negotiated_version, retransmit_timeout_ms) = {
+        // Process SYN+ACK and get the handshake-completing ACK packet
+        let (ack_packet, negotiated_version, retransmit_timeout_ms) = {
             let mut conn = self.connection.lock().await;
-            conn.process_syn_ack(&syn_ack)
+            let ack_packet = conn.process_syn_ack(&syn_ack)
                 .map_err(|e| {
                     error!("❌ Failed to process SYN+ACK: {}", e);
                     // Log the first 64 bytes of the packet for debugging
@@ -583,7 +583,7 @@ impl UdpTransportManager {
                     e
                 })
                 .context("Failed to process SYN+ACK")?;
-            (conn.protocol_version(), conn.retransmit_timeout_ms())
+            (ack_packet, conn.protocol_version(), conn.retransmit_timeout_ms())
         };
 
         info!(
@@ -591,13 +591,14 @@ impl UdpTransportManager {
             negotiated_version, retransmit_timeout_ms
         );
 
-        // Per MS-RDPEUDP Section 1.4: Do NOT send standalone ACK packet
-        // The ACK flag will be automatically included in the first DATA packet (with DTLS ClientHello)
-        // by the connection state machine (see connection.rs:422)
+        // Per MS-RDPEUDP: Client-initiated connections require a pure ACK packet
+        // as the third handshake leg (SYN → SYN+ACK → ACK), before sending DATA.
+        // This completes the three-way handshake similar to TCP.
+        debug!("Sending handshake-completing ACK packet ({} bytes)", ack_packet.len());
+        self.send_over_udp(&ack_packet).await
+            .context("Failed to send handshake ACK")?;
 
-        // MS-RDPEUDP handshake is now SYN → SYN+ACK complete
-        // The final ACK will be included in the first DATA packet per MS-RDPEUDP spec
-        info!("UDP handshake complete (SYN → SYN+ACK received), ready for data transfer");
+        info!("UDP handshake complete (SYN → SYN+ACK → ACK), ready for data transfer");
 
         Ok(())
     }
