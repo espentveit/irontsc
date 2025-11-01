@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/clearcodec",
     "crates/drdynvc",
+    "crates/irontsc-udp",
     "crates/zgfx",
     "crates/ironrdp-gfx",
     "crates/ironrdp-h264",
@@ -196,6 +197,9 @@ tracing = "0.1.41"
 url = "2.5"
 whoami = "1.5"
 x509-cert = "0.2"
+rand = "0.8"
+sha2 = "0.10"
+openssl = "0.10"
 ironrdp-mstsgu = { path = "crates/ironrdp-mstsgu-local" }
 ironrdp-tls = { path = "crates/ironrdp-tls-local", features = ["rustls"]}
 ironrdp-cfg = { path = "crates/ironrdp-cfg-local", version = "0.1.0" }
@@ -205,6 +209,7 @@ ironrdp-rdpsnd-native = { path = "crates/ironrdp-rdpsnd-native-local", version =
 ironrdp-propertyset = { path = "crates/ironrdp-propertyset-local", version = "0.1.0" }
 ironrdp-async = { path = "crates/ironrdp-async-local", version = "0.7.0" }
 ironrdp-core = { path = "crates/ironrdp-core-local", version = "0.1.5" }
+ironrdp_udp = { path = "crates/irontsc-udp" }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 adw = { version = "0.8.0", package = "libadwaita", features = ["v1_6"] }
 arboard = "3.6.1"

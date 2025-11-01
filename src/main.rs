@@ -16,6 +16,9 @@ mod gfx;
 mod gfx_channel;
 mod h264_codec_caps;
 mod rdp;
+mod dtls_udp;
+mod udp_gfx;
+mod udp_transport;
 mod ws;
 
 // Video Redirection support (MS-RDPEVOR)
