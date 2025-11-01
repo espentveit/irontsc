@@ -187,9 +187,7 @@ impl AckOfAckVectorHeader {
 
     pub fn decode(cursor: &mut ReadCursor<'_>, version: UdpProtocolVersion) -> UdpResult<Self> {
         match version {
-            UdpProtocolVersion::V1
-            | UdpProtocolVersion::V2
-            | UdpProtocolVersion::V3 => {
+            UdpProtocolVersion::V1 | UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
                 let sequence_number = cursor
                     .try_read_u32_be()
                     .map_err(|e| UdpError::decode(Self::NAME, e))?;
@@ -204,9 +202,7 @@ impl AckOfAckVectorHeader {
 
     pub fn encode_into(&self, output: &mut Vec<u8>, version: UdpProtocolVersion) -> UdpResult<()> {
         match version {
-            UdpProtocolVersion::V1
-            | UdpProtocolVersion::V2
-            | UdpProtocolVersion::V3 => {
+            UdpProtocolVersion::V1 | UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
                 output.extend_from_slice(&self.sequence_number.to_be_bytes());
                 Ok(())
             }

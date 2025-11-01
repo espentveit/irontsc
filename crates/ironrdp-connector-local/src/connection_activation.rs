@@ -145,9 +145,10 @@ impl Sequence for ConnectionActivationSequence {
                 // and will cause decode_share_control to fail.
 
                 // First, check if this is an InitiateMultitransportRequest
-                if let Some(multitransport_request) =
-                    legacy::detect_multitransport_request(&send_data_indication_ctx, self.message_channel_id)
-                {
+                if let Some(multitransport_request) = legacy::detect_multitransport_request(
+                    &send_data_indication_ctx,
+                    self.message_channel_id,
+                ) {
                     debug!(
                         "Received InitiateMultitransportRequest: request_id={}, protocol={:?}",
                         multitransport_request.request_id,

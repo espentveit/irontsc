@@ -24,8 +24,8 @@ use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::client_info;
 use ironrdp::pdu::rdp::finalization_messages::{ControlAction, ControlPdu};
 use ironrdp::pdu::rdp::headers::{
-    BasicSecurityHeaderFlags, CompressionFlags, ShareControlHeader, ShareControlPdu,
-    ShareDataHeader, ShareDataPdu, StreamPriority, BASIC_SECURITY_HEADER_SIZE,
+    BASIC_SECURITY_HEADER_SIZE, BasicSecurityHeaderFlags, CompressionFlags, ShareControlHeader,
+    ShareControlPdu, ShareDataHeader, ShareDataPdu, StreamPriority,
 };
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
@@ -1809,7 +1809,7 @@ async fn active_session<T: RdpEventSender + Clone>(
 
     // Track if we're currently establishing a UDP connection to avoid parallel attempts
     let mut udp_connection_in_progress = false;
-    
+
     // Track if UDP tunnel is established - when true, stop processing TCP frames
     let mut udp_tunnel_active = false;
 
@@ -1817,15 +1817,19 @@ async fn active_session<T: RdpEventSender + Clone>(
     if let Some(mt_req) = multitransport_request {
         info!("🎯 Multitransport request received during connection phase!");
         info!("   Request ID: {}", mt_req.request_id);
-        info!("   Protocol: {:?} (raw=0x{:04x})", mt_req.protocol, mt_req.protocol.as_u16());
+        info!(
+            "   Protocol: {:?} (raw=0x{:04x})",
+            mt_req.protocol,
+            mt_req.protocol.as_u16()
+        );
         info!("   Security Cookie: {:02x?}", &mt_req.security_cookie[..]);
 
         if let Some(corr_id) = correlation_id {
             // Determine transport mode from protocol
             let use_lossy = mt_req.protocol.has_lossy_bit();
-            
+
             info!("🚀 Establishing UDP transport (lossy={})", use_lossy);
-            
+
             // Establish UDP transport with the stored authentication data
             match establish_udp_transport(
                 destination.clone(),
@@ -1835,13 +1839,20 @@ async fn active_session<T: RdpEventSender + Clone>(
                 Some(mt_req.request_id),
                 Some(mt_req.security_cookie),
                 selected_protocol,
-            ).await {
+            )
+            .await
+            {
                 Ok((_cmd_tx, evt_rx)) => {
-                    info!("✅ UDP transport established from connection-phase multitransport request!");
+                    info!(
+                        "✅ UDP transport established from connection-phase multitransport request!"
+                    );
                     udp_transports.push(evt_rx);
                 }
                 Err(e) => {
-                    error!("❌ Failed to establish UDP transport from connection-phase request: {:?}", e);
+                    error!(
+                        "❌ Failed to establish UDP transport from connection-phase request: {:?}",
+                        e
+                    );
                 }
             }
         } else {

@@ -233,10 +233,7 @@ pub fn detect_multitransport_request(
             eprintln!("✅ Detected Initiate Multitransport Request:");
             eprintln!("   Request ID: {}", request.request_id);
             eprintln!("   Protocol: {:?} (raw=0x{:04x})", protocol, protocol_bits);
-            eprintln!(
-                "   Security Cookie: {:02x?}",
-                &request.security_cookie[..]
-            );
+            eprintln!("   Security Cookie: {:02x?}", &request.security_cookie[..]);
             eprintln!("   Channel ID: 0x{:04x}", channel_id);
             eprintln!("   Offset in payload: {}", offset);
 

@@ -504,13 +504,18 @@ impl Sequence for ClientConnector {
                     warn!("⚠️  No ServerMessageChannelData GCC block - multitransport responses may not work");
                 }
 
-                if let Some(ref multi_transport_channel_data) = server_gcc_blocks.multi_transport_channel {
+                if let Some(ref multi_transport_channel_data) =
+                    server_gcc_blocks.multi_transport_channel
+                {
                     warn!(
                         "Unexpected MultiTransportChannelData GCC block from server - \
                         client sends this to advertise UDP capabilities, but server should \
                         respond with ServerMessageChannelData instead. Ignoring server's block."
                     );
-                    info!("📦 MultiTransportChannelData content: {:?}", multi_transport_channel_data);
+                    info!(
+                        "📦 MultiTransportChannelData content: {:?}",
+                        multi_transport_channel_data
+                    );
                 }
 
                 let static_channel_ids = server_gcc_blocks.network.channel_ids;
@@ -717,9 +722,10 @@ impl Sequence for ClientConnector {
                 } else {
                     // Extract multitransport_request before consuming connection_activation
                     let multitransport_request = match &connection_activation.state {
-                        ConnectionActivationState::Finalized { multitransport_request, .. } => {
-                            multitransport_request.clone()
-                        }
+                        ConnectionActivationState::Finalized {
+                            multitransport_request,
+                            ..
+                        } => multitransport_request.clone(),
                         _ => None,
                     };
 
