@@ -132,9 +132,7 @@ pub async fn example_udp_gfx_integration() -> Result<()> {
 
     // 2. Generate a correlation ID for multitransport
     // In a real implementation, this would be negotiated during RDP connection
-    let correlation_id = CorrelationId {
-        value: rand::random(),
-    };
+    let correlation_id = CorrelationId::new(rand::random());
 
     // 3. Create UDP GFX channel
     let mut udp_channel =

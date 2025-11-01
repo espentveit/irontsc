@@ -1,9 +1,10 @@
 use core::num::NonZeroU16;
-use std::collections::HashMap;
+use std::future::pending;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use anyhow::{Context, anyhow};
 use ironrdp::cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
 use ironrdp::cliprdr::pdu::FileDescriptor;
 use ironrdp::cliprdr::pdu::{
@@ -24,6 +25,7 @@ use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
+use ironrdp_pdu::nego;
 use ironrdp::session::desktop_composition::DesktopCompositionHandler;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
@@ -40,7 +42,7 @@ use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
 use rdpdr::NoopRdpdrBackend;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, lookup_host};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
@@ -52,6 +54,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::{Config, Destination, RDCleanPathConfig};
+use crate::udp_transport::{
+    UdpTransportCommand, UdpTransportConfig, UdpTransportEvent, UdpTransportManager,
+};
+use ironrdp_udp::{CorrelationId as UdpCorrelationId, TransportMode};
 
 fn to_utf16_bytes(value: &str) -> Vec<u8> {
     value
@@ -1239,12 +1245,13 @@ struct MultitransportRequestInfo {
     channel_id: u16,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-struct MultitransportHandshakeContext {
-    request: MultitransportRequestInfo,
-    cookie_hash: [u8; 32],
-    correlation_id: [u8; 16],
+struct ActiveUdpTunnel {
+    request_id: u32,
+    protocol: MultitransportProtocol,
+    command_tx: mpsc::UnboundedSender<UdpTransportCommand>,
+    event_rx: mpsc::UnboundedReceiver<UdpTransportEvent>,
+    connected: bool,
+    tunnel_established: bool,
 }
 
 fn detect_multitransport_request(
@@ -1425,6 +1432,55 @@ fn encode_multitransport_response_frame(
     Ok(buf.filled().to_vec())
 }
 
+async fn start_udp_tunnel(
+    destination: &Destination,
+    correlation_id: Option<[u8; 16]>,
+    selected_protocol: nego::SecurityProtocol,
+    request: &MultitransportRequestInfo,
+) -> anyhow::Result<ActiveUdpTunnel> {
+    let target = format!("{}:{}", destination.name(), destination.port());
+    let mut addrs = lookup_host(&target)
+        .await
+        .with_context(|| format!("failed to resolve UDP endpoint {target}"))?;
+    let server_addr = addrs
+        .next()
+        .ok_or_else(|| anyhow!("no resolved address for UDP endpoint {target}"))?;
+
+    let mut config = UdpTransportConfig::default();
+    config.server_addr = server_addr;
+    config.mode = if request.protocol.has_reliable_bit() {
+        TransportMode::Reliable
+    } else {
+        TransportMode::Lossy
+    };
+    config.use_dtls = !selected_protocol.is_standard_rdp_security();
+
+    let correlation = correlation_id.map(UdpCorrelationId::new);
+    let server_name = destination.name().to_string();
+
+    let (mut manager, command_tx, event_rx) =
+        UdpTransportManager::new(config, correlation, server_name)
+            .await
+            .context("failed to create UDP transport manager")?;
+
+    manager.set_tunnel_params(request.request_id, request.security_cookie);
+
+    tokio::spawn(async move {
+        if let Err(e) = manager.run().await {
+            error!("UDP transport task error: {}", e);
+        }
+    });
+
+    Ok(ActiveUdpTunnel {
+        request_id: request.request_id,
+        protocol: request.protocol,
+        command_tx,
+        event_rx,
+        connected: false,
+        tunnel_established: false,
+    })
+}
+
 async fn active_session<T: RdpEventSender + Clone>(
     framed: UpgradedFramed,
     connection_result: ConnectionResult,
@@ -1468,10 +1524,8 @@ async fn active_session<T: RdpEventSender + Clone>(
     // Track pending initial resize request (to be sent once DisplayControl channel is ready)
     let mut pending_initial_resize: Option<(u16, u16, u32, Option<(u32, u32)>)> = None;
 
-    // Track multitransport requests with their authentication data
-    // Maps request_id -> metadata needed for TCP response and UDP handshake
-    // Each request_id represents a separate UDP transport channel
-    let mut multitransport_requests: HashMap<u32, MultitransportHandshakeContext> = HashMap::new();
+    // Track active UDP transport tunnel (currently only one tunnel is supported)
+    let mut udp_tunnel: Option<ActiveUdpTunnel> = None;
 
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
@@ -1514,79 +1568,77 @@ async fn active_session<T: RdpEventSender + Clone>(
                         );
                     }
 
-                    // Check if we've already processed this request_id
-                    let is_duplicate = multitransport_requests.contains_key(&request_id);
-                    if is_duplicate {
-                        warn!("⚠️  Ignoring duplicate multitransport request_id={} (already processed)", request_id);
-                    } else {
-                        info!("   request_id={}, Protocol: {:?}", request_id, request_info.protocol);
+                info!(
+                    "   request_id={}, Security Cookie (full 16 bytes): {:02x?}",
+                    request_id,
+                    request_info.security_cookie
+                );
+                info!(
+                    "   request_id={}, Security Flags (HI): 0x{:04x}",
+                    request_id,
+                    request_info.security_flags_hi
+                );
+                info!(
+                    "   request_id={}, Initiator: 0x{:04x}, Channel: 0x{:04x}",
+                    request_id,
+                    request_info.initiator_id,
+                    request_info.channel_id
+                );
+
+                // Send multitransport response acknowledging the request
+                match encode_multitransport_response_frame(request_info, message_channel_id) {
+                    Ok(frame) => {
                         info!(
-                            "   request_id={}, Security Cookie (full 16 bytes): {:02x?}",
-                            request_id,
-                            request_info.security_cookie
+                            "📨 Sending Initiate Multitransport Response (S_OK) for request_id={}",
+                            request_id
                         );
-                        info!(
-                            "   request_id={}, Security Flags (HI): 0x{:04x}",
+                        extra_outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                    }
+                    Err(err) => {
+                        error!(
+                            "❌ Failed to encode InitiateMultitransportResponse for request_id={}: {:?}",
                             request_id,
-                            request_info.security_flags_hi
-                        );
-                        info!(
-                            "   request_id={}, Initiator: 0x{:04x}, Channel: 0x{:04x}",
-                            request_id,
-                            request_info.initiator_id,
-                            request_info.channel_id
+                            err
                         );
                     }
+                }
 
-                    // Check if security cookie is all zeros (server doesn't support/require authentication)
-                    let cookie_is_zero = request_info.security_cookie.iter().all(|&b| b == 0);
-
-                    if cookie_is_zero {
-                        // Skip zero-cookie requests - these appear to be probes that the server rejects
-                        warn!("   request_id={}, Skipping zero-cookie multitransport request (appears to be a probe)", request_id);
-                        warn!("   Waiting for subsequent requests with valid security cookies");
-                        continue;
-                    }
-
-                    // TODO: Calculate SHA-256 hash of security cookie for UDP authentication when implementing UDP
-                    // For now, just use a placeholder hash
-                    let _cookie_hash = if !cookie_is_zero {
-                        if !is_duplicate {
-                            info!("   request_id={}, Security Cookie: {:02x?}", request_id, request_info.security_cookie);
-                            info!("   request_id={}, Cookie hash calculation skipped (UDP not implemented)", request_id);
+                // Start UDP transport if supported and not already running
+                if udp_tunnel.is_some() {
+                    warn!(
+                        "⚠️  Additional multitransport request (id={}) received while a UDP tunnel is already active; ignoring",
+                        request_id
+                    );
+                } else if request_info.protocol.has_lossy_bit() || request_info.protocol.has_reliable_bit() {
+                    match start_udp_tunnel(
+                        &destination,
+                        correlation_id,
+                        selected_protocol,
+                        &request_info,
+                    )
+                    .await
+                    {
+                        Ok(handle) => {
+                            info!("🚀 UDP transport initialization started for request_id={}", request_id);
+                            udp_tunnel = Some(handle);
                         }
-                        [0u8; 32] // Placeholder - will need proper SHA-256 hash for UDP
-                    } else {
-                        if !is_duplicate {
-                            warn!("   request_id={}, Security cookie is all zeros - server doesn't require MS-RDPEMT authentication", request_id);
-                            warn!("   request_id={}, Will use UDPv2 without cookie hash", request_id);
-                        }
-                        [0u8; 32] // All-zero hash indicates no authentication
-                    };
-
-                    // Send multitransport response (UDP transport not implemented)
-                    if !is_duplicate {
-                        match encode_multitransport_response_frame(request_info, message_channel_id) {
-                            Ok(frame) => {
-                                info!("📨 Sending Initiate Multitransport Response (S_OK) for request_id={}", request_id);
-                                extra_outputs.push(ActiveStageOutput::ResponseFrame(frame));
-                            }
-                            Err(err) => {
-                                error!(
-                                    "❌ Failed to encode InitiateMultitransportResponse for request_id={}: {:?}",
-                                    request_id,
-                                    err
-                                );
-                            }
+                        Err(err) => {
+                            error!(
+                                "❌ Failed to initialize UDP transport for request_id={}: {}",
+                                request_id, err
+                            );
                         }
                     }
+                } else {
+                    warn!(
+                        "⚠️  Unsupported multitransport protocol {:?} (request_id={}), ignoring",
+                        request_info.protocol,
+                        request_id
+                    );
+                }
 
-                    // IMPORTANT: Multitransport request PDUs are control PDUs that should NOT be processed
-                    // by the normal RDP state machine. We've already sent the response above, so just return.
-                    // Additionally, we ignore all TCP data until UDP SYN+ACK completes, since the server
-                    // may send protocol errors or control messages that don't apply to UDP session init.
-                    info!("✅ Multitransport request handled, skipping TCP processing during UDP handshake");
-                    extra_outputs
+                info!("✅ Multitransport request handled, awaiting UDP handshake events");
+                extra_outputs
                 } else {
                     // Not a multitransport request - process normally
                     match active_stage.process(&mut image, action, &payload) {
@@ -1622,6 +1674,84 @@ async fn active_session<T: RdpEventSender + Clone>(
                         vec![]
                     }
                 }
+            }
+            udp_event = async {
+                if let Some(tunnel) = udp_tunnel.as_mut() {
+                    tunnel.event_rx.recv().await
+                } else {
+                    pending::<Option<UdpTransportEvent>>().await
+                }
+            } => {
+                let mut outputs = Vec::new();
+                match udp_event {
+                    Some(UdpTransportEvent::Connected) => {
+                        if let Some(tunnel) = udp_tunnel.as_mut() {
+                            tunnel.connected = true;
+                        }
+                        info!("✅ UDP transport connected (SYN/SYN+ACK complete)");
+                    }
+                    Some(UdpTransportEvent::TunnelEstablished) => {
+                        if let Some(tunnel) = udp_tunnel.as_mut() {
+                            tunnel.tunnel_established = true;
+                        }
+                        info!("🔐 UDP tunnel established (MS-RDPEMT)");
+                        if let Some(channel) =
+                            active_stage.get_dvc_mut::<crate::gfx_channel::GfxDvcProcessor>()
+                        {
+                            if let Some(gfx) = channel
+                                .channel_processor_downcast_mut::<crate::gfx_channel::GfxDvcProcessor>()
+                            {
+                                gfx.enable_udp_mode();
+                            } else {
+                                warn!("UDP tunnel established but GFX processor could not be downcast");
+                            }
+                        } else {
+                            warn!("UDP tunnel established but GFX processor is not available");
+                        }
+                    }
+                    Some(UdpTransportEvent::DataReceived(data)) => {
+                        use crate::gfx_channel::GfxDvcProcessor;
+                        if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
+                            if let Some(gfx) = channel.channel_processor_downcast_mut::<GfxDvcProcessor>() {
+                                match gfx.process_udp_data(&data) {
+                                    Ok(messages) => {
+                                        if !messages.is_empty() {
+                                            if let Some(channel_id) = channel.channel_id() {
+                                                let svc_messages = ironrdp_dvc::encode_dvc_messages(
+                                                    channel_id,
+                                                    messages,
+                                                    ironrdp::svc::ChannelFlags::empty(),
+                                                )
+                                                .map_err(|e| session::custom_err!("DRDYNVC", e))?;
+                                                let frame = active_stage.encode_dvc_messages(svc_messages)?;
+                                                outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                            } else {
+                                                warn!("GFX UDP data received before channel ID was assigned");
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!("❌ Failed to process RDPEGFX UDP payload: {:?}", err);
+                                    }
+                                }
+                            } else {
+                                warn!("UDP data received but GFX processor could not be downcast");
+                            }
+                        } else {
+                            warn!("UDP data received but GFX processor is unavailable");
+                        }
+                    }
+                    Some(UdpTransportEvent::Disconnected(reason)) => {
+                        warn!("⚠️  UDP transport disconnected: {}", reason);
+                        udp_tunnel = None;
+                    }
+                    None => {
+                        warn!("⚠️  UDP transport event stream closed");
+                        udp_tunnel = None;
+                    }
+                }
+
+                outputs
             }
             input_event = input_event_receiver.recv() => {
                 let input_event = input_event.ok_or_else(|| session::general_err!("GUI is stopped"))?;

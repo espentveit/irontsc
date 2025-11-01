@@ -408,7 +408,13 @@ impl UdpTransportManager {
                         }
                     };
                     let ack_packet = if conn.needs_keepalive() {
-                        conn.create_ack().ok()
+                        match conn.create_ack() {
+                            Ok(packet) => Some(packet),
+                            Err(err) => {
+                                warn!("Failed to create keepalive ACK: {}", err);
+                                None
+                            }
+                        }
                     } else {
                         None
                     };
@@ -566,7 +572,7 @@ impl UdpTransportManager {
         };
 
         info!(
-            "UDP negotiated protocol version {} (retransmit timeout {} ms)",
+            "UDP negotiated protocol version {:?} (retransmit timeout {} ms)",
             negotiated_version, retransmit_timeout_ms
         );
 
