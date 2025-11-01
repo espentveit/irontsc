@@ -657,6 +657,8 @@ impl UdpTransportManager {
         let source_result = conn.process_source_packet(packet);
         drop(conn);
 
+        let mut ack_required = matches!(source_result, Ok(_));
+
         match source_result {
             Ok(payloads) if !payloads.is_empty() => {
                 // Successfully extracted payloads from RDP UDP DATA packet(s)
@@ -687,8 +689,15 @@ impl UdpTransportManager {
                                             "✅ TLS Handshake Stage 3/3: TLS handshake complete - connection secured"
                                         );
 
-                                        // Now that DTLS is complete, create the tunnel
-                                        if let (Some(request_id), Some(security_cookie)) =
+                                        // For plain UDP we need an MS-RDPEMT tunnel; DTLS connections stay un-tunnelled.
+                                        if self.use_dtls {
+                                            if !self.tunnel_established {
+                                                info!(
+                                                    "🔐 DTLS active – skipping MS-RDPEMT tunnel creation"
+                                                );
+                                                self.tunnel_established = true;
+                                            }
+                                        } else if let (Some(request_id), Some(security_cookie)) =
                                             (self.request_id, self.security_cookie)
                                         {
                                             if !self.tunnel_established {
@@ -736,10 +745,12 @@ impl UdpTransportManager {
                         self.handle_tunnel_pdu_or_data(&payload).await?;
                     }
                 }
+                ack_required = true;
             }
             Ok(_) => {
                 // No payloads yet (buffered or out of sequence)
                 debug!("📦 UDP packet buffered (out of sequence or no data yet)");
+                ack_required = true;
             }
             Err(e) => {
                 // Not a source packet, try as ACK packet
@@ -758,6 +769,29 @@ impl UdpTransportManager {
                 } else {
                     debug!("✓ Processed UDP ACK packet");
                 }
+                ack_required = false;
+            }
+        }
+
+        if ack_required {
+            let ack_packet = {
+                let mut conn = self.connection.lock().await;
+                match conn.create_ack() {
+                    Ok(packet) => Some(packet),
+                    Err(err) => {
+                        debug!("Skipping ACK generation: {}", err);
+                        None
+                    }
+                }
+            };
+
+            if let Some(ack_packet) = ack_packet {
+                trace!(
+                    "Sending UDP ACK ({} bytes, first 16: {:02x?})",
+                    ack_packet.len(),
+                    &ack_packet[..ack_packet.len().min(16)]
+                );
+                self.send_over_udp(&ack_packet).await?;
             }
         }
 

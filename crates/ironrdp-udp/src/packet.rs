@@ -8,7 +8,7 @@ use crate::payload::{FecPayloadHeader, PayloadPrefix, SourcePayloadHeader};
 use crate::syndataex::UdpProtocolVersion;
 
 /// DelayAck header for RDPUDP packets (MS-RDPEUDP 2.2.1.11)
-/// Included when DELAYED_ACK_INFO flag (0x0100) is set
+/// Included when ACKDELAYED flag (0x0400) is set
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DelayAckHeader {
     /// Maximum number of ACKs that can be delayed
@@ -243,9 +243,6 @@ impl AckPacket {
         ack_of_ack: Option<AckOfAckVectorHeader>,
     ) -> Self {
         let mut flags = DatagramFlags::ACK;
-        if ack_vector.is_some() {
-            flags |= DatagramFlags::ACK_VEC;
-        }
         if ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK_OF_ACKS;
         }
@@ -357,7 +354,7 @@ impl SourcePacket {
         ack_of_ack: Option<AckOfAckVectorHeader>,
         include_ack: bool,
     ) -> UdpResult<Self> {
-        debug_assert_eq!(DatagramFlags::DATA.bits(), 0x0004);
+        debug_assert_eq!(DatagramFlags::DATA.bits(), 0x0008);
         let mut flags = DatagramFlags::DATA;
 
         // Set ACK flag when piggybacking acknowledgments (vector or ack-of-acks)
@@ -365,12 +362,7 @@ impl SourcePacket {
             flags |= DatagramFlags::ACK;
         }
 
-        if ack_vector.is_some() {
-            flags |= DatagramFlags::ACK_VEC;
-        }
-
         if delay_ack.is_some() {
-            flags |= DatagramFlags::DELAYED_ACK_INFO;
             flags |= DatagramFlags::ACKDELAYED;
         }
 
@@ -432,7 +424,7 @@ impl SourcePacket {
         // }
 
         // Decode DelayAck header if present
-        let delay_ack = if header.flags.contains(DatagramFlags::DELAYED_ACK_INFO) {
+        let delay_ack = if header.flags.contains(DatagramFlags::ACKDELAYED) {
             Some(DelayAckHeader::decode(&mut cursor)?)
         } else {
             None
@@ -545,9 +537,6 @@ impl FecPacket {
         let mut flags = DatagramFlags::empty();
         if ack_vector.is_some() || ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK;
-        }
-        if ack_vector.is_some() {
-            flags |= DatagramFlags::ACK_VEC;
         }
         if ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK_OF_ACKS;
