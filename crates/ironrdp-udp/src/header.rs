@@ -27,7 +27,9 @@ impl FecHeader {
             .try_read_u16_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
-        let flags = DatagramFlags::from_bits_truncate(flags_raw & 0x1FFF);
+        let flags = DatagramFlags::from_bits(flags_raw).ok_or_else(|| {
+            UdpError::invalid_field(Self::NAME, "uFlags", "unknown bits set in datagram flags")
+        })?;
 
         Ok(Self {
             sn_source_ack,

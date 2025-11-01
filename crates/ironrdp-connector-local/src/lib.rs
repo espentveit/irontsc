@@ -35,7 +35,6 @@ pub use self::channel_connection::{ChannelConnectionSequence, ChannelConnectionS
 pub use self::connection::{
     encode_send_data_request, ClientConnector, ClientConnectorState, ConnectionResult,
 };
-pub use self::connection_activation::MultitransportRequestData;
 pub use self::connection_finalization::{
     ConnectionFinalizationSequence, ConnectionFinalizationState,
 };
@@ -485,11 +484,9 @@ pub fn create_client_data(
                 | ClientEarlyCapabilityFlags::SUPPORT_STATUS_INFO_PDU
                 | ClientEarlyCapabilityFlags::STRONG_ASYMMETRIC_KEYS
                 | ClientEarlyCapabilityFlags::VALID_CONNECTION_TYPE
-                | ClientEarlyCapabilityFlags::SUPPORT_NET_CHAR_AUTODETECT
                 | ClientEarlyCapabilityFlags::SUPPORT_DYN_VC_GFX_PROTOCOL
                 | ClientEarlyCapabilityFlags::SUPPORT_DYNAMIC_TIME_ZONE
-                | ClientEarlyCapabilityFlags::SUPPORT_HEART_BEAT_PDU
-                | ClientEarlyCapabilityFlags::SUPPORT_SKIP_CHANNELJOIN;
+                | ClientEarlyCapabilityFlags::SUPPORT_HEART_BEAT_PDU;
 
             let max_color_depth = config
                 .bitmap
@@ -541,12 +538,7 @@ pub fn create_client_data(
         }),
         monitor: None,
         message_channel: Some(ClientMessageChannelData),
-        multi_transport_channel: Some(MultiTransportChannelData {
-            flags: MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
-                | MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
-                | MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
-                | MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
-        }),
+        multi_transport_channel: None, // Disable UDP transport - use TCP only for now
         monitor_extended: None,
     };
 

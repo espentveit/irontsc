@@ -43,13 +43,6 @@ use ironrdp::cliprdr::backend::CliprdrBackendFactory;
 const APP_ID: &str = "org.gtk_rs.IronTsc";
 const DEFAULT_RDP_FILE: &str = "default.rdp";
 
-/// Check if shortcut inhibition should be disabled (when RUST_LOG contains 'trace')
-fn should_disable_shortcut_inhibition() -> bool {
-    std::env::var("RUST_LOG")
-        .map(|val| val.to_lowercase().contains("trace"))
-        .unwrap_or(false)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloseIntent {
     None,
@@ -1669,8 +1662,7 @@ fn create_remote_desktop_window(
     }
 
     // 1) Inhibit shortcuts when pointer ENTERS the RDP overlay; restore on LEAVE
-    // (disabled when RUST_LOG=trace to avoid permission dialogs during testing)
-    if !should_disable_shortcut_inhibition() {
+    {
         let enter_leave_ctrl = gtk::EventControllerMotion::new();
         let win_weak = rd_window.downgrade();
 
@@ -1700,8 +1692,7 @@ fn create_remote_desktop_window(
     }
 
     // 2) Also handle keyboard focus (e.g., when alt-tabbing into/out of the window)
-    // (disabled when RUST_LOG=trace to avoid permission dialogs during testing)
-    if !should_disable_shortcut_inhibition() {
+    {
         let focus_ctrl = gtk::EventControllerFocus::new();
         let win_weak = rd_window.downgrade();
 
@@ -1722,8 +1713,7 @@ fn create_remote_desktop_window(
     }
 
     // 3) Safety: always restore before closing
-    // (disabled when RUST_LOG=trace to avoid permission dialogs during testing)
-    if !should_disable_shortcut_inhibition() {
+    {
         let win_weak = rd_window.downgrade();
         rd_window.connect_close_request(move |_| {
             if let Some(win) = win_weak.upgrade() {

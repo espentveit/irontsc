@@ -21,12 +21,7 @@ use ironrdp::pdu::basic_output::fast_path::FastPathUpdate;
 use ironrdp::pdu::basic_output::orders::DrawingOrder;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
-use ironrdp::pdu::rdp::client_info;
-use ironrdp::pdu::rdp::finalization_messages::{ControlAction, ControlPdu};
-use ironrdp::pdu::rdp::headers::{
-    BASIC_SECURITY_HEADER_SIZE, BasicSecurityHeaderFlags, CompressionFlags, ShareControlHeader,
-    ShareControlPdu, ShareDataHeader, ShareDataPdu, StreamPriority,
-};
+use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
@@ -1690,10 +1685,6 @@ fn encode_multitransport_response_frame(
     request: MultitransportRequestInfo,
     message_channel_id: Option<u16>,
 ) -> ConnectorResult<Vec<u8>> {
-    // Per MS-RDPBCGR, the multitransport response is just:
-    // - BasicSecurityHeader (4 bytes)
-    // - InitiateMultitransportResponse (8 bytes)
-    // It does NOT use ShareControl or ShareData headers!
     struct MultitransportResponsePdu {
         security_flags: BasicSecurityHeaderFlags,
         security_flags_hi: u16,
@@ -1704,11 +1695,8 @@ fn encode_multitransport_response_frame(
         fn encode(&self, dst: &mut WriteCursor<'_>) -> ironrdp_core::EncodeResult<()> {
             ironrdp_core::ensure_size!(in: dst, size: self.size());
 
-            // Encode security header
             dst.write_u16(self.security_flags.bits());
             dst.write_u16(self.security_flags_hi);
-
-            // Encode response data
             self.response.encode(dst)
         }
 
@@ -1717,7 +1705,7 @@ fn encode_multitransport_response_frame(
         }
 
         fn size(&self) -> usize {
-            BASIC_SECURITY_HEADER_SIZE + self.response.size()
+            ironrdp::pdu::rdp::headers::BASIC_SECURITY_HEADER_SIZE + self.response.size()
         }
     }
 
@@ -1773,7 +1761,6 @@ async fn active_session<T: RdpEventSender + Clone>(
     let correlation_id = connection_result.correlation_id;
     let message_channel_id = connection_result.message_channel_id;
     let selected_protocol = connection_result.selected_protocol;
-    let multitransport_request = connection_result.multitransport_request.clone();
 
     let mut active_stage = ActiveStage::new(connection_result);
 
@@ -1810,61 +1797,9 @@ async fn active_session<T: RdpEventSender + Clone>(
     // Track if we're currently establishing a UDP connection to avoid parallel attempts
     let mut udp_connection_in_progress = false;
 
-    // Track if UDP tunnel is established - when true, stop processing TCP frames
-    let mut udp_tunnel_active = false;
-
-    // If we received a multitransport request during connection, establish UDP now
-    if let Some(mt_req) = multitransport_request {
-        info!("🎯 Multitransport request received during connection phase!");
-        info!("   Request ID: {}", mt_req.request_id);
-        info!(
-            "   Protocol: {:?} (raw=0x{:04x})",
-            mt_req.protocol,
-            mt_req.protocol.as_u16()
-        );
-        info!("   Security Cookie: {:02x?}", &mt_req.security_cookie[..]);
-
-        if let Some(corr_id) = correlation_id {
-            // Determine transport mode from protocol
-            let use_lossy = mt_req.protocol.has_lossy_bit();
-
-            info!("🚀 Establishing UDP transport (lossy={})", use_lossy);
-
-            // Establish UDP transport with the stored authentication data
-            match establish_udp_transport(
-                destination.clone(),
-                client_addr,
-                corr_id,
-                use_lossy,
-                Some(mt_req.request_id),
-                Some(mt_req.security_cookie),
-                selected_protocol,
-            )
-            .await
-            {
-                Ok((_cmd_tx, evt_rx)) => {
-                    info!(
-                        "✅ UDP transport established from connection-phase multitransport request!"
-                    );
-                    udp_transports.push(evt_rx);
-                }
-                Err(e) => {
-                    error!(
-                        "❌ Failed to establish UDP transport from connection-phase request: {:?}",
-                        e
-                    );
-                }
-            }
-        } else {
-            warn!("⚠️  Multitransport requested but no correlation_id available");
-        }
-    }
-
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
-            // Only read TCP frames if UDP tunnel is not active
-            // Once UDP tunnel is established, all data flows via UDP
-            frame = reader.read_pdu(), if !udp_tunnel_active => {
+            frame = reader.read_pdu() => {
                 match frame {
                     Ok((action, payload)) => {
                         trace!(?action, frame_length = payload.len(), "Frame received");
@@ -2178,21 +2113,11 @@ async fn active_session<T: RdpEventSender + Clone>(
             } => {
                 match udp_event {
                     Some((transport_idx, UdpTransportEvent::Connected)) => {
-                        info!("╔═══════════════════════════════════════════════════════════════╗");
-                        info!("║  ✅ UDP HANDSHAKE COMPLETE - Transport #{}                   ║", transport_idx + 1);
-                        info!("╚═══════════════════════════════════════════════════════════════╝");
-                        info!("   📡 UDP connection established (SYN → SYN+ACK → ACK)");
-                        info!("   🔐 Starting TLS/DTLS handshake over UDP...");
+                        info!("✅ UDP transport #{} connected!", transport_idx + 1);
                         vec![]
                     }
                     Some((transport_idx, UdpTransportEvent::TunnelEstablished)) => {
-                        info!("╔═══════════════════════════════════════════════════════════════╗");
-                        info!("║  ✅ UDP TUNNEL ESTABLISHED - MULTITRANSPORT ACTIVE           ║");
-                        info!("╚═══════════════════════════════════════════════════════════════╝");
-                        info!("   🔐 MS-RDPEMT Tunnel #{} is now active", transport_idx + 1);
-                        info!("   📡 All graphics data will now flow via UDP (reliable mode)");
-                        info!("   🚫 TCP frame processing stopped - UDP tunnel handles all data");
-                        udp_tunnel_active = true;
+                        info!("🔐 MS-RDPEMT tunnel established on transport #{}", transport_idx + 1);
                         vec![]
                     }
                     Some((transport_idx, UdpTransportEvent::DataReceived(data))) => {
@@ -2246,12 +2171,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         }
                     }
                     Some((transport_idx, UdpTransportEvent::Disconnected(reason))) => {
-                        info!("╔═══════════════════════════════════════════════════════════════╗");
-                        info!("║  ⚠️  UDP TRANSPORT DISCONNECTED - Transport #{}              ║", transport_idx + 1);
-                        info!("╚═══════════════════════════════════════════════════════════════╝");
-                        info!("   ❌ Reason: {}", reason);
-                        info!("   🔄 Falling back to TCP for data transfer");
-                        udp_tunnel_active = false;
+                        warn!("⚠️  UDP transport #{} disconnected: {}", transport_idx + 1, reason);
                         vec![]
                     }
                     None => {
@@ -2520,7 +2440,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                             desktop_size,
                             enable_server_pointer,
                             pointer_software_rendering,
-                            ..
                         } = connection_activation.state
                         {
                             debug!(

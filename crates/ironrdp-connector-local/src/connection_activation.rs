@@ -9,16 +9,6 @@ use crate::{
     Sequence, State, Written,
 };
 
-/// Stores the multitransport request information received from the server.
-/// This data is needed to establish UDP transport after the RDP connection is complete.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct MultitransportRequestData {
-    pub request_id: u32,
-    pub security_cookie: [u8; 16],
-    pub protocol: rdp::multitransport::MultitransportProtocol,
-}
-
 /// Represents the Capability Exchange and Connection Finalization phases
 /// of the connection sequence (section [1.3.1.1]).
 ///
@@ -36,8 +26,6 @@ pub struct ConnectionActivationSequence {
     pub state: ConnectionActivationState,
     config: Config,
     message_channel_id: Option<u16>,
-    /// Stores multitransport request data when received from the server
-    multitransport_request: Option<MultitransportRequestData>,
 }
 
 impl ConnectionActivationSequence {
@@ -54,7 +42,6 @@ impl ConnectionActivationSequence {
             },
             config,
             message_channel_id,
-            multitransport_request: None,
         }
     }
 
@@ -145,22 +132,14 @@ impl Sequence for ConnectionActivationSequence {
                 // and will cause decode_share_control to fail.
 
                 // First, check if this is an InitiateMultitransportRequest
-                if let Some(multitransport_request) = legacy::detect_multitransport_request(
-                    &send_data_indication_ctx,
-                    self.message_channel_id,
-                ) {
+                if let Some(multitransport_request) =
+                    legacy::detect_multitransport_request(&send_data_indication_ctx)
+                {
                     debug!(
                         "Received InitiateMultitransportRequest: request_id={}, protocol={:?}",
                         multitransport_request.request_id,
                         multitransport_request.requested_protocol
                     );
-
-                    // Store the multitransport request data for later use
-                    self.multitransport_request = Some(MultitransportRequestData {
-                        request_id: multitransport_request.request_id,
-                        security_cookie: multitransport_request.security_cookie,
-                        protocol: multitransport_request.requested_protocol,
-                    });
 
                     // Send InitiateMultitransportResponse
                     // Per MS-RDPBCGR spec, the response MUST be sent on the MCS Message Channel
@@ -272,7 +251,6 @@ impl Sequence for ConnectionActivationSequence {
                             io_channel_id,
                             user_channel_id,
                         ),
-                        multitransport_request: self.multitransport_request.clone(),
                     },
                 )
             }
@@ -281,7 +259,6 @@ impl Sequence for ConnectionActivationSequence {
                 user_channel_id,
                 desktop_size,
                 mut connection_finalization,
-                multitransport_request,
             } => {
                 debug!("Connection Finalization");
 
@@ -293,7 +270,6 @@ impl Sequence for ConnectionActivationSequence {
                         user_channel_id,
                         desktop_size,
                         connection_finalization,
-                        multitransport_request,
                     }
                 } else {
                     ConnectionActivationState::Finalized {
@@ -302,7 +278,6 @@ impl Sequence for ConnectionActivationSequence {
                         desktop_size,
                         enable_server_pointer: self.config.enable_server_pointer,
                         pointer_software_rendering: self.config.pointer_software_rendering,
-                        multitransport_request,
                     }
                 };
 
@@ -329,7 +304,6 @@ pub enum ConnectionActivationState {
         user_channel_id: u16,
         desktop_size: DesktopSize,
         connection_finalization: ConnectionFinalizationSequence,
-        multitransport_request: Option<MultitransportRequestData>,
     },
     Finalized {
         io_channel_id: u16,
@@ -337,7 +311,6 @@ pub enum ConnectionActivationState {
         desktop_size: DesktopSize,
         enable_server_pointer: bool,
         pointer_software_rendering: bool,
-        multitransport_request: Option<MultitransportRequestData>,
     },
 }
 
