@@ -1,6 +1,6 @@
 use core::num::NonZeroU16;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,6 @@ use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::graphics::pointer::DecodedPointer;
 use ironrdp::pdu::PduResult;
-use ironrdp::pdu::basic_output::fast_path::FastPathUpdate;
 use ironrdp::pdu::basic_output::orders::DrawingOrder;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
@@ -30,7 +29,7 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
 };
-use ironrdp::svc::{ChannelFlags, SvcMessage};
+use ironrdp::svc::SvcMessage;
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
 use ironrdp_connector::legacy;
 use ironrdp_core::impl_as_any;
@@ -38,15 +37,11 @@ use ironrdp_core::{Encode, IntoOwned, WriteBuf, WriteCursor};
 use ironrdp_rdpsnd_native::cpal;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
-use ironrdp_udp::{
-    CorrelationId, SynAckPacket, SynData, SynDataEx, SynDataExFlags, SynPacket, UdpProtocolVersion,
-};
 use rdpdr::NoopRdpdrBackend;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
 
 use arboard::Clipboard;
@@ -56,18 +51,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// Import UDP transport manager for proper integration
-use crate::gfx_channel::GfxDvcProcessor;
-use crate::udp_transport::{
-    UdpTransportCommand, UdpTransportConfig, UdpTransportEvent, UdpTransportManager,
-};
-use ironrdp_udp::TransportMode;
-
 use crate::config::{Config, Destination, RDCleanPathConfig};
-use anyhow::Context as _;
-use rand::RngCore;
-use rand::SeedableRng;
-use sha2::{Digest, Sha256};
 
 fn to_utf16_bytes(value: &str) -> Vec<u8> {
     value
@@ -410,39 +394,6 @@ async fn connect(
 
     debug!(?connection_result);
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // UDP MULTITRANSPORT ATTEMPT (Optimistic, May Timeout)
-    // ═══════════════════════════════════════════════════════════════════════
-    //
-    // NOTE: This attempts UDP connection immediately after TCP handshake.
-    // According to MS-RDPEUDP spec, proper flow requires:
-    //
-    // 1. Server advertises MULTITRANSPORT support in RDP capabilities
-    // 2. Server sends "Initiate Multitransport Request PDU" (MS-RDPBCGR 2.2.15.1)
-    // 3. Client uses correlation ID from RDP_NEG_CORRELATION_INFO
-    // 4. Client initiates UDP with matching correlation ID
-    //
-    // We're currently doing "optimistic UDP" - trying immediately with a
-    // random correlation ID. This will timeout (~1.5s) if:
-    // - Server requires prior multitransport negotiation (most servers)
-    // - Server doesn't support UDP (Windows Server 2012 R2 and earlier)
-    // - Network/firewall blocks UDP port 3389
-    //
-    // The timeout is EXPECTED and handled gracefully with TCP fallback.
-    // All functionality works via TCP. UDP would provide 20-50ms lower
-    // latency for video streaming, but isn't required.
-    //
-    // TODO: Implement full MS-RDPBCGR multitransport negotiation:
-    //       - Wait for server's Initiate Multitransport Request PDU
-    //       - Use proper correlation ID from RDP negotiation
-    //       - Support RDPUDP_PROTOCOL_VERSION_3 with securityCookie hash
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // NOTE: Client-initiated UDP is disabled. According to MS-RDPBCGR Section 1.3.3,
-    // the client MUST wait for the server to send an "Initiate Multitransport Request"
-    // PDU during the active session. UDP establishment is now handled in active_session()
-    // when the server sends SEC_TRANSPORT_REQ.
-
     info!("✅ Multitransport capability advertised, waiting for server request...");
 
     // Extract correlation_id from connection_result for later use
@@ -453,278 +404,10 @@ async fn connect(
             &corr_id[..8]
         );
     } else {
-        warn!("⚠️  No correlation ID - server-initiated UDP multitransport will not be possible");
+        warn!("⚠️  No correlation ID - server-initiated multitransport will not be possible");
     }
 
     Ok((connection_result, upgraded_framed, client_addr))
-}
-
-/// Establish UDP transport using the transport manager
-/// Returns (command_sender, event_receiver) for controlling the UDP transport
-async fn establish_udp_transport(
-    destination: Destination,
-    client_addr: SocketAddr,
-    correlation_id: [u8; 16],
-    use_lossy_mode: bool,
-    request_id: Option<u32>,
-    security_cookie: Option<[u8; 16]>,
-    selected_protocol: ironrdp::pdu::nego::SecurityProtocol,
-) -> anyhow::Result<(
-    mpsc::UnboundedSender<UdpTransportCommand>,
-    mpsc::UnboundedReceiver<UdpTransportEvent>,
-)> {
-    info!("🔌 Establishing UDP transport for {}", destination.name());
-
-    // Determine if DTLS is required based on security protocol
-    // Per MS-RDPEMT Appendix A Footnote <1>:
-    // - Enhanced RDP Security (TLS/CredSSP/RDSTLS) requires DTLS
-    // - Standard RDP Security (RC4) uses unencrypted UDP
-    let use_dtls = !selected_protocol.is_standard_rdp_security();
-
-    if use_dtls {
-        info!("🔐 Enhanced RDP Security detected: DTLS will be required for UDP");
-        info!("   Selected protocol: {}", selected_protocol);
-    } else {
-        info!("ℹ️  Standard RDP Security: UDP will use unencrypted datagrams");
-    }
-
-    let server_addr = SocketAddr::new(destination.name().parse()?, destination.port());
-    let server_name = destination.name().to_string();
-
-    let config = UdpTransportConfig {
-        server_addr,
-        local_addr: SocketAddr::new(client_addr.ip(), client_addr.port()),
-        mode: if use_lossy_mode {
-            TransportMode::Lossy
-        } else {
-            TransportMode::Reliable
-        },
-        enable_fec: true,
-        protocol_version: UdpProtocolVersion::V3,
-        mtu: 1232,
-        use_dtls,
-    };
-
-    let corr_id = CorrelationId::new(correlation_id);
-    let (mut manager, command_tx, event_rx) =
-        UdpTransportManager::new(config, Some(corr_id), server_name).await?;
-
-    // Set MS-RDPEMT tunnel parameters if provided
-    if let (Some(req_id), Some(cookie)) = (request_id, security_cookie) {
-        info!("🔐 Setting MS-RDPEMT tunnel params: request_id={}", req_id);
-        manager.set_tunnel_params(req_id, cookie);
-    }
-
-    // Spawn the transport manager task
-    tokio::spawn(async move {
-        if let Err(e) = manager.run().await {
-            error!("UDP transport manager error: {}", e);
-        }
-    });
-
-    info!("✅ UDP transport manager created and running");
-
-    Ok((command_tx, event_rx))
-}
-
-async fn try_establish_rdpudp(
-    destination: Destination,
-    client_addr: SocketAddr,
-    correlation_id: Option<[u8; 16]>,
-) {
-    // Use reliable mode (false) as default when protocol type not specified
-    if let Err(err) = establish_rdpudp(destination, client_addr, correlation_id, None, false).await
-    {
-        debug!("RDP-UDP handshake failed: {err:?}");
-    }
-}
-
-async fn establish_rdpudp(
-    destination: Destination,
-    client_addr: SocketAddr,
-    correlation_id: Option<[u8; 16]>,
-    cookie_hash: Option<[u8; 32]>,
-    use_lossy_mode: bool,
-) -> anyhow::Result<UdpSocket> {
-    info!("🔌 Starting UDP handshake for {}", destination.name());
-
-    if let Some(ref hash) = cookie_hash {
-        debug!(
-            "Using security cookie hash for authentication: {:02x?}",
-            &hash[..8]
-        );
-    }
-
-    let desired_bind_addr = SocketAddr::new(client_addr.ip(), client_addr.port());
-    debug!(
-        "Binding UDP socket to match TCP source: {}",
-        desired_bind_addr
-    );
-
-    let socket = match UdpSocket::bind(desired_bind_addr).await {
-        Ok(socket) => socket,
-        Err(err) => {
-            warn!(
-                "Failed to bind UDP to TCP source {} ({}), retrying with unspecified IP",
-                desired_bind_addr, err
-            );
-            let fallback_ip = match client_addr.ip() {
-                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            };
-
-            match UdpSocket::bind(SocketAddr::new(fallback_ip, client_addr.port())).await {
-                Ok(socket) => socket,
-                Err(fallback_err) => {
-                    warn!(
-                        "Fallback bind to {}:{} failed ({}); using ephemeral port",
-                        fallback_ip,
-                        client_addr.port(),
-                        fallback_err
-                    );
-
-                    UdpSocket::bind(SocketAddr::new(fallback_ip, 0))
-                        .await
-                        .with_context(|| {
-                            format!("bind fallback UDP socket after error: {fallback_err}")
-                        })?
-                }
-            }
-        }
-    };
-
-    let local_addr = socket.local_addr()?;
-    info!("UDP socket bound to local address: {}", local_addr);
-
-    let server_addr = format!("{}:{}", destination.name(), destination.port());
-    debug!("Connecting UDP socket to: {}", server_addr);
-
-    socket
-        .connect(&server_addr)
-        .await
-        .context("connect UDP socket to RDP server")?;
-
-    info!("UDP socket connected to: {}", server_addr);
-
-    // Use correlation_id from X.224 negotiation, or generate a new one if not available
-    let correlation_bytes = if let Some(corr_id) = correlation_id {
-        debug!(
-            "Using correlation ID from X.224 negotiation: {:02x?}",
-            &corr_id[..8]
-        );
-        corr_id
-    } else {
-        let mut rng = rand::rngs::StdRng::from_entropy();
-        let mut correlation_bytes = [0u8; 16];
-        loop {
-            rng.fill_bytes(&mut correlation_bytes);
-            if correlation_bytes[0] != 0x00
-                && correlation_bytes[0] != 0xF4
-                && !correlation_bytes.iter().any(|&b| b == 0x0D)
-            {
-                break;
-            }
-        }
-        debug!(
-            "Generated new correlation ID: {:02x?}",
-            &correlation_bytes[..8]
-        );
-        correlation_bytes
-    };
-
-    let mut rng = rand::rngs::StdRng::from_entropy();
-
-    let syn_data = SynData {
-        initial_sequence_number: rng.next_u32(),
-        upstream_mtu: 1232,
-        downstream_mtu: 1232,
-    };
-
-    debug!(
-        "Creating SYN packet: seq={}, upstream_mtu={}, downstream_mtu={}",
-        syn_data.initial_sequence_number, syn_data.upstream_mtu, syn_data.downstream_mtu
-    );
-
-    let syn_packet = SynPacket::new(
-        256,            // receive window size (256 packets is the standard per MS-RDPEUDP spec)
-        use_lossy_mode, // syn_lossy flag from server's requested protocol type
-        syn_data,
-        Some(CorrelationId::new(correlation_bytes)),
-        // Try UDP v3 with authentication to match working packet captures
-        // v3 is what Windows 11 prefers based on pcapng analysis
-        cookie_hash.map(|hash| {
-            SynDataEx {
-                flags: SynDataExFlags::VERSION_INFO_VALID,
-                udp_version: Some(UdpProtocolVersion::V3), // V3 matches working captures
-                cookie_hash: Some(hash),
-            }
-        }),
-    );
-
-    let payload = syn_packet.to_padded_bytes();
-    info!(
-        "Sending SYN packet: {} bytes (padded to MTU)",
-        payload.len()
-    );
-
-    // Log SynDataEx details if present
-    if cookie_hash.is_some() {
-        info!("📋 SYN packet includes RDP-UDP v3 authentication:");
-        info!("   - Protocol Version: 0x0101 (v3 - matches working captures)");
-        info!("   - Cookie Hash: {:02x?}", &cookie_hash.unwrap()[..16]);
-        info!("   - Correlation ID: {:02x?}", &correlation_bytes[..16]);
-    }
-    info!("📦 Full SYN packet structure (first 200 bytes):");
-    for (i, chunk) in payload[..200.min(payload.len())].chunks(16).enumerate() {
-        info!("   0x{:04x}: {:02x?}", i * 16, chunk);
-    }
-
-    socket
-        .send(&payload)
-        .await
-        .context("send RDPUDP SYN datagram")?;
-
-    info!("✅ SYN packet sent, waiting for SYN+ACK (timeout: 3000ms)...");
-    warn!("⚠️  If this times out, possible causes:");
-    warn!("   1. Windows firewall blocking UDP 3389 (run configure_windows_udp.ps1)");
-    warn!("   2. Server doesn't support multitransport");
-    warn!("   3. Network blocking UDP packets");
-    warn!("   Run: sudo ./capture_all_rdp.sh to see network traffic");
-
-    let mut recv_buffer = vec![0u8; 2048]; // Increased buffer size to catch any response
-    debug!("Receive buffer size: {} bytes", recv_buffer.len());
-
-    // Log socket details for debugging
-    let local = socket.local_addr()?;
-    let peer = socket.peer_addr().ok();
-    info!("🔍 Socket listening - Local: {}, Peer: {:?}", local, peer);
-    info!("🔍 Waiting for SYN+ACK on UDP socket...");
-
-    // Try to receive with recv_from to see the source address
-    // Note: Server may not respond until it receives TCP InitiateMultitransportResponse PDU
-    let (received, source_addr) = timeout(
-        std::time::Duration::from_millis(3000), // Increased from 1500ms
-        socket.recv_from(&mut recv_buffer),
-    )
-    .await
-    .context("waiting for SYN-ACK timed out")?
-    .context("receive SYN-ACK datagram")?;
-
-    info!("📦 Received {} bytes from {}", received, source_addr);
-    debug!(
-        "SYN+ACK packet full dump: {:02x?}",
-        &recv_buffer[..received.min(100)]
-    );
-
-    let syn_ack =
-        SynAckPacket::decode(&recv_buffer[..received]).context("decode SYN-ACK datagram")?;
-
-    info!(
-        "✅ RDP-UDP handshake completed successfully! ACK seq: {}",
-        syn_ack.inner().header.sn_source_ack
-    );
-
-    Ok(socket)
 }
 
 async fn connect_ws(
@@ -1790,13 +1473,6 @@ async fn active_session<T: RdpEventSender + Clone>(
     // Each request_id represents a separate UDP transport channel
     let mut multitransport_requests: HashMap<u32, MultitransportHandshakeContext> = HashMap::new();
 
-    // UDP transport channels (established when multitransport is requested)
-    // Store ALL transports, not just one! Multiple may be active simultaneously.
-    let mut udp_transports: Vec<mpsc::UnboundedReceiver<UdpTransportEvent>> = Vec::new();
-
-    // Track if we're currently establishing a UDP connection to avoid parallel attempts
-    let mut udp_connection_in_progress = false;
-
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {
             frame = reader.read_pdu() => {
@@ -1872,32 +1548,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                         continue;
                     }
 
-                    // Calculate SHA-256 hash of security cookie for UDP authentication
-                    let cookie_hash = if !cookie_is_zero {
-                        let mut hasher = Sha256::new();
-                        hasher.update(&request_info.security_cookie);
-                        let hash_raw: [u8; 32] = hasher.finalize().into();
-
-                        // CRITICAL: The hash must be byte-swapped in 4-byte (32-bit) chunks to little-endian
-                        // Windows RDP client does this transformation before sending the hash
-                        let mut cookie_hash = [0u8; 32];
-                        for i in 0..8 {
-                            let offset = i * 4;
-                            cookie_hash[offset] = hash_raw[offset + 3];
-                            cookie_hash[offset + 1] = hash_raw[offset + 2];
-                            cookie_hash[offset + 2] = hash_raw[offset + 1];
-                            cookie_hash[offset + 3] = hash_raw[offset];
-                        }
-
+                    // TODO: Calculate SHA-256 hash of security cookie for UDP authentication when implementing UDP
+                    // For now, just use a placeholder hash
+                    let _cookie_hash = if !cookie_is_zero {
                         if !is_duplicate {
-                            info!("   request_id={}, Cookie Hash (SHA-256 raw): {:02x?}", request_id, hash_raw);
-                            info!(
-                                "   request_id={}, Cookie Hash (LE-swapped for UDP): {:02x?}",
-                                request_id,
-                                cookie_hash
-                            );
+                            info!("   request_id={}, Security Cookie: {:02x?}", request_id, request_info.security_cookie);
+                            info!("   request_id={}, Cookie hash calculation skipped (UDP not implemented)", request_id);
                         }
-                        cookie_hash
+                        [0u8; 32] // Placeholder - will need proper SHA-256 hash for UDP
                     } else {
                         if !is_duplicate {
                             warn!("   request_id={}, Security cookie is all zeros - server doesn't require MS-RDPEMT authentication", request_id);
@@ -1906,18 +1564,11 @@ async fn active_session<T: RdpEventSender + Clone>(
                         [0u8; 32] // All-zero hash indicates no authentication
                     };
 
-                    // Only start UDP handshake if this is a new request (not a duplicate)
-                    // AND if we're not already establishing a UDP connection
-                    if !is_duplicate && !udp_connection_in_progress {
-                        udp_connection_in_progress = true;  // Mark connection attempt as in progress
-
+                    // Send multitransport response (UDP transport not implemented)
+                    if !is_duplicate {
                         match encode_multitransport_response_frame(request_info, message_channel_id) {
                             Ok(frame) => {
                                 info!("📨 Sending Initiate Multitransport Response (S_OK) for request_id={}", request_id);
-                                eprintln!("🔍 Multitransport Response bytes ({} bytes):", frame.len());
-                                for chunk in frame.chunks(32) {
-                                    eprintln!("    {:02x?}", chunk);
-                                }
                                 extra_outputs.push(ActiveStageOutput::ResponseFrame(frame));
                             }
                             Err(err) => {
@@ -1928,121 +1579,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 );
                             }
                         }
-
-                        if let Some(corr_id) = correlation_id {
-                            info!("✅ Correlation ID from TCP negotiation: {:02x?}", corr_id);
-                            info!(
-                                "   (This will be used in UDP SYN packet for request_id={})",
-                                request_id
-                            );
-
-                            // Store this request with its authentication data
-                            multitransport_requests.insert(
-                                request_id,
-                                MultitransportHandshakeContext {
-                                    request: request_info,
-                                    cookie_hash,
-                                    correlation_id: corr_id,
-                                },
-                            );
-                            info!(
-                                "📝 Stored request_id={} with cookie_hash, correlation_id, and metadata",
-                                request_id
-                            );
-
-                            // CRITICAL FIX: Working client sends UDP SYN ~1.5ms after TCP ACK
-                            info!("🚀 Starting UDP handshake for request_id={}...", request_id);
-
-                            // Enable UDP mode IMMEDIATELY to prevent TCP/UDP collision
-                            // (TCP GFX data may arrive before UDP handshake completes)
-                            if let Some(dvc) = active_stage.get_dvc_mut::<crate::gfx_channel::GfxDvcProcessor>() {
-                                if let Some(gfx) = dvc.channel_processor_downcast_mut::<crate::gfx_channel::GfxDvcProcessor>() {
-                                    gfx.enable_udp_mode();
-                                }
-                            }
-
-                            // Establish UDP transport using transport manager
-                            let dest_clone = destination.clone();
-                            let addr_clone = client_addr;
-                            let req_id = request_id;
-                            let protocol = request_info.protocol;
-                            let protocol_bits = protocol.as_u16();
-                            let use_lossy = {
-                                let has_known = MultitransportProtocol::contains_known_transport_bits(protocol_bits);
-                                let lossy = protocol.has_lossy_bit();
-                                if !has_known && req_id == 0 {
-                                    // Special case: Windows sends the zero-cookie probe with protocol==0.
-                                    // Treat it as reliable transport so the server can validate the socket.
-                                    info!(
-                                        "   request_id=0 uses reliable mode for compatibility (protocol bits = 0x{:04x})",
-                                        protocol_bits
-                                    );
-                                    false
-                                } else if has_known {
-                                    lossy
-                                } else {
-                                    // BUG FIX: Windows 11 sends protocol values without known transport bits (e.g., 0x001C).
-                                    // Testing shows servers expect RELIABLE mode (SYN without lossy flag) in these cases.
-                                    // Defaulting to lossy caused the server to ignore SYN packets entirely.
-                                    info!(
-                                        "   request_id={}, Protocol lacks known transport bits (0x{:04x}); defaulting to RELIABLE mode",
-                                        req_id, protocol_bits
-                                    );
-                                    false
-                                }
-                            };
-
-                            // Wait 2ms to allow TCP ACK to be sent
-                            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-
-                            info!(
-                                "🚀 Establishing UDP transport for request_id={} (protocol: {:?}, lossy: {})",
-                                req_id, protocol, use_lossy
-                            );
-
-                            match establish_udp_transport(
-                                dest_clone,
-                                addr_clone,
-                                corr_id,
-                                use_lossy,
-                                Some(req_id),
-                                Some(request_info.security_cookie),
-                                selected_protocol,
-                            ).await {
-                                Ok((_cmd_tx, evt_rx)) => {
-                                    info!(
-                                        "✅ UDP transport established successfully for request_id={}!",
-                                        req_id
-                                    );
-                                    info!("   UDP transport manager running with keepalive and FEC");
-                                    info!(
-                                        "📌 Storing UDP transport #{} for request_id={}",
-                                        udp_transports.len() + 1,
-                                        req_id
-                                    );
-                                    udp_transports.push(evt_rx);
-                                    udp_connection_in_progress = false;  // Connection succeeded
-                                    // Note: command sender (_cmd_tx) currently unused
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "❌ Failed to establish UDP transport for request_id={}: {:?}",
-                                        req_id, e
-                                    );
-                                    udp_connection_in_progress = false;  // Connection failed, allow next attempt
-                                }
-                            }
-                        } else {
-                            warn!(
-                                "⚠️  Multitransport requested but no correlation_id available for request_id={}",
-                                request_id
-                            );
-                        }
-                    } else if !is_duplicate {
-                        info!(
-                            "⏸️  Skipping request_id={} - UDP connection already in progress",
-                            request_id
-                        );
                     }
 
                     // IMPORTANT: Multitransport request PDUs are control PDUs that should NOT be processed
@@ -2083,99 +1619,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                         //  FOR NOW: Accept ANY error during active session and continue
                         // This allows UDP timeout errors and unknown PDU types to not crash the session
                         warn!("⚠️  Accepting error and continuing (UDP may have timed out or unknown PDU received)");
-                        vec![]
-                    }
-                }
-            }
-            // Handle UDP transport events from ALL active transports
-            // Poll all transports and process whichever has data first
-            udp_event = async {
-                if udp_transports.is_empty() {
-                    // No transports yet - wait forever
-                    std::future::pending::<Option<(usize, UdpTransportEvent)>>().await
-                } else {
-                    // Poll all transports simultaneously using select_all
-                    use futures_util::stream::StreamExt;
-
-                    let mut futures = udp_transports
-                        .iter_mut()
-                        .enumerate()
-                        .map(|(idx, rx)| async move {
-                            match rx.recv().await {
-                                Some(event) => Some((idx, event)),
-                                None => None,
-                            }
-                        })
-                        .collect::<futures_util::stream::FuturesUnordered<_>>();
-
-                    futures.next().await.flatten()
-                }
-            } => {
-                match udp_event {
-                    Some((transport_idx, UdpTransportEvent::Connected)) => {
-                        info!("✅ UDP transport #{} connected!", transport_idx + 1);
-                        vec![]
-                    }
-                    Some((transport_idx, UdpTransportEvent::TunnelEstablished)) => {
-                        info!("🔐 MS-RDPEMT tunnel established on transport #{}", transport_idx + 1);
-                        vec![]
-                    }
-                    Some((transport_idx, UdpTransportEvent::DataReceived(data))) => {
-                        info!("📦 Received {} bytes via UDP on transport #{}", data.len(), transport_idx + 1);
-
-                        // Route UDP data to GFX processor via DVC
-                        if let Some(dvc) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
-                            let channel_id = dvc.channel_id();
-
-                            if let Some(gfx) = dvc.channel_processor_downcast_mut::<GfxDvcProcessor>() {
-                                match gfx.process_udp_data(&data) {
-                                    Ok(dvc_messages) => {
-                                        if !dvc_messages.is_empty() {
-                                            debug!("✅ Processed UDP GFX data, sending {} response messages via DVC", dvc_messages.len());
-
-                                            if let Some(channel_id) = channel_id {
-                                                match ironrdp_dvc::encode_dvc_messages(
-                                                    channel_id,
-                                                    dvc_messages,
-                                                    ChannelFlags::empty()
-                                                ) {
-                                                    Ok(svc_messages) => {
-                                                        let frame = active_stage.encode_dvc_messages(svc_messages)?;
-                                                        vec![ActiveStageOutput::ResponseFrame(frame)]
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("⚠️  Failed to encode DVC messages: {:?}", e);
-                                                        vec![]
-                                                    }
-                                                }
-                                            } else {
-                                                warn!("⚠️  GFX channel not open, discarding response messages");
-                                                vec![]
-                                            }
-                                        } else {
-                                            vec![]
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("⚠️  Failed to process UDP GFX data: {:?}", e);
-                                        vec![]
-                                    }
-                                }
-                            } else {
-                                trace!("GFX DVC processor downcast failed");
-                                vec![]
-                            }
-                        } else {
-                            trace!("GFX DVC not available, discarding {} UDP bytes", data.len());
-                            vec![]
-                        }
-                    }
-                    Some((transport_idx, UdpTransportEvent::Disconnected(reason))) => {
-                        warn!("⚠️  UDP transport #{} disconnected: {}", transport_idx + 1, reason);
-                        vec![]
-                    }
-                    None => {
-                        // All UDP event receivers closed or no data available
                         vec![]
                     }
                 }
