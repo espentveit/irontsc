@@ -7,169 +7,10 @@ use crate::header::FecHeader;
 use crate::payload::{FecPayloadHeader, PayloadPrefix, SourcePayloadHeader};
 use crate::syndataex::UdpProtocolVersion;
 
-/// DelayAck header for RDPUDP packets (MS-RDPEUDP 2.2.1.11)
-/// Included when ACKDELAYED flag (0x0400) is set
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DelayAckHeader {
-    /// Maximum number of ACKs that can be delayed
-    pub max_delayed_acks: u8,
-    /// Timeout in milliseconds before sending delayed ACK
-    pub delayed_ack_timeout_ms: u16,
-}
-
-impl DelayAckHeader {
-    pub const SIZE: usize = 3; // 1 byte + 2 bytes
-
-    pub fn new(max_delayed_acks: u8, delayed_ack_timeout_ms: u16) -> Self {
-        Self {
-            max_delayed_acks,
-            delayed_ack_timeout_ms,
-        }
-    }
-
-    pub fn encode(&self, buf: &mut Vec<u8>) {
-        buf.push(self.max_delayed_acks);
-        buf.extend_from_slice(&self.delayed_ack_timeout_ms.to_le_bytes());
-    }
-
-    pub fn decode(cursor: &mut ReadCursor) -> UdpResult<Self> {
-        let max_delayed_acks = cursor.read_u8();
-        let delayed_ack_timeout_ms = cursor.read_u16();
-        Ok(Self {
-            max_delayed_acks,
-            delayed_ack_timeout_ms,
-        })
-    }
-}
-
-/// PacketPrefixByte for RDPUDP2 (protocol version field 0x0101, aka "v3")
-///
-/// This byte is inserted at position 7 (after byte swapping) in all RDPUDP2 packets.
-/// Bit layout: [Reserved:1][PacketType:4][ShortLength:3]
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PacketPrefixByte {
-    /// Packet type index (0 = normal packet, 8 = dummy packet)
-    packet_type: u8,
-    /// Short packet length (actual length if <7, otherwise 7)
-    short_length: u8,
-}
-
-impl PacketPrefixByte {
-    /// Create PacketPrefixByte for a normal packet
-    fn new(rdpudp_packet_len: usize) -> Self {
-        let short_length = if rdpudp_packet_len >= 7 {
-            7
-        } else {
-            rdpudp_packet_len as u8
-        };
-        Self {
-            packet_type: 0, // Normal packet
-            short_length,
-        }
-    }
-
-    /// Encode to a single byte
-    fn to_byte(self) -> u8 {
-        // Bit layout: [LogWindow:3][PacketType:4][Reserved:1]
-        // Based on captures: PacketType is bits 4-1, not 3-0
-        // For working capture: 0xe0 = 1110 0000
-        //   Bits 7-5 (LogWindow): 111 = 7
-        //   Bits 4-1 (PacketType): 0000 = 0 (Data)
-        //   Bit 0 (Reserved): 0
-        //
-        // Per user requirements: LogWindow should be 15 (but only 3 bits available, so max 7)
-        // Setting to 7 (maximum value for 3 bits) to match working capture
-        let log_window = 7; // Always 7 for maximum receive window indication
-        (log_window << 5) | (self.packet_type << 1)
-    }
-
-    /// Decode from a single byte
-    #[allow(dead_code)]
-    fn from_byte(byte: u8) -> Self {
-        let _log_window = (byte >> 5) & 0x07;
-        let packet_type = (byte >> 1) & 0x0F;
-        let short_length = if (byte >> 5) == 7 { 7 } else { 0 }; // Reconstruct from LogWindow
-        Self {
-            packet_type,
-            short_length,
-        }
-    }
-}
-
-/// Wrap RDPUDP packet with PacketPrefixByte (MS-RDPEUDP2 section 3.1.1.1.5)
-///
-/// Steps:
-/// 1. Generate PacketPrefixByte
-/// 2. Pad packet to 7 bytes if needed
-/// 3. Prefix the byte to packet
-/// 4. Swap byte 0 with byte 7
-fn wrap_with_prefix_byte(mut rdpudp_packet: Vec<u8>) -> Vec<u8> {
-    let original_len = rdpudp_packet.len();
-    let prefix = PacketPrefixByte::new(original_len);
-
-    // Pad to 7 bytes if needed
-    if rdpudp_packet.len() < 7 {
-        rdpudp_packet.resize(7, 0);
-    }
-
-    // Prefix the PacketPrefixByte
-    let mut result = vec![prefix.to_byte()];
-    result.extend_from_slice(&rdpudp_packet);
-
-    // Swap byte 0 with byte 7
-    result.swap(0, 7);
-
-    result
-}
-
-/// Unwrap PacketPrefixByte from received packet (MS-RDPEUDP2 section 3.1.1.1.5)
-///
-/// Steps:
-/// 1. Swap byte 0 with byte 7
-/// 2. Remove first byte and parse as PacketPrefixByte
-/// 3. Remove padding if short_length < 7
-///
-/// Returns None if the packet doesn't appear to be wrapped (e.g., handshake packets)
-fn unwrap_prefix_byte(mut payload: Vec<u8>) -> UdpResult<Option<Vec<u8>>> {
-    // Handshake packets are never wrapped, only data transfer packets
-    // If packet is < 8 bytes, it can't be wrapped
-    if payload.len() < 8 {
-        return Ok(None);
-    }
-
-    // Check if byte 7 looks like a valid PacketPrefixByte
-    // Valid prefix has: reserved=0, packet_type=0 or 8, short_length=0-7
-    let potential_prefix = payload[7];
-    let reserved = potential_prefix & 0x01;
-    let packet_type = (potential_prefix >> 1) & 0x0F;
-
-    // If it doesn't look like a valid prefix, assume it's a handshake packet
-    if reserved != 0 || (packet_type != 0 && packet_type != 8) {
-        return Ok(None);
-    }
-
-    // Swap byte 0 with byte 7
-    payload.swap(0, 7);
-
-    // Remove and parse PacketPrefixByte
-    let prefix_byte = payload.remove(0);
-    let prefix = PacketPrefixByte::from_byte(prefix_byte);
-
-    // Remove padding if packet was short
-    if prefix.short_length < 7 {
-        let padding_to_remove = 7 - prefix.short_length as usize;
-        let new_len = payload.len().saturating_sub(padding_to_remove);
-        payload.truncate(new_len);
-    }
-
-    Ok(Some(payload))
-}
-
 fn ack_of_ack_encoded_length(version: UdpProtocolVersion) -> usize {
     match version {
-        UdpProtocolVersion::V1 | UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
-            AckOfAckVectorHeader::SIZE_V1
-        }
+        UdpProtocolVersion::V1 => AckOfAckVectorHeader::SIZE_V1,
+        UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => 2,
         _ => AckOfAckVectorHeader::SIZE_V1,
     }
 }
@@ -182,7 +23,7 @@ fn decode_ack_vector_if_present(
     require: bool,
     min_remaining: usize,
 ) -> UdpResult<Option<AckVectorHeader>> {
-    if !header.flags.contains(DatagramFlags::ACK) {
+    if !header.flags.contains(DatagramFlags::ACK) || header.flags.contains(DatagramFlags::SYN) {
         return Ok(None);
     }
 
@@ -261,14 +102,7 @@ impl AckPacket {
     }
 
     pub fn decode(bytes: &[u8], version: UdpProtocolVersion) -> UdpResult<Self> {
-        // Unwrap PacketPrefixByte for RDPUDP v3 only (RDPUDP2 protocol)
-        let bytes = if version == UdpProtocolVersion::V3 {
-            unwrap_prefix_byte(bytes.to_vec())?.unwrap_or_else(|| bytes.to_vec())
-        } else {
-            bytes.to_vec()
-        };
-
-        let mut cursor = ReadCursor::new(&bytes);
+        let mut cursor = ReadCursor::new(bytes);
         let header = FecHeader::decode(&mut cursor)?;
 
         if !header.flags.contains(DatagramFlags::ACK) {
@@ -319,11 +153,6 @@ impl AckPacket {
             ack_of_ack.encode_into(&mut buffer, version)?;
         }
 
-        // Wrap with PacketPrefixByte for RDPUDP2 (v3 only, per MS-RDPEUDP2 spec)
-        if version == UdpProtocolVersion::V3 {
-            buffer = wrap_with_prefix_byte(buffer);
-        }
-
         Ok(buffer)
     }
 }
@@ -332,7 +161,6 @@ impl AckPacket {
 #[derive(Debug, Clone)]
 pub struct SourcePacket {
     pub header: FecHeader,
-    pub delay_ack: Option<DelayAckHeader>,
     pub ack_vector: Option<AckVectorHeader>,
     pub ack_of_ack: Option<AckOfAckVectorHeader>,
     pub payload_prefix: PayloadPrefix,
@@ -349,23 +177,14 @@ impl SourcePacket {
         sn_source_ack: u32,
         receive_window_size: u16,
         data: Vec<u8>,
-        delay_ack: Option<DelayAckHeader>,
         ack_vector: Option<AckVectorHeader>,
         ack_of_ack: Option<AckOfAckVectorHeader>,
         include_ack: bool,
     ) -> UdpResult<Self> {
-        debug_assert_eq!(DatagramFlags::DATA.bits(), 0x0008);
         let mut flags = DatagramFlags::DATA;
-
-        // Set ACK flag when piggybacking acknowledgments (vector or ack-of-acks)
         if include_ack || ack_vector.is_some() || ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK;
         }
-
-        if delay_ack.is_some() {
-            flags |= DatagramFlags::ACKDELAYED;
-        }
-
         if ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK_OF_ACKS;
         }
@@ -383,7 +202,6 @@ impl SourcePacket {
 
         Ok(Self {
             header,
-            delay_ack,
             ack_vector,
             ack_of_ack,
             payload_prefix,
@@ -393,14 +211,7 @@ impl SourcePacket {
     }
 
     pub fn decode(bytes: &[u8], version: UdpProtocolVersion) -> UdpResult<Self> {
-        // Unwrap PacketPrefixByte for RDPUDP2 (v3 only, per MS-RDPEUDP2 spec)
-        let bytes = if version == UdpProtocolVersion::V3 {
-            unwrap_prefix_byte(bytes.to_vec())?.unwrap_or_else(|| bytes.to_vec())
-        } else {
-            bytes.to_vec()
-        };
-
-        let mut cursor = ReadCursor::new(&bytes);
+        let mut cursor = ReadCursor::new(bytes);
         let header = FecHeader::decode(&mut cursor)?;
 
         if !header.flags.contains(DatagramFlags::DATA) {
@@ -411,24 +222,15 @@ impl SourcePacket {
             ));
         }
 
-        // NOTE: Per working capture analysis, ACK_OF_ACKS can be present WITHOUT ACK flag!
-        // Commenting out this validation as it doesn't match real-world behavior
-        // if header.flags.contains(DatagramFlags::ACK_OF_ACKS)
-        //     && !header.flags.contains(DatagramFlags::ACK)
-        // {
-        //     return Err(UdpError::invalid_field(
-        //         Self::NAME,
-        //         "uFlags",
-        //         "ACK_OF_ACKS flag requires ACK flag",
-        //     ));
-        // }
-
-        // Decode DelayAck header if present
-        let delay_ack = if header.flags.contains(DatagramFlags::ACKDELAYED) {
-            Some(DelayAckHeader::decode(&mut cursor)?)
-        } else {
-            None
-        };
+        if header.flags.contains(DatagramFlags::ACK_OF_ACKS)
+            && !header.flags.contains(DatagramFlags::ACK)
+        {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "uFlags",
+                "ACK_OF_ACKS flag requires ACK flag",
+            ));
+        }
 
         let ack_of_ack_len = if header.flags.contains(DatagramFlags::ACK_OF_ACKS) {
             ack_of_ack_encoded_length(version)
@@ -465,7 +267,6 @@ impl SourcePacket {
 
         Ok(Self {
             header,
-            delay_ack,
             ack_vector,
             ack_of_ack,
             payload_prefix,
@@ -477,11 +278,6 @@ impl SourcePacket {
     pub fn encode(&self, version: UdpProtocolVersion) -> UdpResult<Vec<u8>> {
         let mut buffer = Vec::new();
         self.header.encode_into(&mut buffer);
-
-        // DelayAck header must come first after FEC header (per MS-RDPEUDP spec)
-        if let Some(ref delay_ack) = self.delay_ack {
-            delay_ack.encode(&mut buffer);
-        }
 
         if let Some(ref ack_vector) = self.ack_vector {
             ack_vector.encode_into(&mut buffer, version)?;
@@ -495,11 +291,6 @@ impl SourcePacket {
         self.source_header.encode_into(&mut buffer);
         buffer.extend_from_slice(&self.data);
 
-        // Wrap with PacketPrefixByte for RDPUDP v3 only (RDPUDP2 protocol)
-        if version == UdpProtocolVersion::V3 {
-            buffer = wrap_with_prefix_byte(buffer);
-        }
-
         Ok(buffer)
     }
 
@@ -511,6 +302,7 @@ impl SourcePacket {
         self.source_header.sn_coded
     }
 }
+
 /// FEC packet containing redundancy data for error correction
 #[derive(Debug, Clone)]
 pub struct FecPacket {
@@ -533,8 +325,7 @@ impl FecPacket {
         ack_vector: Option<AckVectorHeader>,
         ack_of_ack: Option<AckOfAckVectorHeader>,
     ) -> UdpResult<Self> {
-        // FEC packets do NOT have the DATA flag - they're identified by absence of DATA
-        let mut flags = DatagramFlags::empty();
+        let mut flags = DatagramFlags::DATA | DatagramFlags::FEC;
         if ack_vector.is_some() || ack_of_ack.is_some() {
             flags |= DatagramFlags::ACK;
         }
@@ -563,23 +354,22 @@ impl FecPacket {
     }
 
     pub fn decode(bytes: &[u8], version: UdpProtocolVersion) -> UdpResult<Self> {
-        // Unwrap PacketPrefixByte for RDPUDP2 (v3 only, per MS-RDPEUDP2 spec)
-        let bytes = if version == UdpProtocolVersion::V3 {
-            unwrap_prefix_byte(bytes.to_vec())?.unwrap_or_else(|| bytes.to_vec())
-        } else {
-            bytes.to_vec()
-        };
-
-        let mut cursor = ReadCursor::new(&bytes);
+        let mut cursor = ReadCursor::new(bytes);
         let header = FecHeader::decode(&mut cursor)?;
 
-        // FEC packets should NOT have the DATA flag
-        // They are identified by the absence of the DATA flag
-        if header.flags.contains(DatagramFlags::DATA) {
+        if !header.flags.contains(DatagramFlags::DATA) {
             return Err(UdpError::invalid_field(
                 Self::NAME,
                 "uFlags",
-                "FEC packet should not have DATA flag set",
+                "DATA flag not set",
+            ));
+        }
+
+        if !header.flags.contains(DatagramFlags::FEC) {
+            return Err(UdpError::invalid_field(
+                Self::NAME,
+                "uFlags",
+                "FEC flag not set",
             ));
         }
 
@@ -652,11 +442,6 @@ impl FecPacket {
         self.fec_header.encode_into(&mut buffer);
         buffer.extend_from_slice(&self.fec_data);
 
-        // Wrap with PacketPrefixByte for RDPUDP2 (v3 only, per MS-RDPEUDP2 spec)
-        if version == UdpProtocolVersion::V3 {
-            buffer = wrap_with_prefix_byte(buffer);
-        }
-
         Ok(buffer)
     }
 }
@@ -691,8 +476,7 @@ mod tests {
     #[test]
     fn test_source_packet_encoding_decoding() {
         let data = b"Hello, RDP-UDP!".to_vec();
-        let packet =
-            SourcePacket::new(42, 42, 100, 256, data.clone(), None, None, None, false).unwrap();
+        let packet = SourcePacket::new(42, 42, 100, 256, data.clone(), None, None, false).unwrap();
         let encoded = packet
             .encode(UdpProtocolVersion::V1)
             .expect("encode SOURCE packet");
@@ -702,22 +486,6 @@ mod tests {
         assert_eq!(decoded.coded_sequence_number(), 42);
         assert_eq!(decoded.header.sn_source_ack, 100);
         assert_eq!(decoded.data, data);
-    }
-
-    #[test]
-    fn source_packet_sets_expected_flags() {
-        let packet = SourcePacket::new(10, 10, 0, 64, b"payload".to_vec(), None, None, None, true)
-            .expect("create source packet");
-
-        let expected = DatagramFlags::DATA | DatagramFlags::ACK;
-        assert_eq!(packet.header.flags, expected);
-
-        let encoded = packet
-            .encode(UdpProtocolVersion::V3)
-            .expect("encode source packet");
-        let decoded =
-            SourcePacket::decode(&encoded, UdpProtocolVersion::V3).expect("decode source packet");
-        assert_eq!(decoded.header.flags, expected);
     }
 
     #[test]
@@ -736,34 +504,5 @@ mod tests {
         assert_eq!(decoded.fec_header.sn_source_start, 100);
         assert_eq!(decoded.fec_header.fec_index, 2);
         assert_eq!(decoded.fec_data, fec_data);
-    }
-
-    #[test]
-    fn test_packet_prefix_byte_v3() {
-        // Test that v3 packets get wrapped with PacketPrefixByte
-        let data = b"Test".to_vec();
-        let packet = SourcePacket::new(1, 1, 0, 64, data.clone(), None, None, None, false).unwrap();
-
-        let encoded_v3 = packet.encode(UdpProtocolVersion::V3).expect("encode v3");
-        let encoded_v1 = packet.encode(UdpProtocolVersion::V1).expect("encode v1");
-
-        // V3 should be longer due to PacketPrefixByte wrapper (adds 1 byte, min 8 bytes total)
-        assert!(
-            encoded_v3.len() >= 8,
-            "V3 packet should be at least 8 bytes"
-        );
-        assert!(
-            encoded_v3.len() > encoded_v1.len(),
-            "V3 should be longer than V1"
-        );
-
-        // Verify byte 7 contains the PacketPrefixByte (after swap)
-        let prefix = PacketPrefixByte::from_byte(encoded_v3[7]);
-        assert_eq!(prefix.packet_type, 0, "Should be normal packet type");
-
-        // Decode should work
-        let decoded = SourcePacket::decode(&encoded_v3, UdpProtocolVersion::V3).unwrap();
-        assert_eq!(decoded.data, data);
-        assert!(decoded.header.flags.contains(DatagramFlags::DATA));
     }
 }

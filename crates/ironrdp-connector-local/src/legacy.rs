@@ -1,13 +1,8 @@
 use std::borrow::Cow;
 
-use ironrdp_core::{decode, encode_vec, Decode, Encode, ReadCursor, WriteBuf, WriteCursor};
+use ironrdp_core::{decode, encode_vec, Decode, Encode, WriteBuf};
 use ironrdp_pdu::rdp;
-use ironrdp_pdu::rdp::client_info;
-use ironrdp_pdu::rdp::finalization_messages::{ControlAction, ControlPdu};
-use ironrdp_pdu::rdp::headers::{
-    BasicSecurityHeaderFlags, CompressionFlags, ServerDeactivateAll, ShareControlHeader,
-    ShareControlPdu, ShareDataHeader, ShareDataPdu, StreamPriority, BASIC_SECURITY_HEADER_SIZE,
-};
+use ironrdp_pdu::rdp::headers::ServerDeactivateAll;
 use ironrdp_pdu::x224::X224;
 
 use crate::{general_err, reason_err, ConnectorError, ConnectorErrorExt as _, ConnectorResult};
@@ -156,106 +151,51 @@ pub fn decode_share_control(ctx: SendDataIndicationCtx<'_>) -> ConnectorResult<S
 /// The InitiateMultitransportRequest can appear in two forms:
 /// 1. Raw PDU (24 bytes): sent during capabilities exchange
 /// 2. With security header (28 bytes): 4-byte BasicSecurityHeader + 24-byte PDU
-/// Detects InitiateMultitransportRequest PDUs by scanning for SEC_TRANSPORT_REQ security headers.
-///
-/// This implementation scans through the user_data payload looking for BasicSecurityHeader
-/// with the TRANSPORT_REQ flag, filtering out false positives from virtual channel data.
-///
-/// # Arguments
-/// * `ctx` - The SendDataIndication context containing channel IDs and user data
-/// * `message_channel_id` - Optional MCS message channel ID for validation
-///
-/// # Returns
-/// * `Some(InitiateMultitransportRequest)` if a valid request is detected
-/// * `None` if no request is found or validation fails
 pub fn detect_multitransport_request(
     ctx: &SendDataIndicationCtx<'_>,
-    message_channel_id: Option<u16>,
 ) -> Option<rdp::multitransport::InitiateMultitransportRequest> {
-    use rdp::multitransport::{InitiateMultitransportRequest, MultitransportProtocol};
+    // InitiateMultitransportRequest has a fixed size of 24 bytes:
+    // - requestId: 4 bytes
+    // - protocol: 2 bytes
+    // - reserved: 2 bytes
+    // - securityCookie: 16 bytes
+    const MULTITRANSPORT_PDU_SIZE: usize = 24;
+    const SECURITY_HEADER_SIZE: usize = 4;
 
-    let channel_id = ctx.channel_id;
-    let user_data = ctx.user_data;
-
-    // CRITICAL: MultiTransportRequest PDUs are ONLY sent on the MCS Message Channel!
-    // Scanning other channels (especially Virtual Channels with arbitrary binary data)
-    // causes false positives when random bytes match the security header pattern.
-    if let Some(expected_channel) = message_channel_id {
-        if channel_id != expected_channel {
-            // Not on the message channel - skip scanning to avoid false positives
+    let pdu_data = match ctx.user_data.len() {
+        MULTITRANSPORT_PDU_SIZE => {
+            // Case 1: Raw PDU without security header (during capabilities exchange)
+            eprintln!("🔍 Attempting to decode 24-byte PDU as raw InitiateMultitransportRequest");
+            ctx.user_data
+        }
+        size if size == MULTITRANSPORT_PDU_SIZE + SECURITY_HEADER_SIZE => {
+            // Case 2: PDU with 4-byte security header prefix
+            eprintln!("🔍 Attempting to decode 28-byte PDU as InitiateMultitransportRequest with security header");
+            &ctx.user_data[SECURITY_HEADER_SIZE..]
+        }
+        _ => {
+            // Not the right size for a multitransport request
             return None;
         }
-    }
+    };
 
-    // Search for a BasicSecurityHeader with the TRANSPORT_REQ flag inside the user_data
-    // We scan through the payload because the security header might not be at a fixed offset
-    for offset in 0..user_data.len().saturating_sub(8) {
-        let mut cursor = ReadCursor::new(&user_data[offset..]);
-
-        // Manually decode the security header so we can capture and validate the flags
-        let flags_bits = cursor.read_u16();
-        let flags = match BasicSecurityHeaderFlags::from_bits(flags_bits) {
-            Some(f) => f,
-            None => continue, // Invalid flags, try next offset
-        };
-
-        // Check if this is a transport request
-        if !flags.contains(BasicSecurityHeaderFlags::TRANSPORT_REQ) {
-            continue;
-        }
-
-        // A valid multitransport request shouldn't mix other security flags such as RESET_SEQNO
-        // or ENCRYPT, which are commonly present in ordinary Share Data PDUs. Filter those out
-        // early to avoid false positives.
-        let allowed_flags =
-            BasicSecurityHeaderFlags::TRANSPORT_REQ | BasicSecurityHeaderFlags::FLAGSHI_VALID;
-        if !(flags - allowed_flags).is_empty() {
-            // Has other flags set - likely not a multitransport request
-            continue;
-        }
-
-        let security_flags_hi = cursor.read_u16();
-
-        // Validate FLAGSHI_VALID consistency
-        if !flags.contains(BasicSecurityHeaderFlags::FLAGSHI_VALID) && security_flags_hi != 0 {
-            // Inconsistent flags - FLAGSHI_VALID not set but security_flags_hi is non-zero
-            continue;
-        }
-
-        // Attempt to decode the request body
-        if let Ok(request) = InitiateMultitransportRequest::decode(&mut cursor) {
-            let protocol = request.requested_protocol;
-            let protocol_bits = protocol.as_u16();
-            let has_known_bits =
-                MultitransportProtocol::contains_known_transport_bits(protocol_bits);
-            let extra_bits = MultitransportProtocol::extra_bits(protocol_bits);
-
-            eprintln!("✅ Detected Initiate Multitransport Request:");
+    // Try to decode as InitiateMultitransportRequest
+    match decode::<rdp::multitransport::InitiateMultitransportRequest>(pdu_data) {
+        Ok(request) => {
+            eprintln!("✅ Successfully decoded InitiateMultitransportRequest");
             eprintln!("   Request ID: {}", request.request_id);
-            eprintln!("   Protocol: {:?} (raw=0x{:04x})", protocol, protocol_bits);
+            eprintln!("   Protocol: {:?}", request.requested_protocol);
             eprintln!("   Security Cookie: {:02x?}", &request.security_cookie[..]);
-            eprintln!("   Channel ID: 0x{:04x}", channel_id);
-            eprintln!("   Offset in payload: {}", offset);
-
-            if !has_known_bits {
-                eprintln!(
-                    "   ⚠️  Warning: Protocol value 0x{:04x} does not set known reliable/lossy flags",
-                    protocol_bits
-                );
-            }
-
-            if extra_bits != 0 {
-                eprintln!(
-                    "   ℹ️  Protocol value includes additional flags: 0x{:04x}",
-                    extra_bits
-                );
-            }
-
-            return Some(request);
+            Some(request)
+        }
+        Err(e) => {
+            eprintln!(
+                "❌ Failed to decode as InitiateMultitransportRequest: {:?}",
+                e
+            );
+            None
         }
     }
-
-    None
 }
 
 /// Encodes an InitiateMultitransportResponse PDU to be sent to the server.

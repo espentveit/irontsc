@@ -1,7 +1,6 @@
-/// DTLS/TLS wrapper for UDP datagrams (MS-RDPEMT requirement)
+/// DTLS wrapper for UDP datagrams (MS-RDPEMT requirement)
 ///
-/// Provides TLS 1.2 (for reliable UDP) or DTLS 1.2 (for lossy UDP) encryption/decryption
-/// for the MS-RDPEMT UDP transport per MS-RDPEMT Section 1.5.
+/// Provides DTLS 1.2 encryption/decryption for the MS-RDPEMT UDP transport.
 use anyhow::{Context, Result, anyhow};
 use foreign_types::ForeignType;
 use libc::{c_int, c_void};
@@ -20,78 +19,48 @@ unsafe extern "C" {
 const MAX_DTLS_RECORD_SIZE: usize = 64 * 1024;
 const CLIENT_MTU: u32 = 1232;
 
-/// Transport security mode for MS-RDPEMT
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportSecurityMode {
-    /// TLS for reliable UDP transport (RDP-UDP-R mode)
-    Tls,
-    /// DTLS for lossy UDP transport (RDP-UDP-L mode)
-    Dtls,
-}
-
-/// DTLS/TLS configuration for MS-RDPEMT
+/// DTLS configuration for MS-RDPEMT
 pub struct DtlsConfig {
     /// Server hostname for certificate validation
     pub server_name: String,
     /// Whether to verify server certificate (should be true in production)
     pub verify_certificate: bool,
-    /// Transport security mode (TLS for reliable, DTLS for lossy)
-    pub mode: TransportSecurityMode,
 }
 
-/// DTLS/TLS wrapper for encrypting/decrypting UDP datagrams
+/// DTLS wrapper for encrypting/decrypting UDP datagrams
 /// Note: This does NOT handle socket I/O - packets must be wrapped in RDP UDP DATA frames
-///
-/// MS-RDPEMT Section 1.5:
-/// - TLS is used for reliable UDP transport connections (RDP-UDP-R mode)
-/// - DTLS is used for lossy UDP transport connections (RDP-UDP-L mode)
 pub struct DtlsUdpSocket {
-    /// SSL context (TLS or DTLS depending on mode)
+    /// DTLS SSL context
     ssl_context: SslContext,
     /// Server address (for logging/debugging)
     server_addr: SocketAddr,
     /// Configuration
     config: DtlsConfig,
-    /// Whether handshake is complete
+    /// Whether DTLS handshake is complete
     handshake_complete: bool,
     /// SSL connection instance (created after handshake)
     ssl_conn: Option<Ssl>,
 }
 
 impl DtlsUdpSocket {
-    /// Create a new TLS/DTLS encryption layer (does not handle socket I/O)
+    /// Create a new DTLS encryption layer (does not handle socket I/O)
     pub fn new(server_addr: SocketAddr, config: DtlsConfig) -> Result<Self> {
-        match config.mode {
-            TransportSecurityMode::Tls => {
-                info!(
-                    "🔐 Initializing TLS for MS-RDPEMT reliable UDP (server: {})",
-                    config.server_name
-                );
-            }
-            TransportSecurityMode::Dtls => {
-                info!(
-                    "🔐 Initializing DTLS for MS-RDPEMT lossy UDP (server: {})",
-                    config.server_name
-                );
-            }
-        }
+        info!(
+            "🔐 Initializing DTLS for MS-RDPEMT (server: {})",
+            config.server_name
+        );
 
-        // Create TLS or DTLS context based on mode
-        let mut ctx_builder = match config.mode {
-            TransportSecurityMode::Tls => SslContext::builder(SslMethod::tls_client())
-                .context("Failed to create TLS context")?,
-            TransportSecurityMode::Dtls => {
-                SslContext::builder(SslMethod::dtls()).context("Failed to create DTLS context")?
-            }
-        };
+        // Create DTLS 1.2 context
+        let mut ctx_builder =
+            SslContext::builder(SslMethod::dtls()).context("Failed to create DTLS context")?;
 
-        // Set version to 1.2 (required by most RDP servers)
+        // Set DTLS version to 1.2 (required by most RDP servers)
         ctx_builder
             .set_min_proto_version(Some(SslVersion::TLS1_2))
-            .context("Failed to set min TLS version")?;
+            .context("Failed to set min DTLS version")?;
         ctx_builder
             .set_max_proto_version(Some(SslVersion::TLS1_2))
-            .context("Failed to set max TLS version")?;
+            .context("Failed to set max DTLS version")?;
 
         // Configure certificate verification
         if config.verify_certificate {
@@ -100,7 +69,7 @@ impl DtlsUdpSocket {
                 .set_default_verify_paths()
                 .context("Failed to load system CA certificates")?;
         } else {
-            warn!("⚠️  TLS/DTLS certificate verification disabled (insecure, for testing only)");
+            warn!("⚠️  DTLS certificate verification disabled (insecure, for testing only)");
             ctx_builder.set_verify(SslVerifyMode::NONE);
         }
 
@@ -114,11 +83,8 @@ impl DtlsUdpSocket {
             )
             .context("Failed to set cipher list")?;
 
-        // Ensure OpenSSL does not attempt to probe MTU on its own (DTLS only)
-        // For TLS mode, MTU is not relevant as the RDPUDP layer handles fragmentation
-        if matches!(config.mode, TransportSecurityMode::Dtls) {
-            ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
-        }
+        // Ensure OpenSSL does not attempt to probe MTU on its own
+        ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
         ctx_builder.set_mode(SslMode::AUTO_RETRY);
 
         let ssl_context = ctx_builder.build();
@@ -132,17 +98,10 @@ impl DtlsUdpSocket {
         })
     }
 
-    /// Start TLS/DTLS handshake and return ClientHello packet to send
+    /// Start DTLS handshake and return ClientHello packet to send
     /// Call process_handshake_data() with server responses until handshake completes
     pub fn start_handshake(&mut self) -> Result<Vec<u8>> {
-        match self.config.mode {
-            TransportSecurityMode::Tls => {
-                info!("🤝 Starting TLS 1.2 handshake with {}", self.server_addr);
-            }
-            TransportSecurityMode::Dtls => {
-                info!("🤝 Starting DTLS 1.2 handshake with {}", self.server_addr);
-            }
-        }
+        info!("🤝 Starting DTLS 1.2 handshake with {}", self.server_addr);
 
         // Create SSL connection instance
         let mut ssl = Ssl::new(&self.ssl_context).context("Failed to create SSL connection")?;
@@ -151,16 +110,12 @@ impl DtlsUdpSocket {
         ssl.set_hostname(&self.config.server_name)
             .context("Failed to set SNI hostname")?;
 
-        // Configure specific options based on mode
+        // Configure DTLS specific options
         ssl.set_connect_state();
-
-        // Only set MTU for DTLS mode
-        if matches!(self.config.mode, TransportSecurityMode::Dtls) {
-            unsafe {
-                let ssl_ptr = Self::ssl_ptr(&ssl);
-                if ffi::SSL_set_mtu(ssl_ptr, CLIENT_MTU as libc::c_long) <= 0 {
-                    debug!("Unable to set DTLS MTU to {}", CLIENT_MTU);
-                }
+        unsafe {
+            let ssl_ptr = Self::ssl_ptr(&ssl);
+            if ffi::SSL_set_mtu(ssl_ptr, CLIENT_MTU as libc::c_long) <= 0 {
+                debug!("Unable to set DTLS MTU to {}", CLIENT_MTU);
             }
         }
 
@@ -188,10 +143,10 @@ impl DtlsUdpSocket {
         packets
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("TLS/DTLS handshake did not produce ClientHello"))
+            .ok_or_else(|| anyhow!("DTLS handshake did not produce ClientHello"))
     }
 
-    /// Process incoming TLS/DTLS handshake data and return any outgoing packets
+    /// Process incoming DTLS handshake data and return any outgoing packets
     /// Returns Ok(Some(packets)) if there are packets to send
     /// Returns Ok(None) if handshake is complete
     pub fn process_handshake_data(&mut self, data: &[u8]) -> Result<Option<Vec<Vec<u8>>>> {
@@ -226,39 +181,36 @@ impl DtlsUdpSocket {
                 // Need more data from server, extract any outgoing packets first
                 let packets = Self::drain_wbio(ssl)?;
                 if packets.is_empty() {
-                    trace!("TLS/DTLS waiting for more server data");
+                    trace!("DTLS waiting for more server data");
                     Ok(None)
                 } else {
-                    trace!(
-                        "TLS/DTLS handshake produced {} response packets",
-                        packets.len()
-                    );
+                    trace!("DTLS handshake produced {} response packets", packets.len());
                     Ok(Some(packets))
                 }
             }
             ErrorCode::WANT_WRITE => {
                 // Data ready to send
                 let packets = Self::drain_wbio(ssl)?;
-                trace!("TLS/DTLS handshake produced {} packets", packets.len());
+                trace!("DTLS handshake produced {} packets", packets.len());
                 Ok(Some(packets))
             }
-            other => Err(anyhow!("TLS/DTLS handshake failed (error {:?})", other)),
+            other => Err(anyhow!("DTLS handshake failed (error {:?})", other)),
         }
     }
 
-    /// Check if TLS/DTLS handshake is complete
+    /// Check if DTLS handshake is complete
     pub fn is_handshake_complete(&self) -> bool {
         self.handshake_complete
     }
 
-    /// Encrypt plaintext payload(s) into TLS/DTLS records.
+    /// Encrypt plaintext payload(s) into DTLS records.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<Vec<u8>>> {
         if !self.handshake_complete {
-            return Err(anyhow!("Cannot encrypt: TLS/DTLS handshake not complete"));
+            return Err(anyhow!("Cannot encrypt: DTLS handshake not complete"));
         }
 
         if plaintext.len() > c_int::MAX as usize {
-            return Err(anyhow!("Plaintext payload too large for TLS/DTLS write"));
+            return Err(anyhow!("Plaintext payload too large for DTLS write"));
         }
 
         let ssl = self
@@ -431,7 +383,6 @@ mod tests {
         let config = DtlsConfig {
             server_name: "test.example.com".to_string(),
             verify_certificate: false,
-            mode: TransportSecurityMode::Tls,
         };
 
         let dtls = DtlsUdpSocket::new(server_addr, config);

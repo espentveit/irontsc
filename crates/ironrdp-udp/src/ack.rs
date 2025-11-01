@@ -187,11 +187,19 @@ impl AckOfAckVectorHeader {
 
     pub fn decode(cursor: &mut ReadCursor<'_>, version: UdpProtocolVersion) -> UdpResult<Self> {
         match version {
-            UdpProtocolVersion::V1 | UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
+            UdpProtocolVersion::V1 => {
                 let sequence_number = cursor
                     .try_read_u32_be()
                     .map_err(|e| UdpError::decode(Self::NAME, e))?;
                 Ok(Self { sequence_number })
+            }
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
+                let sequence_low = cursor
+                    .try_read_u16_be()
+                    .map_err(|e| UdpError::decode(Self::NAME, e))?;
+                Ok(Self {
+                    sequence_number: sequence_low as u32,
+                })
             }
             _ => Err(UdpError::invalid_state(
                 Self::NAME,
@@ -202,8 +210,13 @@ impl AckOfAckVectorHeader {
 
     pub fn encode_into(&self, output: &mut Vec<u8>, version: UdpProtocolVersion) -> UdpResult<()> {
         match version {
-            UdpProtocolVersion::V1 | UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
+            UdpProtocolVersion::V1 => {
                 output.extend_from_slice(&self.sequence_number.to_be_bytes());
+                Ok(())
+            }
+            UdpProtocolVersion::V2 | UdpProtocolVersion::V3 => {
+                let lower = (self.sequence_number & 0xFFFF) as u16;
+                output.extend_from_slice(&lower.to_be_bytes());
                 Ok(())
             }
             _ => Err(UdpError::invalid_state(
@@ -532,9 +545,8 @@ mod tests {
         let mut cursor = ReadCursor::new(&encoded);
         let decoded = AckVectorHeader::decode(&mut cursor, UdpProtocolVersion::V2).unwrap();
 
-        // V2/V1 format does not transmit the base sequence number explicitly.
-        assert_eq!(decoded.base_sequence_number, 0);
-        assert_eq!(decoded.ack_timestamp, None);
+        assert_eq!(decoded.base_sequence_number, 1234 & 0xFFFF); // low 16 bits only
+        assert_eq!(decoded.ack_timestamp, Some(0x00FF_FFEE));
         assert_eq!(decoded.ack_vectors.len(), vectors.len());
     }
 
@@ -565,6 +577,6 @@ mod tests {
         let mut cursor = ReadCursor::new(&encoded);
         let decoded = AckOfAckVectorHeader::decode(&mut cursor, UdpProtocolVersion::V2).unwrap();
 
-        assert_eq!(decoded.sequence_number, 0xABCD_1234);
+        assert_eq!(decoded.sequence_number, 0x1234);
     }
 }
