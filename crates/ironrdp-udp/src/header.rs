@@ -27,9 +27,7 @@ impl FecHeader {
             .try_read_u16_be()
             .map_err(|e| UdpError::decode(Self::NAME, e))?;
 
-        let flags = DatagramFlags::from_bits(flags_raw).ok_or_else(|| {
-            UdpError::invalid_field(Self::NAME, "uFlags", "unknown bits set in datagram flags")
-        })?;
+        let flags = DatagramFlags::from_bits_truncate(flags_raw & 0x1FFF);
 
         Ok(Self {
             sn_source_ack,
@@ -41,7 +39,6 @@ impl FecHeader {
     pub fn encode_into(&self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.sn_source_ack.to_be_bytes());
         output.extend_from_slice(&self.receive_window_size.to_be_bytes());
-
         output.extend_from_slice(&self.flags.bits().to_be_bytes());
     }
 }
