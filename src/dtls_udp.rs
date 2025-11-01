@@ -41,7 +41,7 @@ pub struct DtlsConfig {
 
 /// DTLS/TLS wrapper for encrypting/decrypting UDP datagrams
 /// Note: This does NOT handle socket I/O - packets must be wrapped in RDP UDP DATA frames
-/// 
+///
 /// MS-RDPEMT Section 1.5:
 /// - TLS is used for reliable UDP transport connections (RDP-UDP-R mode)
 /// - DTLS is used for lossy UDP transport connections (RDP-UDP-L mode)
@@ -78,13 +78,10 @@ impl DtlsUdpSocket {
 
         // Create TLS or DTLS context based on mode
         let mut ctx_builder = match config.mode {
-            TransportSecurityMode::Tls => {
-                SslContext::builder(SslMethod::tls_client())
-                    .context("Failed to create TLS context")?
-            }
+            TransportSecurityMode::Tls => SslContext::builder(SslMethod::tls_client())
+                .context("Failed to create TLS context")?,
             TransportSecurityMode::Dtls => {
-                SslContext::builder(SslMethod::dtls())
-                    .context("Failed to create DTLS context")?
+                SslContext::builder(SslMethod::dtls()).context("Failed to create DTLS context")?
             }
         };
 
@@ -156,7 +153,7 @@ impl DtlsUdpSocket {
 
         // Configure specific options based on mode
         ssl.set_connect_state();
-        
+
         // Only set MTU for DTLS mode
         if matches!(self.config.mode, TransportSecurityMode::Dtls) {
             unsafe {
@@ -232,7 +229,10 @@ impl DtlsUdpSocket {
                     trace!("TLS/DTLS waiting for more server data");
                     Ok(None)
                 } else {
-                    trace!("TLS/DTLS handshake produced {} response packets", packets.len());
+                    trace!(
+                        "TLS/DTLS handshake produced {} response packets",
+                        packets.len()
+                    );
                     Ok(Some(packets))
                 }
             }

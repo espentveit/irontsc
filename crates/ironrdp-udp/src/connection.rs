@@ -503,6 +503,13 @@ impl UdpConnection {
         Ok(encoded)
     }
 
+    /// Prepare to complete the handshake by piggybacking the ACK-of-ACK on the next DATA packet.
+    /// Used when we skip sending the standalone ACK and combine it with TLS ClientHello.
+    pub fn prepare_combined_handshake_ack(&mut self) {
+        self.schedule_ack_of_ack(self.last_ack_received);
+        self.first_ack_sent = false;
+    }
+
     /// Check if FEC block is complete and generate FEC packet if needed
     /// Returns Some(fec_packet_bytes) if a FEC packet should be sent
     pub fn check_fec_block(&mut self) -> UdpResult<Option<Vec<u8>>> {
@@ -1146,7 +1153,10 @@ mod tests {
         );
 
         let syn_bytes = syn.to_padded_bytes();
-        eprintln!("SYN bytes (first 32): {:02x?}", &syn_bytes[..32.min(syn_bytes.len())]);
+        eprintln!(
+            "SYN bytes (first 32): {:02x?}",
+            &syn_bytes[..32.min(syn_bytes.len())]
+        );
         eprintln!("SYN bytes len: {}", syn_bytes.len());
         let decoded = SynPacket::decode(&syn_bytes).expect("decode SYN");
         let syn_ex = decoded
@@ -1194,7 +1204,8 @@ mod tests {
         receiver.reset_receive_state(0);
 
         // Simulate receiving sequence 1 before sequence 0
-        let packet1 = SourcePacket::new(1, 1, 0, 256, b"two".to_vec(), None, None, None, false).unwrap();
+        let packet1 =
+            SourcePacket::new(1, 1, 0, 256, b"two".to_vec(), None, None, None, false).unwrap();
         let encoded1 = packet1
             .encode(UdpProtocolVersion::V1)
             .expect("encode source packet");
@@ -1202,7 +1213,8 @@ mod tests {
         assert!(buffered.is_empty());
 
         // Now receive sequence 0, which should flush both
-        let packet0 = SourcePacket::new(0, 0, 0, 256, b"one".to_vec(), None, None, None, false).unwrap();
+        let packet0 =
+            SourcePacket::new(0, 0, 0, 256, b"one".to_vec(), None, None, None, false).unwrap();
         let encoded0 = packet0
             .encode(UdpProtocolVersion::V1)
             .expect("encode source packet");
@@ -1220,14 +1232,18 @@ mod tests {
         conn.state = ConnectionState::Connected;
         conn.reset_receive_state(0);
 
-        let packet = conn
+        let packet_bytes = conn
             .send_data(b"hello".to_vec())
             .expect("create source packet");
 
-        assert!(packet.len() >= 8, "packet too short for header");
-        let flags = u16::from_be_bytes([packet[6], packet[7]]);
+        let decoded = SourcePacket::decode(&packet_bytes, UdpProtocolVersion::V3)
+            .expect("decode source packet");
 
-        assert_eq!(flags & 0x0004, 0x0004, "DATA flag not set: 0x{flags:04x}");
+        assert!(
+            decoded.header.flags.contains(DatagramFlags::DATA),
+            "DATA flag not set: {:?}",
+            decoded.header.flags
+        );
     }
 
     #[test]
@@ -1294,7 +1310,8 @@ mod tests {
         server.process_syn(&syn_bytes).expect("server process SYN");
 
         let syn_ack_bytes = server.create_syn_ack().expect("create SYN+ACK");
-        let syn_ack = crate::handshake::SynAckPacket::decode(&syn_ack_bytes).expect("decode SYN+ACK");
+        let syn_ack =
+            crate::handshake::SynAckPacket::decode(&syn_ack_bytes).expect("decode SYN+ACK");
         let server_sn_source_ack = syn_ack.inner().header.sn_source_ack;
 
         // Client processes SYN+ACK and returns handshake-completing ACK packet
@@ -1307,7 +1324,7 @@ mod tests {
         // Decode and verify the handshake ACK packet
         let ack_packet = AckPacket::decode(&ack_bytes, version).expect("decode ACK packet");
 
-        // Verify flags - should have ACK, ACK_VEC, and ACK_OF_ACKS
+        // Verify flags - should have ACK and ACK_OF_ACKS (pure ACK datagram)
         assert!(
             ack_packet.header.flags.contains(DatagramFlags::ACK),
             "Handshake ACK must have ACK flag"
@@ -1317,12 +1334,12 @@ mod tests {
             "Handshake ACK must NOT have DATA flag (pure ACK)"
         );
         assert!(
-            ack_packet.header.flags.contains(DatagramFlags::ACK_VEC),
-            "Handshake ACK must have ACK_VEC flag"
-        );
-        assert!(
             ack_packet.header.flags.contains(DatagramFlags::ACK_OF_ACKS),
             "Handshake ACK must have ACK_OF_ACKS flag to complete 3-way handshake"
+        );
+        assert!(
+            ack_packet.ack_vector.is_some(),
+            "Handshake ACK must include an ACK vector"
         );
 
         // Verify ACK-of-ACK header is present and has correct sequence number
@@ -1336,7 +1353,9 @@ mod tests {
         );
 
         // Now verify first DATA packet does NOT have ACK flag (handshake already complete)
-        let data_bytes = client.send_data(b"ClientHello".to_vec()).expect("send data");
+        let data_bytes = client
+            .send_data(b"ClientHello".to_vec())
+            .expect("send data");
         let data_packet = SourcePacket::decode(&data_bytes, version).expect("decode source packet");
 
         assert!(
