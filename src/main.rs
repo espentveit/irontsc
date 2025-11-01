@@ -12,15 +12,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 mod config;
-mod dtls_udp;
 mod gfx;
 mod gfx_channel;
 mod h264_codec_caps;
 mod rdp;
-mod udp_gfx;
-mod udp_gfx_bridge;
-mod udp_stream_adapter;
-mod udp_transport;
 mod ws;
 
 // Video Redirection support (MS-RDPEVOR)
