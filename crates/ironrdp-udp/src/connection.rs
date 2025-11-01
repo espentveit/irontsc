@@ -506,6 +506,8 @@ impl UdpConnection {
     /// Prepare to complete the handshake by piggybacking the ACK-of-ACK on the next DATA packet.
     /// Used when we skip sending the standalone ACK and combine it with TLS ClientHello.
     pub fn prepare_combined_handshake_ack(&mut self) {
+        // Clear last sent marker so the handshake ACK-of-ACK can be resent
+        self.last_ack_of_ack_sent = None;
         self.schedule_ack_of_ack(self.last_ack_received);
         self.first_ack_sent = false;
     }
