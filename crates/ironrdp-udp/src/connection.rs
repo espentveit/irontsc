@@ -125,6 +125,7 @@ pub struct UdpConnection {
     // ACK-of-ACK tracking (section 2.2.2.6)
     pending_ack_of_ack: Option<u32>,
     last_ack_of_ack_sent: Option<u32>,
+    handshake_ack_pending: bool,
 
     // Remote peer info
     remote_mtu: u16,
@@ -154,6 +155,7 @@ impl UdpConnection {
             last_ack_sent: Instant::now(),
             pending_ack_of_ack: None,
             last_ack_of_ack_sent: None,
+            handshake_ack_pending: false,
             remote_mtu: 1232,
             remote_window_size: 256,
             first_ack_sent: false,
@@ -439,7 +441,11 @@ impl UdpConnection {
         let ack_vector = self.build_ack_vector()?;
 
         // Include ACK-of-ACK if scheduled (this happens after handshake)
-        let ack_of_ack = self.take_pending_ack_of_ack();
+        let mut ack_of_ack = self.take_pending_ack_of_ack();
+        if ack_of_ack.is_none() && self.handshake_ack_pending {
+            ack_of_ack = Some(AckOfAckVectorHeader::new(self.last_ack_received));
+            self.handshake_ack_pending = false;
+        }
 
         // For first DATA packet after handshake, include DelayAck header
         // Per FreeRDP behavior: MaxDelayedAcks=1, DelayedAckTimeoutInMs=20
@@ -451,7 +457,7 @@ impl UdpConnection {
 
         // DATA packets don't need ACK flag unless piggybacking acknowledgments
         // When ack_of_ack is present without ack_vector, ACK flag should be FALSE
-        let include_ack = false;
+        let include_ack = ack_of_ack.is_some() || ack_vector.is_some();
 
         // snSourceAck should acknowledge the last SOURCE (DATA) packet received
         let sn_source_ack = self.next_receive_sequence.wrapping_sub(1);
@@ -510,6 +516,7 @@ impl UdpConnection {
         self.last_ack_of_ack_sent = None;
         self.schedule_ack_of_ack(self.last_ack_received);
         self.first_ack_sent = false;
+        self.handshake_ack_pending = true;
     }
 
     /// Check if FEC block is complete and generate FEC packet if needed
