@@ -405,13 +405,24 @@ pub struct TileUpdate {
 struct TileDecodeScratch {
     channels: [Vec<i16>; COMPONENT_COUNT],
     temp: Vec<i16>,
+    // DWT scratch buffers to avoid allocations in hot path
+    // Max size needed is for level 1: ~1100 elements per buffer
+    dwt_hl: Vec<i16>,
+    dwt_lh: Vec<i16>,
+    dwt_hh: Vec<i16>,
+    dwt_ll: Vec<i16>,
 }
 
 impl TileDecodeScratch {
     fn new() -> Self {
+        const DWT_SCRATCH_SIZE: usize = 1200; // Slightly larger than max needed (1089 for level 1)
         Self {
             channels: std::array::from_fn(|_| vec![0i16; TILE_PIXELS]),
             temp: vec![0i16; TILE_PIXELS],
+            dwt_hl: vec![0i16; DWT_SCRATCH_SIZE],
+            dwt_lh: vec![0i16; DWT_SCRATCH_SIZE],
+            dwt_hh: vec![0i16; DWT_SCRATCH_SIZE],
+            dwt_ll: vec![0i16; DWT_SCRATCH_SIZE],
         }
     }
 
@@ -439,6 +450,37 @@ impl TileDecodeScratch {
         (
             [c0.as_mut_slice(), c1.as_mut_slice(), c2.as_mut_slice()],
             temp,
+        )
+    }
+
+    fn dwt_scratch_mut(&mut self) -> (&mut [i16], &mut [i16], &mut [i16], &mut [i16]) {
+        (
+            self.dwt_hl.as_mut_slice(),
+            self.dwt_lh.as_mut_slice(),
+            self.dwt_hh.as_mut_slice(),
+            self.dwt_ll.as_mut_slice(),
+        )
+    }
+
+    /// Split all scratch buffers for DWT operations
+    fn split_all_mut(
+        &mut self,
+    ) -> (
+        [&mut [i16]; COMPONENT_COUNT],
+        &mut [i16],
+        &mut [i16],
+        &mut [i16],
+        &mut [i16],
+        &mut [i16],
+    ) {
+        let [ref mut c0, ref mut c1, ref mut c2] = self.channels;
+        (
+            [c0.as_mut_slice(), c1.as_mut_slice(), c2.as_mut_slice()],
+            self.temp.as_mut_slice(),
+            self.dwt_hl.as_mut_slice(),
+            self.dwt_lh.as_mut_slice(),
+            self.dwt_hh.as_mut_slice(),
+            self.dwt_ll.as_mut_slice(),
         )
     }
 }
@@ -785,12 +827,12 @@ impl<'a> TileDecoder<'a> {
 
     fn reconstruct_rgba(&mut self, tile_state: &mut TileState, extrapolate: bool) -> Result<()> {
         {
-            let (mut channels, temp) = self.scratch.split_mut();
+            let (mut channels, temp, hl, lh, hh, ll) = self.scratch.split_all_mut();
 
             for (component, buffer_ref) in channels.as_mut_slice().iter_mut().enumerate() {
                 let buffer = &mut **buffer_ref;
                 buffer.copy_from_slice(&tile_state.coefficients[component]);
-                Self::inverse_dwt(buffer, temp, extrapolate);
+                Self::inverse_dwt(buffer, temp, extrapolate, hl, lh, hh, ll);
             }
         }
 
@@ -808,11 +850,19 @@ impl<'a> TileDecoder<'a> {
         Ok(())
     }
 
-    fn inverse_dwt(buffer: &mut [i16], temp: &mut [i16], extrapolate: bool) {
+    fn inverse_dwt(
+        buffer: &mut [i16],
+        temp: &mut [i16],
+        extrapolate: bool,
+        hl_scratch: &mut [i16],
+        lh_scratch: &mut [i16],
+        hh_scratch: &mut [i16],
+        ll_scratch: &mut [i16],
+    ) {
         if !extrapolate {
             dwt::decode(buffer, temp);
         } else {
-            dwt_extrapolate_decode(buffer, temp);
+            dwt_extrapolate_decode(buffer, temp, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
         }
     }
 
@@ -1304,7 +1354,15 @@ fn progressive_idwt_y(
     }
 }
 
-fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usize) {
+fn progressive_dwt_decode_block(
+    buffer: &mut [i16],
+    temp: &mut [i16],
+    level: usize,
+    hl_scratch: &mut [i16],
+    lh_scratch: &mut [i16],
+    hh_scratch: &mut [i16],
+    ll_scratch: &mut [i16],
+) {
     let n_band_l = progressive_get_band_l_count(level);
     let n_band_h = progressive_get_band_h_count(level);
 
@@ -1325,16 +1383,17 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
         return;
     }
 
-    // Create temporary copies of the input subbands since we'll overwrite buffer
-    let mut hl_copy = vec![0i16; hl_len];
-    let mut lh_copy = vec![0i16; lh_len];
-    let mut hh_copy = vec![0i16; hh_len];
-    let mut ll_copy = vec![0i16; ll_len.min(buffer.len() - (hl_len + lh_len + hh_len))];
+    // Use provided scratch buffers instead of allocating
+    let ll_actual_len = ll_len.min(buffer.len() - (hl_len + lh_len + hh_len)).min(ll_scratch.len());
+
+    let hl_copy = &mut hl_scratch[..hl_len];
+    let lh_copy = &mut lh_scratch[..lh_len];
+    let hh_copy = &mut hh_scratch[..hh_len];
+    let ll_copy = &mut ll_scratch[..ll_actual_len];
 
     hl_copy.copy_from_slice(&buffer[0..hl_len]);
     lh_copy.copy_from_slice(&buffer[hl_len..hl_len + lh_len]);
     hh_copy.copy_from_slice(&buffer[hl_len + lh_len..hl_len + lh_len + hh_len]);
-    let ll_actual_len = ll_copy.len();
     ll_copy.copy_from_slice(
         &buffer[hl_len + lh_len + hh_len..hl_len + lh_len + hh_len + ll_actual_len],
     );
@@ -1354,14 +1413,21 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
     );
 }
 
-fn dwt_extrapolate_decode(buffer: &mut [i16], temp: &mut [i16]) {
+fn dwt_extrapolate_decode(
+    buffer: &mut [i16],
+    temp: &mut [i16],
+    hl_scratch: &mut [i16],
+    lh_scratch: &mut [i16],
+    hh_scratch: &mut [i16],
+    ll_scratch: &mut [i16],
+) {
     if buffer.len() < 4096 {
         return;
     }
 
-    progressive_dwt_decode_block(&mut buffer[3807..], temp, 3);
-    progressive_dwt_decode_block(&mut buffer[3007..], temp, 2);
-    progressive_dwt_decode_block(&mut buffer[0..], temp, 1);
+    progressive_dwt_decode_block(&mut buffer[3807..], temp, 3, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
+    progressive_dwt_decode_block(&mut buffer[3007..], temp, 2, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
+    progressive_dwt_decode_block(&mut buffer[0..], temp, 1, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
 }
 
 struct BitStream<'a> {
