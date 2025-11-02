@@ -1595,6 +1595,9 @@ fn create_remote_desktop_window(
             }
         };
     let user_has_moved_toolbar = std::rc::Rc::new(std::cell::RefCell::new(false));
+    
+    // State for hotkey capture (Win key, Alt+Tab, etc.)
+    let hotkey_capture_enabled = std::rc::Rc::new(std::cell::Cell::new(false)); // Global hotkey capture disabled by default
 
     // Connection name label
     let connection_label = gtk::Label::new(Some(&format!("{} ({})", server, username)));
@@ -1602,12 +1605,22 @@ fn create_remote_desktop_window(
     connection_label.set_margin_end(8);
     connection_label.add_css_class("caption");
 
+    // Hotkey capture button
+    let hotkey_button = Button::new();
+    hotkey_button.set_icon_name("preferences-desktop-keyboard-shortcuts-symbolic");
+    hotkey_button.set_tooltip_text(Some("Global hotkeys disabled (click to enable)"));
+    hotkey_button.add_css_class("flat");
+    hotkey_button.add_css_class("circular");
+    hotkey_button.set_opacity(0.4); // Start with reduced opacity since disabled by default
+    hotkey_button.set_focus_on_click(false);
+
     // Pin button
     let pin_button = Button::new();
     pin_button.set_icon_name("view-pin-symbolic");
     pin_button.set_tooltip_text(Some("Pin controls"));
     pin_button.add_css_class("flat");
     pin_button.add_css_class("circular");
+    pin_button.set_opacity(0.4); // Start with reduced opacity since not pinned by default
     pin_button.set_focus_on_click(false);
 
     // Menu button (fullscreen toggle)
@@ -1626,8 +1639,9 @@ fn create_remote_desktop_window(
     close_button.add_css_class("circular");
     close_button.set_focus_on_click(false);
 
-    // Pack control bar with new order: connection_label, pin, fullscreen, close
+    // Pack control bar with new order: connection_label, hotkey_button, pin, fullscreen, close
     control_bar.append(&connection_label);
+    control_bar.append(&hotkey_button);
     control_bar.append(&pin_button);
     control_bar.append(&menu_button);
     control_bar.append(&close_button);
@@ -1680,17 +1694,21 @@ fn create_remote_desktop_window(
     {
         let enter_leave_ctrl = gtk::EventControllerMotion::new();
         let win_weak = rd_window.downgrade();
+        let hotkey_capture_for_enter = hotkey_capture_enabled.clone();
 
         // Inhibit on enter (pass current event if present)
         enter_leave_ctrl.connect_enter(move |ctrl, _, _| {
             if let Some(win) = win_weak.upgrade() {
-                with_toplevel(&win, |tl| {
-                    if let Some(ev) = ctrl.current_event() {
-                        tl.inhibit_system_shortcuts(Some(&ev));
-                    } else {
-                        tl.inhibit_system_shortcuts(None::<&gdk::Event>);
-                    }
-                });
+                // Only inhibit if hotkey capture is enabled
+                if hotkey_capture_for_enter.get() {
+                    with_toplevel(&win, |tl| {
+                        if let Some(ev) = ctrl.current_event() {
+                            tl.inhibit_system_shortcuts(Some(&ev));
+                        } else {
+                            tl.inhibit_system_shortcuts(None::<&gdk::Event>);
+                        }
+                    });
+                }
             }
         });
 
@@ -1710,10 +1728,14 @@ fn create_remote_desktop_window(
     {
         let focus_ctrl = gtk::EventControllerFocus::new();
         let win_weak = rd_window.downgrade();
+        let hotkey_capture_for_focus = hotkey_capture_enabled.clone();
 
         focus_ctrl.connect_enter(move |_| {
             if let Some(win) = win_weak.upgrade() {
-                with_toplevel(&win, |tl| tl.inhibit_system_shortcuts(None::<&gdk::Event>));
+                // Only inhibit if hotkey capture is enabled
+                if hotkey_capture_for_focus.get() {
+                    with_toplevel(&win, |tl| tl.inhibit_system_shortcuts(None::<&gdk::Event>));
+                }
             }
         });
 
@@ -1996,6 +2018,42 @@ fn create_remote_desktop_window(
     let is_pinned = std::rc::Rc::new(std::cell::RefCell::new(false));
     let is_fullscreen = std::rc::Rc::new(std::cell::RefCell::new(false));
 
+    // Hotkey capture button functionality
+    let hotkey_capture_for_button = hotkey_capture_enabled.clone();
+    let rd_window_for_hotkey = rd_window.clone();
+    let rdp_focus_for_hotkey = rdp_widget.widget().clone();
+    hotkey_button.connect_clicked(move |button| {
+        let enabled = hotkey_capture_for_button.get();
+        let new_state = !enabled;
+        hotkey_capture_for_button.set(new_state);
+
+        if new_state {
+            // Enabled - set full opacity and re-enable shortcuts
+            button.set_opacity(1.0);
+            button.set_tooltip_text(Some("Global hotkeys enabled (Win, Alt+Tab, etc.)"));
+            
+            // Inhibit system shortcuts again if mouse is over window
+            if let Some(surface) = rd_window_for_hotkey.surface() {
+                if let Ok(tl) = surface.downcast::<gdk::Toplevel>() {
+                    tl.inhibit_system_shortcuts(None::<&gdk::Event>);
+                }
+            }
+        } else {
+            // Disabled - set reduced opacity and restore shortcuts
+            button.set_opacity(0.4);
+            button.set_tooltip_text(Some("Global hotkeys disabled (click to enable)"));
+            
+            // Restore system shortcuts
+            if let Some(surface) = rd_window_for_hotkey.surface() {
+                if let Ok(tl) = surface.downcast::<gdk::Toplevel>() {
+                    tl.restore_system_shortcuts();
+                }
+            }
+        }
+
+        rdp_focus_for_hotkey.grab_focus();
+    });
+
     // Pin button functionality
     let control_bar_for_pin = control_bar.clone();
     let is_pinned_clone = is_pinned.clone();
@@ -2007,14 +2065,14 @@ fn create_remote_desktop_window(
         *pinned = !*pinned;
 
         if *pinned {
-            // Add pressed/active state styling
-            button.add_css_class("suggested-action");
+            // Pinned - set full opacity
+            button.set_opacity(1.0);
             button.set_tooltip_text(Some("Unpin controls"));
             control_bar_for_pin.set_visible(true);
             apply_toolbar_position_for_pin(None);
         } else {
-            // Remove pressed/active state styling
-            button.remove_css_class("suggested-action");
+            // Unpinned - set reduced opacity
+            button.set_opacity(0.4);
             button.set_tooltip_text(Some("Pin controls"));
             // In windowed mode, always show controls
             // In fullscreen mode, hide unless mouse is at top
