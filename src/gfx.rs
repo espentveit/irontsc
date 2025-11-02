@@ -575,55 +575,12 @@ impl GfxContext for GfxState {
             }
         }
 
-        // Send update to UI if we have surface mappings and graphics output
-        // This handles cases where END_FRAME might not be sent immediately
-        if self.graphics_output.is_some() && !self.surface_output_mappings.is_empty() {
-            // Check if this surface is mapped to output
-            if self
-                .surface_output_mappings
-                .iter()
-                .any(|m| m.surface_id == surface_id)
-            {
-                debug!(
-                    "📺 Updating graphics output with decoded surface {}",
-                    surface_id
-                );
-
-                // Fast path: single surface - ALWAYS send directly to GTK
-                if self.surface_output_mappings.len() == 1 {
-                    let mapping = &self.surface_output_mappings[0];
-                    if let Some(surf) = self.surfaces.get(&mapping.surface_id) {
-                        trace!(
-                            "🚀 Fast path: sending surface {} directly to GTK (immediate update)",
-                            mapping.surface_id
-                        );
-                        self.send_surface_to_ui(surf)?;
-                        return Ok(());
-                    }
-                }
-
-                // Slow path: multiple surfaces or partial updates - need CPU compositing
-                let output = self.graphics_output.as_mut().unwrap();
-
-                // Fast clear - RDP may only update dirty regions
-                output.clear_fast();
-
-                for mapping in &self.surface_output_mappings {
-                    if let Some(surf) = self.surfaces.get(&mapping.surface_id) {
-                        Self::blit_surface_to_output(output, surf, mapping)?;
-                    }
-                }
-                // Send output to UI after blitting is complete
-                let output_ref = self.graphics_output.as_ref().unwrap();
-                self.send_graphics_output_to_ui(output_ref)?;
-            }
-        } else {
-            // Fallback: send surface directly if no graphics output composition
-            debug!("📺 Sending surface {} directly to UI", surface_id);
-            if let Some(surf) = self.surfaces.get(&surface_id) {
-                self.send_surface_to_ui(surf)?;
-            }
-        }
+        // Don't send updates immediately - batch them until EndFrame
+        // This prevents visible tearing from tile-by-tile updates
+        trace!(
+            "📝 Decoded surface {} - waiting for EndFrame to send",
+            surface_id
+        );
 
         Ok(())
     }
