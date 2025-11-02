@@ -546,18 +546,23 @@ impl UdpConnection {
 
         // Per MS-RDPEUDP2, include DelayAckInfo for reliable mode
         // This tells the peer our delayed ACK parameters
-        use crate::rdpudp_v2_delay_ack_info;
+        use crate::{rdpudp_v2_ack_of_acks, rdpudp_v2_delay_ack_info};
         let delay_ack_info = if self.config.mode == TransportMode::Reliable {
             Some(rdpudp_v2_delay_ack_info!(1, 20)) // max_delayed_acks=1, timeout=20ms
         } else {
             None
         };
 
+        // Include Ack of Acks with the current data sequence number
+        // This acknowledges the peer's ACKs
+        let ack_of_acks = Some(rdpudp_v2_ack_of_acks!(data_sequence as u16));
+
         let header = V2PacketHeader::new(flags, 15)?; // LogWindow=15 (matches FreeRDP)
         let encoded = rdpudp_v2_packet_bytes!(
             header = header,
             ack = ack_payload,
             delay_ack_info = delay_ack_info,
+            ack_of_acks = ack_of_acks,
             data_header = Some(DataHeaderPayload {
                 data_sequence_number: data_sequence,
             }),

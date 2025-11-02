@@ -88,7 +88,10 @@ impl PacketPrefixByte {
         if packet_type_index != Self::TYPE_STANDARD && packet_type_index != Self::TYPE_DUMMY {
             return Err(UdpError::InvalidField("packet_type_index"));
         }
-        let short = if layout_len < 7 { layout_len as u8 } else { 7 };
+        // Use short_length=0 for extended length encoding to avoid bit conflict with type 0
+        // PacketType uses bits 4-1, short_length uses bits 2-0, so they overlap at bits 2-1
+        // Type 0 requires bits 4-1 = 0000, so short_length must be 0-1 to avoid conflict
+        let short = if layout_len < 7 { layout_len as u8 } else { 0 };
         let padded = if layout_len < 7 { 7 } else { layout_len };
         Ok((
             Self {
@@ -100,14 +103,14 @@ impl PacketPrefixByte {
     }
 
     pub fn encode(self) -> u8 {
-        ((self.packet_type_index & 0x0f) << 3) | (self.short_length & 0x07)
+        ((self.packet_type_index & 0x0f) << 1) | (self.short_length & 0x07)
     }
 
     pub fn decode(byte: u8) -> Result<Self> {
         if byte & 0x80 != 0 {
             return Err(UdpError::InvalidField("packet_prefix.reserved"));
         }
-        let packet_type_index = (byte >> 3) & 0x0f;
+        let packet_type_index = (byte >> 1) & 0x0f;
         let short_length = byte & 0x07;
         if packet_type_index != Self::TYPE_STANDARD && packet_type_index != Self::TYPE_DUMMY {
             return Err(UdpError::InvalidField("packet_type_index"));
@@ -537,12 +540,14 @@ impl Packet {
         buf.swap(0, 7);
         let prefix = PacketPrefixByte::decode(buf[0])?;
         let mut layout = buf[1..].to_vec();
-        if prefix.short_length < 7 {
+        // short_length: 0 = extended (use full length), 1-6 = actual length, 7 = extended (legacy)
+        if prefix.short_length > 0 && prefix.short_length < 7 {
             if layout.len() < 7 {
                 return Err(UdpError::InvalidField("packet_prefix.length"));
             }
             layout.truncate(prefix.short_length as usize);
         }
+        // For short_length == 0 or 7, use the full layout length (extended length encoding)
         Self::decode_layout(&layout)
     }
 
