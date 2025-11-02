@@ -1490,9 +1490,32 @@ async fn start_udp_tunnel(
         );
     }
 
-    config.mode = TransportMode::Reliable;
-    // Initial implementation sticks to TLS-protected TCP channel without DTLS per MS-RDPEUDP guidance for LAN scenarios.
-    config.use_dtls = false;
+    // Per MS-RDPEMT Section 1.5 and Appendix A:
+    // - TLS is REQUIRED for RELIABLE UDP when Enhanced RDP Security is in effect
+    // - DTLS is REQUIRED for LOSSY UDP when Enhanced RDP Security is in effect
+    // - Standard RDP Security allows unencrypted UDP (can be reliable or lossy)
+    //
+    // The transport mode is determined by the encryption protocol used:
+    // - use_tls=true → Reliable mode (with retransmits, ordering, etc.)
+    // - use_dtls=true → Lossy mode (best-effort delivery)
+    // - Both false → Reliable mode (default for compatibility)
+    
+    let use_enhanced_security = selected_protocol.contains(nego::SecurityProtocol::SSL)
+        || selected_protocol.contains(nego::SecurityProtocol::HYBRID)
+        || selected_protocol.contains(nego::SecurityProtocol::HYBRID_EX);
+    
+    if use_enhanced_security {
+        // For Enhanced RDP Security, use TLS with Reliable mode
+        // (DTLS/Lossy would be used for scenarios requiring lower latency at cost of reliability)
+        info!("🔐 Enhanced RDP Security detected - TLS will be used for reliable UDP tunnel");
+        config.use_tls = true;
+        config.use_dtls = false;
+    } else {
+        // Standard RDP Security - use unencrypted Reliable mode for compatibility
+        info!("ℹ️  Standard RDP Security - UDP tunnel will be unencrypted (reliable mode)");
+        config.use_tls = false;
+        config.use_dtls = false;
+    }
 
     let correlation = correlation_id.map(UdpCorrelationId::new);
     let server_name = destination.name().to_string();
