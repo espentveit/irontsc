@@ -257,25 +257,21 @@ impl UdpTransportManager {
         self.request_id = Some(request_id);
         self.security_cookie = Some(security_cookie);
 
-        // Check if security cookie is all zeros (server doesn't support/require authentication)
+        // Compute cookie hash for MS-RDPEMT authentication
+        // Per MS-RDPEUDP section 2.2.2.9: cookieHash MUST be present if uUdpVer equals
+        // RDPUDP_PROTOCOL_VERSION_3 (0x0101), otherwise MUST NOT be present.
+        // 
+        // If the server's SYN+ACK has an all-zero cookie hash, it means the server
+        // doesn't require authentication, but we still use V3 - we just don't send
+        // the cookie hash in our SYN packet.
+        use sha2::{Digest, Sha256};
         let cookie_is_zero = security_cookie.iter().all(|&b| b == 0);
-
+        
         if cookie_is_zero {
-            // Server doesn't require MS-RDPEMT authentication - use UDPv2 without cookie hash
-            warn!(
-                "⚠️  Security cookie is all zeros - server doesn't require MS-RDPEMT authentication"
-            );
-            warn!("   Using UDPv2 without cookie hash for compatibility");
-
-            // Set protocol version to V2 (doesn't require cookie hash)
-            if let Ok(mut conn) = self.connection.try_lock() {
-                conn.set_protocol_version(UdpProtocolVersion::V2);
-                info!("   Protocol version set to UDPv2 (0x0002)");
-            }
+            info!("   Security cookie is all zeros - server doesn't require cookie authentication");
+            info!("   Using UDPv3 (0x0101) without cookie hash");
         } else {
-            // Compute cookie hash for MS-RDPEMT authentication (required for UDPv3)
-            // This hash authenticates the UDP connection to the RDP session
-            use sha2::{Digest, Sha256};
+            info!("   Computing SHA-256 hash of security cookie for UDPv3 authentication");
             let mut hasher = Sha256::new();
             hasher.update(&security_cookie);
             let hash_raw: [u8; 32] = hasher.finalize().into();
