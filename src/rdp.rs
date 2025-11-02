@@ -277,8 +277,8 @@ async fn connect(
             }
         }
 
-        let gfx_state =
-            GfxState::new(Box::new(DummyEventSender)).expect("Failed to initialize GFX state");
+        let gfx_state = GfxState::new(Box::new(DummyEventSender), config.h264_hw_accel)
+            .expect("Failed to initialize GFX state");
         let gfx_processor = GfxDvcProcessor::new(gfx_state);
 
         drdynvc = drdynvc.with_dynamic_channel(gfx_processor);
@@ -310,7 +310,7 @@ async fn connect(
 
         // Create shared video redirection manager
         let manager = Arc::new(Mutex::new(
-            VideoRedirectionManager::new(Box::new(DummyEventSender))
+            VideoRedirectionManager::new(Box::new(DummyEventSender), config.h264_hw_accel)
                 .expect("Failed to initialize Video Redirection manager"),
         ));
 

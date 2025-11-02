@@ -9,7 +9,7 @@
 //! ```no_run
 //! use ironrdp_h264::{H264Decoder, FfmpegDecoder, AvcKind};
 //!
-//! let mut decoder = FfmpegDecoder::new()?;
+//! let mut decoder = FfmpegDecoder::new(false)?; // false = software decoding
 //!
 //! let gfx_payload = vec![...]; // From WIRE_TO_SURFACE
 //! let frame = decoder.decode_gfx_stream(AvcKind::Avc420, &gfx_payload)?;
