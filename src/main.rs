@@ -307,6 +307,7 @@ fn create_rdp_config(
         clipboard_type: ClipboardType::Default,
         rdcleanpath: None,
         dvc_pipe_proxies: Vec::new(),
+        h264_hw_accel: rdp_settings.get_h264_hw_accel(),
     }
 }
 
@@ -486,6 +487,8 @@ struct RdpSettings {
     full_screen: bool,
     #[serde(default)]
     dpi_scaling: Option<u32>,
+    #[serde(default)]
+    h264_hw_accel: bool,
 }
 
 fn default_width() -> u16 {
@@ -511,6 +514,7 @@ impl Default for RdpSettings {
             session_bpp: 32,
             full_screen: false,
             dpi_scaling: None,
+            h264_hw_accel: false, // Default to software decoding for compatibility
         }
     }
 }
@@ -586,6 +590,11 @@ impl RdpSettings {
                         settings.full_screen = mode == 2;
                     }
                 }
+                "irontsc:h264_hw_accel" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.h264_hw_accel = val != 0;
+                    }
+                }
                 _ => {}
             }
         }
@@ -658,6 +667,9 @@ impl RdpSettings {
             lines.push(format!("password 51:b:{}", self.password));
         }
 
+        // Add irontsc-specific settings (custom extension)
+        lines.push(format!("irontsc:h264_hw_accel:i:{}", if self.h264_hw_accel { 1 } else { 0 }));
+
         lines.join("\n")
     }
 
@@ -717,6 +729,14 @@ impl RdpSettings {
 
     fn set_dpi_scaling(&mut self, scaling: Option<u32>) {
         self.dpi_scaling = scaling;
+    }
+
+    fn get_h264_hw_accel(&self) -> bool {
+        self.h264_hw_accel
+    }
+
+    fn set_h264_hw_accel(&mut self, enabled: bool) {
+        self.h264_hw_accel = enabled;
     }
 }
 
@@ -3006,6 +3026,42 @@ fn build_ui(app: &Application, autologon: bool) {
     dpi_frame.set_child(Some(&dpi_box));
     display_page.append(&dpi_frame);
 
+    // H.264 Hardware Acceleration
+    let h264_frame = gtk::Frame::new(Some("Video Codec"));
+    let h264_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    h264_box.set_margin_top(5);
+    h264_box.set_margin_bottom(5);
+    h264_box.set_margin_start(5);
+    h264_box.set_margin_end(5);
+
+    let h264_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+
+    let h264_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let h264_label = gtk::Label::new(Some("Enable H.264 hardware acceleration"));
+    h264_label.set_xalign(0.0);
+    h264_label_box.append(&h264_label);
+
+    let h264_description = gtk::Label::new(Some(
+        "Use GPU for H.264 video decoding (may not work on all systems)"
+    ));
+    h264_description.set_xalign(0.0);
+    h264_description.add_css_class("dim-label");
+    h264_description.add_css_class("caption");
+    h264_label_box.append(&h264_description);
+
+    let h264_switch = gtk::Switch::new();
+    h264_switch.set_active(settings_for_ui.get_h264_hw_accel());
+    h264_switch.set_valign(gtk::Align::Center);
+
+    h264_row.append(&h264_label_box);
+    h264_row.append(&h264_switch);
+    h264_row.set_hexpand(true);
+    h264_label_box.set_hexpand(true);
+
+    h264_box.append(&h264_row);
+    h264_frame.set_child(Some(&h264_box));
+    display_page.append(&h264_frame);
+
     notebook.append_page(&display_page, Some(&gtk::Label::new(Some("Display"))));
 
     // Show/Hide options button
@@ -3106,6 +3162,13 @@ fn build_ui(app: &Application, autologon: bool) {
     dpi_dropdown.connect_selected_notify(move |dropdown| {
         let scale = dpi_value_from_index(dropdown.selected());
         rdp_settings_for_dpi.borrow_mut().set_dpi_scaling(scale);
+    });
+
+    // H.264 hardware acceleration switch handler
+    let rdp_settings_for_h264 = rdp_settings.clone();
+    h264_switch.connect_state_set(move |_switch, enabled| {
+        rdp_settings_for_h264.borrow_mut().set_h264_hw_accel(enabled);
+        glib::Propagation::Proceed
     });
 
     // Save button handler

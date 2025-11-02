@@ -35,10 +35,6 @@ struct GfxSurface {
     buffer: Arc<Vec<u8>>,
 }
 
-// Note: We used to convert BGRA to RGBA here, but GTK4 supports B8g8r8a8 (BGRA) natively.
-// This eliminates ~40% CPU overhead from pixel format conversion!
-// All surfaces are kept in BGRA format throughout the pipeline for zero-copy efficiency.
-
 #[derive(Debug, Clone)]
 struct CachedBitmap {
     key: u64,
@@ -57,12 +53,14 @@ struct GraphicsOutput {
 
 impl GraphicsOutput {
     fn new(width: u16, height: u16, monitors: &[MonitorDefinition]) -> Self {
-        Self {
+        let mut output = Self {
             width,
             height,
             buffer: Arc::new(vec![0; (width as usize) * (height as usize) * 4]),
             monitors: monitors.to_vec(),
-        }
+        };
+        output.clear();
+        output
     }
 
     fn resize(&mut self, width: u16, height: u16, monitors: &[MonitorDefinition]) {
@@ -72,16 +70,11 @@ impl GraphicsOutput {
         let len = (width as usize) * (height as usize) * 4;
         let buffer = Arc::make_mut(&mut self.buffer);
         buffer.resize(len, 0);
+        self.clear();
     }
 
-    /// Fast clear using unsafe memset (much faster than fill(0) for large buffers)
-    #[inline]
-    fn clear_fast(&mut self) {
-        let buffer = Arc::make_mut(&mut self.buffer);
-        // SAFETY: ptr is valid, buffer is properly sized, and 0 is valid for u8
-        unsafe {
-            std::ptr::write_bytes(buffer.as_mut_ptr(), 0, buffer.len());
-        }
+    fn clear(&mut self) {
+        Arc::make_mut(&mut self.buffer).fill(0);
     }
 }
 
@@ -137,13 +130,13 @@ pub struct GfxState {
 }
 
 impl GfxState {
-    pub fn new(event_sender: Box<dyn RdpEventSender>) -> Result<Self> {
+    pub fn new(event_sender: Box<dyn RdpEventSender>, h264_hw_accel: bool) -> Result<Self> {
         use tracing::info;
 
         #[cfg(feature = "h264")]
         let h264_decoder = {
             info!("🎬 Initializing FFmpeg H.264 decoder...");
-            let decoder = FfmpegDecoder::new().context(
+            let decoder = FfmpegDecoder::new(h264_hw_accel).context(
                 "Failed to initialize H.264 decoder - ensure FFmpeg libraries are installed",
             )?;
             info!("✅ FFmpeg H.264 decoder initialized successfully");
@@ -278,38 +271,13 @@ impl GfxContext for GfxState {
     fn on_end_frame(&mut self, frame_id: u32) -> Result<()> {
         trace!("GFX frame end frame_id={}", frame_id);
 
-        if self.graphics_output.is_some() {
-            let mapping_count = self.surface_output_mappings.len();
-
-            if mapping_count == 0 {
-                trace!("📊 Path: no mappings, sending surface 0");
+        if let Some(output) = self.graphics_output.as_mut() {
+            if self.surface_output_mappings.is_empty() {
                 if let Some(surface) = self.surfaces.get(&0) {
                     self.send_surface_to_ui(surface)?;
                 }
-            } else if mapping_count == 1 {
-                // Single surface case: ALWAYS send directly to GTK for GPU-accelerated rendering
-                // GTK handles ALL scaling, positioning, and composition on GPU - much faster than CPU
-                let mapping = &self.surface_output_mappings[0];
-                if let Some(surface) = self.surfaces.get(&mapping.surface_id) {
-                    debug!(
-                        "🚀 FAST PATH: sending surface {} directly to GTK ({}x{})",
-                        mapping.surface_id,
-                        surface.width,
-                        surface.height
-                    );
-                    self.send_surface_to_ui(surface)?;
-                    return Ok(());
-                }
             } else {
-                warn!("🐌 SLOW PATH: {} surfaces - CPU compositing", mapping_count);
-            }
-
-            // Multiple surfaces or partial updates: need CPU compositing
-            if mapping_count > 1 {
-                let output = self.graphics_output.as_mut().unwrap();
-
-                // Fast clear - RDP may only update dirty regions, so we need to clear stale pixels
-                output.clear_fast();
+                output.clear();
 
                 for mapping in &self.surface_output_mappings {
                     match self.surfaces.get(&mapping.surface_id) {
@@ -324,10 +292,12 @@ impl GfxContext for GfxState {
                         }
                     }
                 }
+            }
 
-                // Drop the mutable borrow before calling send
-                let output = self.graphics_output.as_ref().unwrap();
-                self.send_graphics_output_to_ui(output)?;
+            if !self.surface_output_mappings.is_empty() {
+                if let Some(output) = self.graphics_output.as_ref() {
+                    self.send_graphics_output_to_ui(output)?;
+                }
             }
 
             return Ok(());
@@ -403,12 +373,8 @@ impl GfxContext for GfxState {
             #[cfg(feature = "h264")]
             codec::codec_id::AVC420 => {
                 debug!(
-                    "🎬 Decoding H.264/AVC420 frame ({} bytes) for rect={}x{} at ({},{})",
-                    bitmap_data.len(),
-                    dest_rect.width(),
-                    dest_rect.height(),
-                    dest_rect.left,
-                    dest_rect.top
+                    "🎬 Decoding H.264/AVC420 frame ({} bytes)...",
+                    bitmap_data.len()
                 );
                 // Decode H.264/AVC420
                 let frame = self
@@ -417,13 +383,7 @@ impl GfxContext for GfxState {
                     .decode_gfx_stream(AvcKind::Avc420, bitmap_data)
                     .context("Failed to decode AVC420 frame")?;
 
-                debug!(
-                    "✅ H.264 decoded: {}x{} format={:?}, blitting to surface {}",
-                    frame.width,
-                    frame.height,
-                    frame.format,
-                    surface_id
-                );
+                debug!("✅ H.264 decode complete, blitting to surface");
                 Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
                 
                 // Draw debug outline (green for AVC420)
@@ -585,12 +545,37 @@ impl GfxContext for GfxState {
             }
         }
 
-        // Don't send updates immediately - batch them until EndFrame
-        // This prevents visible tearing from tile-by-tile updates
-        trace!(
-            "📝 Decoded surface {} - waiting for EndFrame to send",
-            surface_id
-        );
+        // Send update to UI if we have surface mappings and graphics output
+        // This handles cases where END_FRAME might not be sent immediately
+        if self.graphics_output.is_some() && !self.surface_output_mappings.is_empty() {
+            // Check if this surface is mapped to output
+            if self
+                .surface_output_mappings
+                .iter()
+                .any(|m| m.surface_id == surface_id)
+            {
+                debug!(
+                    "📺 Updating graphics output with decoded surface {}",
+                    surface_id
+                );
+                let output = self.graphics_output.as_mut().unwrap();
+                output.clear();
+                for mapping in &self.surface_output_mappings {
+                    if let Some(surf) = self.surfaces.get(&mapping.surface_id) {
+                        Self::blit_surface_to_output(output, surf, mapping)?;
+                    }
+                }
+                // Send output to UI after blitting is complete
+                let output_ref = self.graphics_output.as_ref().unwrap();
+                self.send_graphics_output_to_ui(output_ref)?;
+            }
+        } else {
+            // Fallback: send surface directly if no graphics output composition
+            debug!("📺 Sending surface {} directly to UI", surface_id);
+            if let Some(surf) = self.surfaces.get(&surface_id) {
+                self.send_surface_to_ui(surf)?;
+            }
+        }
 
         Ok(())
     }
@@ -1076,57 +1061,36 @@ impl GfxState {
             .get(0)
             .ok_or_else(|| anyhow::anyhow!("Decoded frame missing BGRA data plane"))?;
 
-        // H.264 decoder outputs full surface, but we only need dest_rect region
-        // This is normal - decoder gives us the complete frame, we extract the tile
-        trace!(
-            "H.264 frame: decoded={}x{} extracting region={}x{} at ({},{})",
-            frame_width_usize,
-            frame_height_usize,
-            rect_width,
-            rect_height,
-            dest_rect.left,
-            dest_rect.top
-        );
-
         // Blit to surface buffer
-        // Extract the dest_rect region from the decoded frame
         let buffer = Arc::make_mut(&mut surface.buffer);
-        let copy_width = rect_width.min(frame_width_usize - (dest_rect.left as usize));
-        let copy_height = rect_height.min(frame_height_usize - (dest_rect.top as usize));
-
-        for y in 0..copy_height {
-            // Extract from decoded frame at dest_rect position
-            let src_y = dest_rect.top as usize + y;
-            let src_x = dest_rect.left as usize;
-            let src_offset = src_y * frame_stride + src_x * 4;
-
-            // Write to surface at dest_rect position
+        for y in 0..rect_height {
+            let src_offset = y * frame_stride;
             let dst_y = dest_rect.top as usize + y;
             let dst_x = dest_rect.left as usize;
             let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
             // Fail on bounds violations instead of silently skipping
-            if dst_offset + copy_width * 4 > buffer.len() {
+            if dst_offset + rect_width * 4 > buffer.len() {
                 anyhow::bail!(
                     "Blit destination out of bounds: line={}, offset={}, size={}, buffer={}",
                     y,
                     dst_offset,
-                    copy_width * 4,
+                    rect_width * 4,
                     buffer.len()
                 );
             }
-            if src_offset + copy_width * 4 > frame_data.len() {
+            if src_offset + rect_width * 4 > frame_data.len() {
                 anyhow::bail!(
                     "Blit source out of bounds: line={}, offset={}, size={}, frame={}",
                     y,
                     src_offset,
-                    copy_width * 4,
+                    rect_width * 4,
                     frame_data.len()
                 );
             }
 
-            buffer[dst_offset..dst_offset + copy_width * 4]
-                .copy_from_slice(&frame_data[src_offset..src_offset + copy_width * 4]);
+            buffer[dst_offset..dst_offset + rect_width * 4]
+                .copy_from_slice(&frame_data[src_offset..src_offset + rect_width * 4]);
         }
 
         Ok(())
@@ -1455,8 +1419,14 @@ impl GfxState {
         let height = NonZeroU16::new(surface.height)
             .ok_or_else(|| anyhow::anyhow!("Surface height is zero"))?;
 
-        // No conversion needed - pass BGRA buffer directly to UI
-        // UI will use MemoryFormat::B8g8r8a8 to handle BGRA natively
+        use tracing::info;
+        info!(
+            "🖼️ Sending surface to UI: {}x{} ({} bytes)",
+            width,
+            height,
+            surface.buffer.len()
+        );
+
         self.event_sender
             .send_event(RdpOutputEvent::Image {
                 buffer: surface.buffer.clone(),
@@ -1475,8 +1445,14 @@ impl GfxState {
         let height = NonZeroU16::new(output.height)
             .ok_or_else(|| anyhow::anyhow!("Graphics output height is zero"))?;
 
-        // No conversion needed - pass BGRA buffer directly to UI
-        // UI will use MemoryFormat::B8g8r8a8 to handle BGRA natively
+        use tracing::debug;
+        debug!(
+            "🖼️ Sending graphics output to UI: {}x{} ({} bytes)",
+            width,
+            height,
+            output.buffer.len()
+        );
+
         self.event_sender
             .send_event(RdpOutputEvent::Image {
                 buffer: output.buffer.clone(),
@@ -1620,15 +1596,9 @@ impl GfxState {
         let output_len = output.buffer.len();
 
         let is_identity_blit =
-            origin_x == 0
-            && origin_y == 0
-            && target_width_full == surface_width
-            && target_height_full == surface_height
-            && target_width_full == output_width
-            && target_height_full == output_height;
+            target_width_full == surface_width && target_height_full == surface_height;
 
         if is_identity_blit {
-            // Zero-copy: just replace the Arc pointer (fastest path)
             output.buffer = surface.buffer.clone();
             return Ok(());
         }
@@ -1636,40 +1606,20 @@ impl GfxState {
         let src_buffer = &surface.buffer;
         let dst_buffer = Arc::make_mut(&mut output.buffer);
 
-        // Check if we need scaling
-        let needs_scaling = target_width_full != surface_width || target_height_full != surface_height;
+        for dy in 0..dest_height {
+            let src_y =
+                ((dy * surface_height) / target_height_full).min(surface_height.saturating_sub(1));
 
-        if !needs_scaling {
-            // Fast path: No scaling, just row-by-row memcpy
-            // This is ~10x faster than per-pixel copy
-            let row_bytes = surface_width * 4;
+            for dx in 0..dest_width {
+                let src_x =
+                    ((dx * surface_width) / target_width_full).min(surface_width.saturating_sub(1));
 
-            for y in 0..dest_height.min(surface_height) {
-                let src_offset = y * surface_width * 4;
-                let dst_offset = ((origin_y + y) * output_width + origin_x) * 4;
+                let src_index = (src_y * surface_width + src_x) * 4;
+                let dst_index = ((origin_y + dy) * output_width + (origin_x + dx)) * 4;
 
-                if src_offset + row_bytes <= surface_len && dst_offset + row_bytes <= output_len {
-                    dst_buffer[dst_offset..dst_offset + row_bytes]
-                        .copy_from_slice(&src_buffer[src_offset..src_offset + row_bytes]);
-                }
-            }
-        } else {
-            // Slow path: Nearest-neighbor scaling (per-pixel)
-            for dy in 0..dest_height {
-                let src_y =
-                    ((dy * surface_height) / target_height_full).min(surface_height.saturating_sub(1));
-
-                for dx in 0..dest_width {
-                    let src_x =
-                        ((dx * surface_width) / target_width_full).min(surface_width.saturating_sub(1));
-
-                    let src_index = (src_y * surface_width + src_x) * 4;
-                    let dst_index = ((origin_y + dy) * output_width + (origin_x + dx)) * 4;
-
-                    if src_index + 4 <= surface_len && dst_index + 4 <= output_len {
-                        dst_buffer[dst_index..dst_index + 4]
-                            .copy_from_slice(&src_buffer[src_index..src_index + 4]);
-                    }
+                if src_index + 4 <= surface_len && dst_index + 4 <= output_len {
+                    dst_buffer[dst_index..dst_index + 4]
+                        .copy_from_slice(&src_buffer[src_index..src_index + 4]);
                 }
             }
         }

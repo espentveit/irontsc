@@ -67,13 +67,14 @@ impl HardwareContext {
     fn try_setup(
         codec: &ffmpeg::Codec,
         context: &mut ffmpeg::codec::Context,
+        enable_hw_accel: bool,
     ) -> Result<Option<Box<Self>>> {
-        let forced = env::var("IRONRDP_FFMPEG_HWACCEL").ok();
-        let candidates = forced
-            .as_deref()
-            .and_then(|raw| HardwareContext::parse_forced_list(raw).transpose())
-            .transpose()?
-            .unwrap_or_else(HardwareContext::default_candidates);
+        if !enable_hw_accel {
+            debug!("Hardware acceleration disabled by configuration");
+            return Ok(None);
+        }
+
+        let candidates = HardwareContext::default_candidates();
 
         if candidates.is_empty() {
             return Ok(None);
@@ -109,14 +110,7 @@ impl HardwareContext {
             }
         }
 
-        if let Some(raw) = forced {
-            if !errors.is_empty() {
-                warn!(
-                    "IRONRDP_FFMPEG_HWACCEL={} requested hardware decode but all attempts failed; falling back to software",
-                    raw
-                );
-            }
-        } else if !errors.is_empty() {
+        if !errors.is_empty() {
             debug!("All hardware decoders failed; falling back to software decode");
         }
 
@@ -764,7 +758,7 @@ pub struct FfmpegDecoder {
 
 impl FfmpegDecoder {
     /// Create a new FFmpeg H.264 decoder
-    pub fn new() -> Result<Self> {
+    pub fn new(enable_hw_accel: bool) -> Result<Self> {
         init_ffmpeg()?;
 
         // Find H.264 decoder codec
@@ -772,7 +766,7 @@ impl FfmpegDecoder {
             .ok_or_else(|| anyhow::anyhow!("H.264 decoder not found"))?;
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
-        let hardware = HardwareContext::try_setup(&codec, &mut context)?;
+        let hardware = HardwareContext::try_setup(&codec, &mut context, enable_hw_accel)?;
 
         if let Some(ref hw) = hardware {
             debug!(
@@ -780,6 +774,8 @@ impl FfmpegDecoder {
                 hw.device_type,
                 hw.hw_pix_fmt()
             );
+        } else if enable_hw_accel {
+            debug!("Hardware acceleration requested but not available; using software decoding");
         }
 
         // Create decoder context from codec
@@ -1039,7 +1035,7 @@ mod tests {
 
     #[test]
     fn test_decoder_creation() {
-        let result = FfmpegDecoder::new();
+        let result = FfmpegDecoder::new(false); // Test software decoding
         assert!(
             result.is_ok(),
             "Failed to create decoder: {:?}",

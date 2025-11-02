@@ -271,7 +271,7 @@ mod tests {
     fn caps_advertise_is_raw_rdpgfx_pdu() {
         use ironrdp_gfx::pdu::CmdId;
 
-        let gfx_state = GfxState::new(Box::new(NoopSender)).expect("gfx state");
+        let gfx_state = GfxState::new(Box::new(NoopSender), false).expect("gfx state");
         let mut processor = GfxDvcProcessor::new(gfx_state);
 
         processor

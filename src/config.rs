@@ -32,6 +32,9 @@ pub struct Config {
     /// server, which will be used for proxying DVC messages to/from user-defined DVC logic
     /// implemented as named pipe clients (either in the same process or in a different process).
     pub dvc_pipe_proxies: Vec<DvcProxyInfo>,
+
+    /// Enable H.264 hardware acceleration (default: false for compatibility)
+    pub h264_hw_accel: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -485,6 +488,7 @@ impl Config {
             clipboard_type,
             rdcleanpath,
             dvc_pipe_proxies: args.dvc_proxy,
+            h264_hw_accel: false, // Set via UI, default to false for CLI mode
         })
     }
 }
