@@ -411,6 +411,8 @@ struct TileDecodeScratch {
     dwt_lh: Vec<i16>,
     dwt_hh: Vec<i16>,
     dwt_ll: Vec<i16>,
+    // Pixel buffer for tile extraction - reused to avoid allocations
+    pixel_buffer: Vec<u8>,
 }
 
 impl TileDecodeScratch {
@@ -423,6 +425,7 @@ impl TileDecodeScratch {
             dwt_lh: vec![0i16; DWT_SCRATCH_SIZE],
             dwt_hh: vec![0i16; DWT_SCRATCH_SIZE],
             dwt_ll: vec![0i16; DWT_SCRATCH_SIZE],
+            pixel_buffer: vec![0u8; TILE_PIXELS * 4],
         }
     }
 
@@ -629,7 +632,7 @@ impl<'a> TileDecoder<'a> {
         surface.updated_tiles.push(coord);
 
         if let Some(tile_state) = surface.tiles.get(&coord) {
-            Self::emit_tile_update(surface_width, surface_height, coord, tile_state, tiles);
+            Self::emit_tile_update(surface_width, surface_height, coord, tile_state, tiles, &mut self.scratch.pixel_buffer);
         }
 
         Ok(())
@@ -666,7 +669,7 @@ impl<'a> TileDecoder<'a> {
         surface.updated_tiles.push(coord);
 
         if let Some(tile_state) = surface.tiles.get(&coord) {
-            Self::emit_tile_update(surface_width, surface_height, coord, tile_state, tiles);
+            Self::emit_tile_update(surface_width, surface_height, coord, tile_state, tiles, &mut self.scratch.pixel_buffer);
         }
 
         Ok(())
@@ -872,6 +875,7 @@ impl<'a> TileDecoder<'a> {
         coord: TileCoordinate,
         tile_state: &TileState,
         tiles: &mut Vec<TileUpdate>,
+        pixel_buffer: &mut Vec<u8>,
     ) {
         let x = coord.x as u32 * TILE_SIZE as u32;
         let y = coord.y as u32 * TILE_SIZE as u32;
@@ -885,14 +889,28 @@ impl<'a> TileDecoder<'a> {
         };
         let width = usize::from(rect.width);
         let height = usize::from(rect.height);
-        let mut pixels = vec![0u8; width * height * 4];
-
-        for row in 0..height {
-            let src_offset = row * TILE_SIZE * 4;
-            let dst_offset = row * width * 4;
-            let src_slice = &tile_state.reconstruction[src_offset..src_offset + width * 4];
-            pixels[dst_offset..dst_offset + width * 4].copy_from_slice(src_slice);
+        let pixel_count = width * height * 4;
+        
+        // Resize the buffer only if needed
+        if pixel_buffer.len() < pixel_count {
+            pixel_buffer.resize(pixel_count, 0);
         }
+
+        // Fast path: if tile is full-size, copy entire buffer at once
+        if width == TILE_SIZE && height == TILE_SIZE {
+            pixel_buffer[..pixel_count].copy_from_slice(&tile_state.reconstruction[..pixel_count]);
+        } else {
+            // Partial tile: copy row by row
+            for row in 0..height {
+                let src_offset = row * TILE_SIZE * 4;
+                let dst_offset = row * width * 4;
+                let src_slice = &tile_state.reconstruction[src_offset..src_offset + width * 4];
+                pixel_buffer[dst_offset..dst_offset + width * 4].copy_from_slice(src_slice);
+            }
+        }
+
+        // Clone only the used portion of the buffer
+        let pixels = pixel_buffer[..pixel_count].to_vec();
 
         tiles.push(TileUpdate {
             coordinate: coord,
