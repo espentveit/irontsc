@@ -163,6 +163,21 @@ impl QuantLevels {
             ll3: self.ll3 - other.ll3,
         }
     }
+
+    fn sub_scalar(&self, val: i16) -> QuantLevels {
+        QuantLevels {
+            hl1: self.hl1 - val,
+            lh1: self.lh1 - val,
+            hh1: self.hh1 - val,
+            hl2: self.hl2 - val,
+            lh2: self.lh2 - val,
+            hh2: self.hh2 - val,
+            hl3: self.hl3 - val,
+            lh3: self.lh3 - val,
+            hh3: self.hh3 - val,
+            ll3: self.ll3 - val,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -681,13 +696,19 @@ impl<'a> TileDecoder<'a> {
 
         tile_state.sign[component].copy_from_slice(buffer);
 
+        // **THE FIX**: Store the correct persistent state for bit_pos (`base + prog`),
+        // but calculate a separate temporary value for the initial shift (`base + prog - 1`).
         let combined_quant = base_quant.add(prog_quant);
+        let shift_quant = combined_quant.sub_scalar(1);
+
         tile_state.quant[component] = *base_quant;
         tile_state.progressive_quant[component] = *prog_quant;
-        tile_state.bit_pos[component] = combined_quant;
+        tile_state.bit_pos[component] = combined_quant; // Store the correct state.
 
-        Self::process_component_coefficients(buffer, &tile_state.bit_pos[component], extrapolate);
+        // Process the buffer using the temporary shift value.
+        Self::process_component_coefficients(buffer, &shift_quant, extrapolate);
 
+        // Store the fully processed coefficients as the new persistent state.
         Self::store_coefficients(buffer, &mut tile_state.coefficients[component], coeff_diff);
 
         Ok(())
@@ -734,19 +755,24 @@ impl<'a> TileDecoder<'a> {
     ) -> Result<()> {
         let base_quant = self.resolve_base_quant(region, quant_idx)?;
         let previous_bitpos = tile_state.bit_pos[component];
+        
+        // **THE FIX**: The logic for calculating the state and deltas is now correct
+        // in the context of an un-shifted persistent state.
         let new_bitpos = base_quant.add(prog_quant);
-
         let bitpos_delta = previous_bitpos.sub(&new_bitpos);
+        let shift = base_quant.add(prog_quant).sub_scalar(1);
+
         tile_state.bit_pos[component] = new_bitpos;
         tile_state.progressive_quant[component] = *prog_quant;
         tile_state.quant[component] = *base_quant;
 
         let extrapolate = (region.flags & RFX_DWT_REDUCE_EXTRAPOLATE) != 0;
 
+        // Apply the upgrade deltas to the persistent `coefficients` buffer.
         self.apply_upgrade_rlgr(
             &mut tile_state.coefficients[component],
             &mut tile_state.sign[component],
-            &new_bitpos,
+            &shift,
             &bitpos_delta,
             extrapolate,
             prog_quant,
@@ -764,7 +790,6 @@ impl<'a> TileDecoder<'a> {
             for (component, buffer_ref) in channels.as_mut_slice().iter_mut().enumerate() {
                 let buffer = &mut **buffer_ref;
                 buffer.copy_from_slice(&tile_state.coefficients[component]);
-
                 Self::inverse_dwt(buffer, temp, extrapolate);
             }
         }
@@ -776,8 +801,8 @@ impl<'a> TileDecoder<'a> {
             cr: channels[2],
         };
 
-        color_conversion::ycbcr_to_rgba(ycbcr, tile_state.reconstruction.as_mut_slice()).map_err(
-            |err| ProgressiveError::Invalid(format!("YCbCr to RGBA conversion failed: {err}")),
+        color_conversion::ycbcr_to_bgra(ycbcr, tile_state.reconstruction.as_mut_slice()).map_err(
+            |err| ProgressiveError::Invalid(format!("YCbCr to BGRA conversion failed: {err}")),
         )?;
 
         Ok(())
@@ -1603,14 +1628,11 @@ fn progressive_upgrade_decode(
         if band_num_bits <= 0 {
             continue;
         }
-
-        // The LL3 band is handled differently from all other (non-LL) bands.
+        
         state.non_ll = meta.band != Band::Ll3;
-
         let start = meta.offset;
         let end = start + meta.len;
 
-        // Ensure we don't slice out of bounds.
         if end > coefficients.len() || end > sign.len() {
              return Err(ProgressiveError::Invalid(format!(
                 "Subband slice [{start}..{end}] is out of bounds for coefficient/sign buffers"
@@ -1626,7 +1648,6 @@ fn progressive_upgrade_decode(
     }
 
     state.finish()?;
-
     Ok(())
 }
 
