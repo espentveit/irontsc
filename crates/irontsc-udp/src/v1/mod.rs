@@ -634,6 +634,18 @@ impl Packet {
         if let Some(fec_payload) = &self.fec_payload {
             fec_payload.encode_into(&mut out);
         }
+
+        // Per MS-RDPEUDP section 3.1.5.1.1: SYN datagrams MUST be zero-padded
+        // to uUpStreamMtu or uDownStreamMtu, whichever is smaller.
+        if self.header.flags.contains(HeaderFlags::SYN) {
+            if let Some(syn_data) = &self.syn_data {
+                let target_mtu = syn_data.upstream_mtu.min(syn_data.downstream_mtu) as usize;
+                if out.len() < target_mtu {
+                    out.resize(target_mtu, 0);
+                }
+            }
+        }
+
         Ok(out)
     }
 
