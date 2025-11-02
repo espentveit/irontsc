@@ -19,48 +19,73 @@ unsafe extern "C" {
 const MAX_DTLS_RECORD_SIZE: usize = 64 * 1024;
 const CLIENT_MTU: u32 = 1232;
 
-/// DTLS configuration for MS-RDPEMT
+/// Protocol type for MS-RDPEMT encryption
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionProtocol {
+    /// TLS 1.2 for Reliable mode
+    Tls,
+    /// DTLS 1.2 for Lossy mode
+    Dtls,
+}
+
+/// TLS/DTLS configuration for MS-RDPEMT
 pub struct DtlsConfig {
     /// Server hostname for certificate validation
     pub server_name: String,
     /// Whether to verify server certificate (should be true in production)
     pub verify_certificate: bool,
+    /// Protocol to use (TLS for Reliable, DTLS for Lossy)
+    pub protocol: EncryptionProtocol,
 }
 
-/// DTLS wrapper for encrypting/decrypting UDP datagrams
+/// TLS/DTLS wrapper for encrypting/decrypting UDP datagrams
 /// Note: This does NOT handle socket I/O - packets must be wrapped in RDP UDP DATA frames
 pub struct DtlsUdpSocket {
-    /// DTLS SSL context
+    /// SSL context
     ssl_context: SslContext,
     /// Server address (for logging/debugging)
     server_addr: SocketAddr,
     /// Configuration
     config: DtlsConfig,
-    /// Whether DTLS handshake is complete
+    /// Whether handshake is complete
     handshake_complete: bool,
     /// SSL connection instance (created after handshake)
     ssl_conn: Option<Ssl>,
+    /// Protocol being used
+    protocol: EncryptionProtocol,
 }
 
 impl DtlsUdpSocket {
-    /// Create a new DTLS encryption layer (does not handle socket I/O)
+    /// Create a new TLS/DTLS encryption layer (does not handle socket I/O)
     pub fn new(server_addr: SocketAddr, config: DtlsConfig) -> Result<Self> {
+        let protocol_name = match config.protocol {
+            EncryptionProtocol::Tls => "TLS",
+            EncryptionProtocol::Dtls => "DTLS",
+        };
+        
         info!(
-            "🔐 Initializing DTLS for MS-RDPEMT (server: {})",
+            "🔐 Initializing {} for MS-RDPEMT (server: {})",
+            protocol_name,
             config.server_name
         );
 
-        // Create DTLS 1.2 context
+        // Create TLS or DTLS context based on protocol
+        let ssl_method = match config.protocol {
+            EncryptionProtocol::Tls => SslMethod::tls(),
+            EncryptionProtocol::Dtls => SslMethod::dtls(),
+        };
+        
         let mut ctx_builder =
-            SslContext::builder(SslMethod::dtls()).context("Failed to create DTLS context")?;
+            SslContext::builder(ssl_method)
+                .with_context(|| format!("Failed to create {} context", protocol_name))?;
 
-        // Set DTLS version to 1.2 (required by most RDP servers)
+        // Set version to 1.2 (required by most RDP servers)
         ctx_builder
             .set_min_proto_version(Some(SslVersion::TLS1_2))
-            .context("Failed to set min DTLS version")?;
+            .with_context(|| format!("Failed to set min {} version", protocol_name))?;
         ctx_builder
             .set_max_proto_version(Some(SslVersion::TLS1_2))
-            .context("Failed to set max DTLS version")?;
+            .with_context(|| format!("Failed to set max {} version", protocol_name))?;
 
         // Configure certificate verification
         if config.verify_certificate {
@@ -69,7 +94,7 @@ impl DtlsUdpSocket {
                 .set_default_verify_paths()
                 .context("Failed to load system CA certificates")?;
         } else {
-            warn!("⚠️  DTLS certificate verification disabled (insecure, for testing only)");
+            warn!("⚠️  {} certificate verification disabled (insecure, for testing only)", protocol_name);
             ctx_builder.set_verify(SslVerifyMode::NONE);
         }
 
@@ -83,11 +108,16 @@ impl DtlsUdpSocket {
             )
             .context("Failed to set cipher list")?;
 
-        // Ensure OpenSSL does not attempt to probe MTU on its own
-        ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
+        // DTLS-specific options
+        if config.protocol == EncryptionProtocol::Dtls {
+            // Ensure OpenSSL does not attempt to probe MTU on its own
+            ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
+        }
+        
         ctx_builder.set_mode(SslMode::AUTO_RETRY);
 
         let ssl_context = ctx_builder.build();
+        let protocol = config.protocol;
 
         Ok(Self {
             ssl_context,
@@ -95,13 +125,19 @@ impl DtlsUdpSocket {
             config,
             handshake_complete: false,
             ssl_conn: None,
+            protocol,
         })
     }
 
-    /// Start DTLS handshake and return ClientHello packet to send
+    /// Start TLS/DTLS handshake and return ClientHello packet to send
     /// Call process_handshake_data() with server responses until handshake completes
     pub fn start_handshake(&mut self) -> Result<Vec<u8>> {
-        info!("🤝 Starting DTLS 1.2 handshake with {}", self.server_addr);
+        let protocol_name = match self.protocol {
+            EncryptionProtocol::Tls => "TLS",
+            EncryptionProtocol::Dtls => "DTLS",
+        };
+        
+        info!("🤝 Starting {} 1.2 handshake with {}", protocol_name, self.server_addr);
 
         // Create SSL connection instance
         let mut ssl = Ssl::new(&self.ssl_context).context("Failed to create SSL connection")?;
@@ -110,12 +146,16 @@ impl DtlsUdpSocket {
         ssl.set_hostname(&self.config.server_name)
             .context("Failed to set SNI hostname")?;
 
-        // Configure DTLS specific options
+        // Configure protocol-specific options
         ssl.set_connect_state();
-        unsafe {
-            let ssl_ptr = Self::ssl_ptr(&ssl);
-            if ffi::SSL_set_mtu(ssl_ptr, CLIENT_MTU as libc::c_long) <= 0 {
-                debug!("Unable to set DTLS MTU to {}", CLIENT_MTU);
+        
+        // Only set MTU for DTLS (not needed for TLS)
+        if self.protocol == EncryptionProtocol::Dtls {
+            unsafe {
+                let ssl_ptr = Self::ssl_ptr(&ssl);
+                if ffi::SSL_set_mtu(ssl_ptr, CLIENT_MTU as libc::c_long) <= 0 {
+                    debug!("Unable to set DTLS MTU to {}", CLIENT_MTU);
+                }
             }
         }
 
