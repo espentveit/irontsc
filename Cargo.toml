@@ -205,7 +205,7 @@ ironrdp-tls = { path = "crates/ironrdp-tls-local", features = ["rustls"]}
 ironrdp-cfg = { path = "crates/ironrdp-cfg-local", version = "0.1.0" }
 ironrdp-rdpfile = { path = "crates/ironrdp-rdpfile-local", version = "0.1.0" }
 ironrdp-rdcleanpath = { path = "crates/ironrdp-rdcleanpath-local", version = "0.2.1" }
-ironrdp-rdpsnd-native = { path = "crates/ironrdp-rdpsnd-native-local", version = "0.4.1", default-features = false }
+ironrdp-rdpsnd-native = { path = "crates/ironrdp-rdpsnd-native-local", version = "0.4.1", features = ["aac"] }
 ironrdp-propertyset = { path = "crates/ironrdp-propertyset-local", version = "0.1.0" }
 ironrdp-async = { path = "crates/ironrdp-async-local", version = "0.7.0" }
 ironrdp-core = { path = "crates/ironrdp-core-local", version = "0.1.5" }

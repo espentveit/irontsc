@@ -163,6 +163,21 @@ impl QuantLevels {
             ll3: self.ll3 - other.ll3,
         }
     }
+
+    fn sub_scalar(&self, val: i16) -> QuantLevels {
+        QuantLevels {
+            hl1: self.hl1 - val,
+            lh1: self.lh1 - val,
+            hh1: self.hh1 - val,
+            hl2: self.hl2 - val,
+            lh2: self.lh2 - val,
+            hh2: self.hh2 - val,
+            hl3: self.hl3 - val,
+            lh3: self.lh3 - val,
+            hh3: self.hh3 - val,
+            ll3: self.ll3 - val,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -390,13 +405,24 @@ pub struct TileUpdate {
 struct TileDecodeScratch {
     channels: [Vec<i16>; COMPONENT_COUNT],
     temp: Vec<i16>,
+    // DWT scratch buffers to avoid allocations in hot path
+    // Max size needed is for level 1: ~1100 elements per buffer
+    dwt_hl: Vec<i16>,
+    dwt_lh: Vec<i16>,
+    dwt_hh: Vec<i16>,
+    dwt_ll: Vec<i16>,
 }
 
 impl TileDecodeScratch {
     fn new() -> Self {
+        const DWT_SCRATCH_SIZE: usize = 1200; // Slightly larger than max needed (1089 for level 1)
         Self {
             channels: std::array::from_fn(|_| vec![0i16; TILE_PIXELS]),
             temp: vec![0i16; TILE_PIXELS],
+            dwt_hl: vec![0i16; DWT_SCRATCH_SIZE],
+            dwt_lh: vec![0i16; DWT_SCRATCH_SIZE],
+            dwt_hh: vec![0i16; DWT_SCRATCH_SIZE],
+            dwt_ll: vec![0i16; DWT_SCRATCH_SIZE],
         }
     }
 
@@ -424,6 +450,37 @@ impl TileDecodeScratch {
         (
             [c0.as_mut_slice(), c1.as_mut_slice(), c2.as_mut_slice()],
             temp,
+        )
+    }
+
+    fn dwt_scratch_mut(&mut self) -> (&mut [i16], &mut [i16], &mut [i16], &mut [i16]) {
+        (
+            self.dwt_hl.as_mut_slice(),
+            self.dwt_lh.as_mut_slice(),
+            self.dwt_hh.as_mut_slice(),
+            self.dwt_ll.as_mut_slice(),
+        )
+    }
+
+    /// Split all scratch buffers for DWT operations
+    fn split_all_mut(
+        &mut self,
+    ) -> (
+        [&mut [i16]; COMPONENT_COUNT],
+        &mut [i16],
+        &mut [i16],
+        &mut [i16],
+        &mut [i16],
+        &mut [i16],
+    ) {
+        let [ref mut c0, ref mut c1, ref mut c2] = self.channels;
+        (
+            [c0.as_mut_slice(), c1.as_mut_slice(), c2.as_mut_slice()],
+            self.temp.as_mut_slice(),
+            self.dwt_hl.as_mut_slice(),
+            self.dwt_lh.as_mut_slice(),
+            self.dwt_hh.as_mut_slice(),
+            self.dwt_ll.as_mut_slice(),
         )
     }
 }
@@ -615,6 +672,19 @@ impl<'a> TileDecoder<'a> {
         Ok(())
     }
 
+    fn process_component_coefficients(
+        buffer: &mut [i16],
+        quant: &QuantLevels,
+        extrapolate: bool,
+    ) {
+        if !extrapolate {
+            Self::apply_subband_diff_standard(buffer);
+        } else {
+            Self::apply_subband_diff_extrapolate(buffer);
+        }
+        Self::apply_quant_shift(buffer, quant, extrapolate);
+    }
+
     fn decode_initial_components(
         &mut self,
         tile_state: &mut TileState,
@@ -622,6 +692,7 @@ impl<'a> TileDecoder<'a> {
         block: &TileSimpleBlock<'_>,
     ) -> Result<()> {
         let coeff_diff = (block.flags & RFX_TILE_DIFFERENCE) != 0;
+        let extrapolate = (region.flags & RFX_DWT_REDUCE_EXTRAPOLATE) != 0;
 
         tile_state.pass = 1;
         tile_state.flags = block.flags;
@@ -643,6 +714,8 @@ impl<'a> TileDecoder<'a> {
                 component_prog,
                 data,
                 coeff_diff,
+                // **THE FIX**: Pass the correct extrapolate flag down.
+                extrapolate,
             )?;
         }
 
@@ -657,6 +730,7 @@ impl<'a> TileDecoder<'a> {
         prog_quant: &QuantLevels,
         data: &[u8],
         coeff_diff: bool,
+        extrapolate: bool,
     ) -> Result<()> {
         let buffer = self.scratch.channel_mut(component);
         rlgr::decode(self.entropy, data, buffer)
@@ -664,11 +738,19 @@ impl<'a> TileDecoder<'a> {
 
         tile_state.sign[component].copy_from_slice(buffer);
 
+        // **THE FIX**: Store the correct persistent state for bit_pos (`base + prog`),
+        // but calculate a separate temporary value for the initial shift (`base + prog - 1`).
         let combined_quant = base_quant.add(prog_quant);
+        let shift_quant = combined_quant.sub_scalar(1);
+
         tile_state.quant[component] = *base_quant;
         tile_state.progressive_quant[component] = *prog_quant;
-        tile_state.bit_pos[component] = combined_quant;
+        tile_state.bit_pos[component] = combined_quant; // Store the correct state.
 
+        // Process the buffer using the temporary shift value.
+        Self::process_component_coefficients(buffer, &shift_quant, extrapolate);
+
+        // Store the fully processed coefficients as the new persistent state.
         Self::store_coefficients(buffer, &mut tile_state.coefficients[component], coeff_diff);
 
         Ok(())
@@ -715,19 +797,24 @@ impl<'a> TileDecoder<'a> {
     ) -> Result<()> {
         let base_quant = self.resolve_base_quant(region, quant_idx)?;
         let previous_bitpos = tile_state.bit_pos[component];
+        
+        // **THE FIX**: The logic for calculating the state and deltas is now correct
+        // in the context of an un-shifted persistent state.
         let new_bitpos = base_quant.add(prog_quant);
-
         let bitpos_delta = previous_bitpos.sub(&new_bitpos);
+        let shift = base_quant.add(prog_quant).sub_scalar(1);
+
         tile_state.bit_pos[component] = new_bitpos;
         tile_state.progressive_quant[component] = *prog_quant;
         tile_state.quant[component] = *base_quant;
 
         let extrapolate = (region.flags & RFX_DWT_REDUCE_EXTRAPOLATE) != 0;
 
+        // Apply the upgrade deltas to the persistent `coefficients` buffer.
         self.apply_upgrade_rlgr(
             &mut tile_state.coefficients[component],
             &mut tile_state.sign[component],
-            &new_bitpos,
+            &shift,
             &bitpos_delta,
             extrapolate,
             prog_quant,
@@ -740,20 +827,12 @@ impl<'a> TileDecoder<'a> {
 
     fn reconstruct_rgba(&mut self, tile_state: &mut TileState, extrapolate: bool) -> Result<()> {
         {
-            let (mut channels, temp) = self.scratch.split_mut();
+            let (mut channels, temp, hl, lh, hh, ll) = self.scratch.split_all_mut();
 
             for (component, buffer_ref) in channels.as_mut_slice().iter_mut().enumerate() {
                 let buffer = &mut **buffer_ref;
                 buffer.copy_from_slice(&tile_state.coefficients[component]);
-
-                if !extrapolate {
-                    Self::apply_subband_diff_standard(buffer);
-                } else {
-                    Self::apply_subband_diff_extrapolate(buffer);
-                }
-
-                Self::apply_quant_shift(buffer, &tile_state.bit_pos[component], extrapolate);
-                Self::inverse_dwt(buffer, temp, extrapolate);
+                Self::inverse_dwt(buffer, temp, extrapolate, hl, lh, hh, ll);
             }
         }
 
@@ -764,18 +843,26 @@ impl<'a> TileDecoder<'a> {
             cr: channels[2],
         };
 
-        color_conversion::ycbcr_to_rgba(ycbcr, tile_state.reconstruction.as_mut_slice()).map_err(
-            |err| ProgressiveError::Invalid(format!("YCbCr to RGBA conversion failed: {err}")),
+        color_conversion::ycbcr_to_bgra(ycbcr, tile_state.reconstruction.as_mut_slice()).map_err(
+            |err| ProgressiveError::Invalid(format!("YCbCr to BGRA conversion failed: {err}")),
         )?;
 
         Ok(())
     }
 
-    fn inverse_dwt(buffer: &mut [i16], temp: &mut [i16], extrapolate: bool) {
+    fn inverse_dwt(
+        buffer: &mut [i16],
+        temp: &mut [i16],
+        extrapolate: bool,
+        hl_scratch: &mut [i16],
+        lh_scratch: &mut [i16],
+        hh_scratch: &mut [i16],
+        ll_scratch: &mut [i16],
+    ) {
         if !extrapolate {
             dwt::decode(buffer, temp);
         } else {
-            dwt_extrapolate_decode(buffer, temp);
+            dwt_extrapolate_decode(buffer, temp, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
         }
     }
 
@@ -897,7 +984,7 @@ impl<'a> TileDecoder<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Band {
     Hl1,
     Lh1,
@@ -1127,23 +1214,28 @@ fn progressive_idwt_x(
         let mut high_idx = row * high_step;
         let mut dst_idx = row * dst_step;
 
-        let mut h0 = *high_band.get(high_idx).unwrap_or(&0);
+        let mut h0 = high_band.get(high_idx).copied().unwrap_or_default();
         high_idx += 1;
-        let mut l0 = *low_band.get(low_idx).unwrap_or(&0);
+        
+        // **THE FIX IS HERE**: `l0` is now `mut` and is updated inside the loop.
+        let mut l0 = low_band.get(low_idx).copied().unwrap_or_default();
         low_idx += 1;
+
         let mut x0 = clamp_i16(i32::from(l0) - i32::from(h0));
         let mut x2 = x0;
 
         for _ in 0..high_count.saturating_sub(1) {
-            let h1 = *high_band.get(high_idx).unwrap_or(&h0);
+            let h1 = high_band.get(high_idx).copied().unwrap_or_default();
             high_idx += 1;
-            l0 = *low_band.get(low_idx).unwrap_or(&l0);
+            
+            l0 = low_band.get(low_idx).copied().unwrap_or_default();
             low_idx += 1;
+
             x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
             let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-            if dst_idx + 1 < dst_band.len() {
-                dst_band[dst_idx] = x0;
-                dst_band[dst_idx + 1] = x1;
+            if let Some(slice) = dst_band.get_mut(dst_idx..dst_idx + 2) {
+                slice[0] = x0;
+                slice[1] = x1;
             }
             dst_idx += 2;
             x0 = x2;
@@ -1152,32 +1244,33 @@ fn progressive_idwt_x(
 
         if low_count <= high_count + 1 {
             if low_count <= high_count {
-                if dst_idx + 1 < dst_band.len() {
-                    dst_band[dst_idx] = x2;
-                    dst_band[dst_idx + 1] = clamp_i16(i32::from(x2) + 2 * i32::from(h0));
+                if let Some(slice) = dst_band.get_mut(dst_idx..dst_idx + 2) {
+                    slice[0] = x2;
+                    slice[1] = clamp_i16(i32::from(x2) + 2 * i32::from(h0));
                 }
             } else {
-                let l0 = *low_band.get(low_idx).unwrap_or(&0);
+                l0 = low_band.get(low_idx).copied().unwrap_or_default();
                 let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
-                if dst_idx + 2 < dst_band.len() {
-                    dst_band[dst_idx] = x2;
-                    dst_band[dst_idx + 1] =
+                if let Some(slice) = dst_band.get_mut(dst_idx..dst_idx + 3) {
+                    slice[0] = x2;
+                    slice[1] =
                         clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                    dst_band[dst_idx + 2] = x_next;
+                    slice[2] = x_next;
                 }
             }
         } else {
-            let l0 = *low_band.get(low_idx).unwrap_or(&0);
-            let x_next = clamp_i16(i32::from(l0) - (i32::from(h0) / 2));
-            if dst_idx + 2 < dst_band.len() {
-                dst_band[dst_idx] = x2;
-                dst_band[dst_idx + 1] =
+            let l0_first = low_band.get(low_idx).copied().unwrap_or_default();
+            low_idx += 1;
+            let x_next = clamp_i16(i32::from(l0_first) - (i32::from(h0) / 2));
+            
+            let l0_second = low_band.get(low_idx).copied().unwrap_or_default();
+            
+            if let Some(slice) = dst_band.get_mut(dst_idx..dst_idx + 4) {
+                slice[0] = x2;
+                slice[1] =
                     clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                dst_band[dst_idx + 2] = x_next;
-                let l0 = *low_band.get(low_idx).unwrap_or(&l0);
-                if dst_idx + 3 < dst_band.len() {
-                    dst_band[dst_idx + 3] = clamp_i16((i32::from(x_next) + i32::from(l0)) / 2);
-                }
+                slice[2] = x_next;
+                slice[3] = clamp_i16((i32::from(x_next) + i32::from(l0_second)) / 2);
             }
         }
     }
@@ -1199,82 +1292,77 @@ fn progressive_idwt_y(
         let mut high_idx = col;
         let mut dst_idx = col;
 
-        let mut h0 = *high_band.get(high_idx).unwrap_or(&0);
+        let mut h0 = high_band.get(high_idx).copied().unwrap_or_default();
         high_idx += high_step;
-        let mut l0 = *low_band.get(low_idx).unwrap_or(&0);
+
+        let mut l0 = low_band.get(low_idx).copied().unwrap_or_default();
         low_idx += low_step;
+        
         let mut x0 = clamp_i16(i32::from(l0) - i32::from(h0));
         let mut x2 = x0;
 
         for _ in 0..high_count.saturating_sub(1) {
-            let h1 = *high_band.get(high_idx).unwrap_or(&h0);
+            let h1 = high_band.get(high_idx).copied().unwrap_or_default();
             high_idx += high_step;
-            l0 = *low_band.get(low_idx).unwrap_or(&l0);
+            
+            l0 = low_band.get(low_idx).copied().unwrap_or_default();
             low_idx += low_step;
+
             x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
             let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-            if dst_idx < dst_band.len() {
-                dst_band[dst_idx] = x0;
-            }
+            
+            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x0; }
             dst_idx += dst_step;
-            if dst_idx < dst_band.len() {
-                dst_band[dst_idx] = x1;
-            }
+            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x1; }
             dst_idx += dst_step;
+            
             x0 = x2;
             h0 = h1;
         }
 
         if low_count <= high_count + 1 {
             if low_count <= high_count {
-                if dst_idx < dst_band.len() {
-                    dst_band[dst_idx] = x2;
-                }
+                if let Some(val) = dst_band.get_mut(dst_idx) { *val = x2; }
                 dst_idx += dst_step;
-                if dst_idx < dst_band.len() {
-                    dst_band[dst_idx] = clamp_i16(i32::from(x2) + 2 * i32::from(h0));
-                }
+                if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16(i32::from(x2) + 2 * i32::from(h0)); }
             } else {
-                let l0 = *low_band.get(low_idx).unwrap_or(&0);
+                // Here we use the final `l0` value updated from the loop.
+                l0 = low_band.get(low_idx).copied().unwrap_or_default();
                 let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
-                if dst_idx < dst_band.len() {
-                    dst_band[dst_idx] = x2;
-                }
+
+                if let Some(val) = dst_band.get_mut(dst_idx) { *val = x2; }
                 dst_idx += dst_step;
-                if dst_idx < dst_band.len() {
-                    dst_band[dst_idx] =
-                        clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-                }
+                if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0)); }
                 dst_idx += dst_step;
-                if dst_idx < dst_band.len() {
-                    dst_band[dst_idx] = x_next;
-                }
+                if let Some(val) = dst_band.get_mut(dst_idx) { *val = x_next; }
             }
         } else {
-            let l0 = *low_band.get(low_idx).unwrap_or(&0);
-            let x_next = clamp_i16(i32::from(l0) - (i32::from(h0) / 2));
-            if dst_idx < dst_band.len() {
-                dst_band[dst_idx] = x2;
-            }
+            let l0_first = low_band.get(low_idx).copied().unwrap_or_default();
+            low_idx += low_step;
+            let x_next = clamp_i16(i32::from(l0_first) - (i32::from(h0) / 2));
+            
+            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x2; }
             dst_idx += dst_step;
-            if dst_idx < dst_band.len() {
-                dst_band[dst_idx] =
-                    clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-            }
+            if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0)); }
             dst_idx += dst_step;
-            if dst_idx < dst_band.len() {
-                dst_band[dst_idx] = x_next;
-            }
+            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x_next; }
             dst_idx += dst_step;
-            let l0 = *low_band.get(low_idx + low_step).unwrap_or(&l0);
-            if dst_idx < dst_band.len() {
-                dst_band[dst_idx] = clamp_i16((i32::from(x_next) + i32::from(l0)) / 2);
-            }
+
+            let l0_second = low_band.get(low_idx).copied().unwrap_or_default();
+            if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16((i32::from(x_next) + i32::from(l0_second)) / 2); }
         }
     }
 }
 
-fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usize) {
+fn progressive_dwt_decode_block(
+    buffer: &mut [i16],
+    temp: &mut [i16],
+    level: usize,
+    hl_scratch: &mut [i16],
+    lh_scratch: &mut [i16],
+    hh_scratch: &mut [i16],
+    ll_scratch: &mut [i16],
+) {
     let n_band_l = progressive_get_band_l_count(level);
     let n_band_h = progressive_get_band_h_count(level);
 
@@ -1295,16 +1383,17 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
         return;
     }
 
-    // Create temporary copies of the input subbands since we'll overwrite buffer
-    let mut hl_copy = vec![0i16; hl_len];
-    let mut lh_copy = vec![0i16; lh_len];
-    let mut hh_copy = vec![0i16; hh_len];
-    let mut ll_copy = vec![0i16; ll_len.min(buffer.len() - (hl_len + lh_len + hh_len))];
+    // Use provided scratch buffers instead of allocating
+    let ll_actual_len = ll_len.min(buffer.len() - (hl_len + lh_len + hh_len)).min(ll_scratch.len());
+
+    let hl_copy = &mut hl_scratch[..hl_len];
+    let lh_copy = &mut lh_scratch[..lh_len];
+    let hh_copy = &mut hh_scratch[..hh_len];
+    let ll_copy = &mut ll_scratch[..ll_actual_len];
 
     hl_copy.copy_from_slice(&buffer[0..hl_len]);
     lh_copy.copy_from_slice(&buffer[hl_len..hl_len + lh_len]);
     hh_copy.copy_from_slice(&buffer[hl_len + lh_len..hl_len + lh_len + hh_len]);
-    let ll_actual_len = ll_copy.len();
     ll_copy.copy_from_slice(
         &buffer[hl_len + lh_len + hh_len..hl_len + lh_len + hh_len + ll_actual_len],
     );
@@ -1324,14 +1413,21 @@ fn progressive_dwt_decode_block(buffer: &mut [i16], temp: &mut [i16], level: usi
     );
 }
 
-fn dwt_extrapolate_decode(buffer: &mut [i16], temp: &mut [i16]) {
+fn dwt_extrapolate_decode(
+    buffer: &mut [i16],
+    temp: &mut [i16],
+    hl_scratch: &mut [i16],
+    lh_scratch: &mut [i16],
+    hh_scratch: &mut [i16],
+    ll_scratch: &mut [i16],
+) {
     if buffer.len() < 4096 {
         return;
     }
 
-    progressive_dwt_decode_block(&mut buffer[3807..], temp, 3);
-    progressive_dwt_decode_block(&mut buffer[3007..], temp, 2);
-    progressive_dwt_decode_block(&mut buffer[0..], temp, 1);
+    progressive_dwt_decode_block(&mut buffer[3807..], temp, 3, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
+    progressive_dwt_decode_block(&mut buffer[3007..], temp, 2, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
+    progressive_dwt_decode_block(&mut buffer[0..], temp, 1, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
 }
 
 struct BitStream<'a> {
@@ -1509,7 +1605,11 @@ impl<'a> UpgradeState<'a> {
             // LL3 block - read directly from raw
             for i in 0..buffer.len() {
                 let input = self.raw.read_bits(num_bits_u32) as i16;
-                let shifted = (input as i32) << shift;
+                let shifted = if shift >= 0 {
+                    (input as i32) << shift
+                } else {
+                    (input as i32) >> -shift
+                };
                 buffer[i] = clamp_i16((buffer[i] as i32) + shifted);
             }
         } else {
@@ -1528,7 +1628,11 @@ impl<'a> UpgradeState<'a> {
                     val
                 };
 
-                let shifted = (input as i32) << shift;
+                let shifted = if shift >= 0 {
+                    (input as i32) << shift
+                } else {
+                    (input as i32) >> -shift
+                };
                 buffer[i] = clamp_i16((buffer[i] as i32) + shifted);
             }
         }
@@ -1570,82 +1674,46 @@ fn progressive_upgrade_decode(
     sign: &mut [i16],
     shift: &QuantLevels,
     bitpos_delta: &QuantLevels,
-    _extrapolate: bool,
+    extrapolate: bool,
     _prog_quant: &QuantLevels,
     srl_data: &[u8],
     raw_data: &[u8],
 ) -> Result<()> {
     let mut state = UpgradeState::new(srl_data, raw_data);
 
-    // Process all non-LL subbands (extrapolate layout)
-    state.non_ll = true;
+    let subbands: &[SubbandMeta] = if extrapolate {
+        &EXTRAPOLATE_SUBBANDS
+    } else {
+        &STANDARD_SUBBANDS
+    };
 
-    state.upgrade_block(
-        &mut coefficients[0..1023],
-        &mut sign[0..1023],
-        shift.hl1,
-        bitpos_delta.hl1,
-    )?; // HL1
-    state.upgrade_block(
-        &mut coefficients[1023..2046],
-        &mut sign[1023..2046],
-        shift.lh1,
-        bitpos_delta.lh1,
-    )?; // LH1
-    state.upgrade_block(
-        &mut coefficients[2046..3007],
-        &mut sign[2046..3007],
-        shift.hh1,
-        bitpos_delta.hh1,
-    )?; // HH1
-    state.upgrade_block(
-        &mut coefficients[3007..3279],
-        &mut sign[3007..3279],
-        shift.hl2,
-        bitpos_delta.hl2,
-    )?; // HL2
-    state.upgrade_block(
-        &mut coefficients[3279..3551],
-        &mut sign[3279..3551],
-        shift.lh2,
-        bitpos_delta.lh2,
-    )?; // LH2
-    state.upgrade_block(
-        &mut coefficients[3551..3807],
-        &mut sign[3551..3807],
-        shift.hh2,
-        bitpos_delta.hh2,
-    )?; // HH2
-    state.upgrade_block(
-        &mut coefficients[3807..3879],
-        &mut sign[3807..3879],
-        shift.hl3,
-        bitpos_delta.hl3,
-    )?; // HL3
-    state.upgrade_block(
-        &mut coefficients[3879..3951],
-        &mut sign[3879..3951],
-        shift.lh3,
-        bitpos_delta.lh3,
-    )?; // LH3
-    state.upgrade_block(
-        &mut coefficients[3951..4015],
-        &mut sign[3951..4015],
-        shift.hh3,
-        bitpos_delta.hh3,
-    )?; // HH3
+    for meta in subbands {
+        let band_shift = meta.band.value(shift);
+        let band_num_bits = meta.band.value(bitpos_delta);
 
-    // Process LL3 subband
-    state.non_ll = false;
-    state.upgrade_block(
-        &mut coefficients[4015..4096],
-        &mut sign[4015..4096],
-        shift.ll3,
-        bitpos_delta.ll3,
-    )?; // LL3
+        if band_num_bits <= 0 {
+            continue;
+        }
+        
+        state.non_ll = meta.band != Band::Ll3;
+        let start = meta.offset;
+        let end = start + meta.len;
+
+        if end > coefficients.len() || end > sign.len() {
+             return Err(ProgressiveError::Invalid(format!(
+                "Subband slice [{start}..{end}] is out of bounds for coefficient/sign buffers"
+            )));
+        }
+
+        state.upgrade_block(
+            &mut coefficients[start..end],
+            &mut sign[start..end],
+            band_shift,
+            band_num_bits,
+        )?;
+    }
 
     state.finish()?;
-
     Ok(())
 }
 
