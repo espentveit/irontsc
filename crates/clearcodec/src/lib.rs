@@ -442,7 +442,6 @@ impl ClearCodec {
                     let vbar_y_on = read_u8(cursor)? as u32;
                     suboffset += 1;
                     
-                    // **FIX**: Reconstruct full vbar from cached short vbar + background
                     let short_entry = &self.short_vbar_storage[vbar_index];
                     let short_pixel_count = short_entry.count;
                     let vbar_y_off = vbar_y_on + short_pixel_count;
