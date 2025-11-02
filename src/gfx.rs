@@ -1477,12 +1477,6 @@ impl GfxState {
             .ok_or_else(|| anyhow::anyhow!("Surface height is zero"))?;
 
         use tracing::info;
-        info!(
-            "🖼️ Sending surface to UI: {}x{} ({} bytes)",
-            width,
-            height,
-            surface.buffer.len()
-        );
 
         self.event_sender
             .send_event(RdpOutputEvent::Image {
