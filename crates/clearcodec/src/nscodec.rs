@@ -209,17 +209,19 @@ impl NsCodec {
         let tile_stride = width * 4;
         for y in 0..height {
             let mut y_index = y * y_stride;
-            let mut co_index = (y / 2) * chroma_stride;
-            let mut cg_index = (y / 2) * chroma_stride;
+            let mut co_index = if subsampled { (y / 2) * chroma_stride } else { y * chroma_stride };
+            let mut cg_index = if subsampled { (y / 2) * chroma_stride } else { y * chroma_stride };
             let mut alpha_index = y * alpha_stride;
             for x in 0..width {
                 let y_val = self.y_plane[y_index] as i16;
                 let co_val = signed_chroma(self.co_plane[co_index], shift);
                 let cg_val = signed_chroma(self.cg_plane[cg_index], shift);
 
-                let r_val = y_val + co_val - cg_val;
-                let g_val = y_val + cg_val;
-                let b_val = y_val - co_val - cg_val;
+                // Reversible YCoCg-R inverse transform (match spec)
+                let tmp = y_val - (cg_val >> 1);
+                let g_val = tmp + cg_val;
+                let b_val = tmp - (co_val >> 1);
+                let r_val = b_val + co_val;
                 let a_val = self.alpha_plane[alpha_index];
 
                 let dst = y * tile_stride + x * 4;
@@ -352,8 +354,14 @@ fn round_up_to(value: usize, align: usize) -> usize {
 }
 
 fn signed_chroma(value: u8, shift: u8) -> i16 {
-    let shifted = (((value as u16) << shift) & 0xFF) as u8;
-    i16::from(i8::from_ne_bytes([shifted]))
+    // 1. Perform a wrapping left shift on the original unsigned 8-bit value.
+    let shifted_value = value.wrapping_shl(shift as u32);
+    
+    // 2. Reinterpret the bits of the *shifted* result as a signed 8-bit integer.
+    let signed_result = i8::from_ne_bytes([shifted_value]);
+
+    // 3. Promote to i16 for use in the color conversion formulas.
+    i16::from(signed_result)
 }
 
 fn clamp_to_u8(value: i16) -> u8 {

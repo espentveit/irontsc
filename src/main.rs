@@ -292,7 +292,7 @@ fn create_rdp_config(
             }
         },
         request_data: None,
-        enable_audio_playback: false,
+        enable_audio_playback: true,
         performance_flags: PerformanceFlags::DISABLE_WALLPAPER
             | PerformanceFlags::DISABLE_FULLWINDOWDRAG
             | PerformanceFlags::DISABLE_MENUANIMATIONS
@@ -310,6 +310,7 @@ fn create_rdp_config(
         clipboard_type: ClipboardType::Default,
         rdcleanpath: None,
         dvc_pipe_proxies: Vec::new(),
+        h264_hw_accel: rdp_settings.get_h264_hw_accel(),
     }
 }
 
@@ -489,6 +490,8 @@ struct RdpSettings {
     full_screen: bool,
     #[serde(default)]
     dpi_scaling: Option<u32>,
+    #[serde(default)]
+    h264_hw_accel: bool,
 }
 
 fn default_width() -> u16 {
@@ -514,6 +517,7 @@ impl Default for RdpSettings {
             session_bpp: 32,
             full_screen: false,
             dpi_scaling: None,
+            h264_hw_accel: false, // Default to software decoding for compatibility
         }
     }
 }
@@ -589,6 +593,11 @@ impl RdpSettings {
                         settings.full_screen = mode == 2;
                     }
                 }
+                "irontsc:h264_hw_accel" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.h264_hw_accel = val != 0;
+                    }
+                }
                 _ => {}
             }
         }
@@ -661,6 +670,9 @@ impl RdpSettings {
             lines.push(format!("password 51:b:{}", self.password));
         }
 
+        // Add irontsc-specific settings (custom extension)
+        lines.push(format!("irontsc:h264_hw_accel:i:{}", if self.h264_hw_accel { 1 } else { 0 }));
+
         lines.join("\n")
     }
 
@@ -720,6 +732,14 @@ impl RdpSettings {
 
     fn set_dpi_scaling(&mut self, scaling: Option<u32>) {
         self.dpi_scaling = scaling;
+    }
+
+    fn get_h264_hw_accel(&self) -> bool {
+        self.h264_hw_accel
+    }
+
+    fn set_h264_hw_accel(&mut self, enabled: bool) {
+        self.h264_hw_accel = enabled;
     }
 }
 
@@ -1285,7 +1305,7 @@ impl GtkRdpWidget {
         let texture = gtk::gdk::MemoryTexture::new(
             width as i32,
             height as i32,
-            gtk::gdk::MemoryFormat::R8g8b8x8,
+            gtk::gdk::MemoryFormat::B8g8r8a8, // Native BGRA format - no conversion needed!
             &bytes,
             stride,
         );
@@ -1578,6 +1598,9 @@ fn create_remote_desktop_window(
             }
         };
     let user_has_moved_toolbar = std::rc::Rc::new(std::cell::RefCell::new(false));
+    
+    // State for hotkey capture (Win key, Alt+Tab, etc.)
+    let hotkey_capture_enabled = std::rc::Rc::new(std::cell::Cell::new(false)); // Global hotkey capture disabled by default
 
     // Connection name label
     let connection_label = gtk::Label::new(Some(&format!("{} ({})", server, username)));
@@ -1585,12 +1608,22 @@ fn create_remote_desktop_window(
     connection_label.set_margin_end(8);
     connection_label.add_css_class("caption");
 
+    // Hotkey capture button
+    let hotkey_button = Button::new();
+    hotkey_button.set_icon_name("preferences-desktop-keyboard-shortcuts-symbolic");
+    hotkey_button.set_tooltip_text(Some("Global hotkeys disabled (click to enable)"));
+    hotkey_button.add_css_class("flat");
+    hotkey_button.add_css_class("circular");
+    hotkey_button.set_opacity(0.4); // Start with reduced opacity since disabled by default
+    hotkey_button.set_focus_on_click(false);
+
     // Pin button
     let pin_button = Button::new();
     pin_button.set_icon_name("view-pin-symbolic");
     pin_button.set_tooltip_text(Some("Pin controls"));
     pin_button.add_css_class("flat");
     pin_button.add_css_class("circular");
+    pin_button.set_opacity(0.4); // Start with reduced opacity since not pinned by default
     pin_button.set_focus_on_click(false);
 
     // Menu button (fullscreen toggle)
@@ -1609,8 +1642,9 @@ fn create_remote_desktop_window(
     close_button.add_css_class("circular");
     close_button.set_focus_on_click(false);
 
-    // Pack control bar with new order: connection_label, pin, fullscreen, close
+    // Pack control bar with new order: connection_label, hotkey_button, pin, fullscreen, close
     control_bar.append(&connection_label);
+    control_bar.append(&hotkey_button);
     control_bar.append(&pin_button);
     control_bar.append(&menu_button);
     control_bar.append(&close_button);
@@ -1663,17 +1697,21 @@ fn create_remote_desktop_window(
     {
         let enter_leave_ctrl = gtk::EventControllerMotion::new();
         let win_weak = rd_window.downgrade();
+        let hotkey_capture_for_enter = hotkey_capture_enabled.clone();
 
         // Inhibit on enter (pass current event if present)
         enter_leave_ctrl.connect_enter(move |ctrl, _, _| {
             if let Some(win) = win_weak.upgrade() {
-                with_toplevel(&win, |tl| {
-                    if let Some(ev) = ctrl.current_event() {
-                        tl.inhibit_system_shortcuts(Some(&ev));
-                    } else {
-                        tl.inhibit_system_shortcuts(None::<&gdk::Event>);
-                    }
-                });
+                // Only inhibit if hotkey capture is enabled
+                if hotkey_capture_for_enter.get() {
+                    with_toplevel(&win, |tl| {
+                        if let Some(ev) = ctrl.current_event() {
+                            tl.inhibit_system_shortcuts(Some(&ev));
+                        } else {
+                            tl.inhibit_system_shortcuts(None::<&gdk::Event>);
+                        }
+                    });
+                }
             }
         });
 
@@ -1693,10 +1731,14 @@ fn create_remote_desktop_window(
     {
         let focus_ctrl = gtk::EventControllerFocus::new();
         let win_weak = rd_window.downgrade();
+        let hotkey_capture_for_focus = hotkey_capture_enabled.clone();
 
         focus_ctrl.connect_enter(move |_| {
             if let Some(win) = win_weak.upgrade() {
-                with_toplevel(&win, |tl| tl.inhibit_system_shortcuts(None::<&gdk::Event>));
+                // Only inhibit if hotkey capture is enabled
+                if hotkey_capture_for_focus.get() {
+                    with_toplevel(&win, |tl| tl.inhibit_system_shortcuts(None::<&gdk::Event>));
+                }
             }
         });
 
@@ -1979,6 +2021,42 @@ fn create_remote_desktop_window(
     let is_pinned = std::rc::Rc::new(std::cell::RefCell::new(false));
     let is_fullscreen = std::rc::Rc::new(std::cell::RefCell::new(false));
 
+    // Hotkey capture button functionality
+    let hotkey_capture_for_button = hotkey_capture_enabled.clone();
+    let rd_window_for_hotkey = rd_window.clone();
+    let rdp_focus_for_hotkey = rdp_widget.widget().clone();
+    hotkey_button.connect_clicked(move |button| {
+        let enabled = hotkey_capture_for_button.get();
+        let new_state = !enabled;
+        hotkey_capture_for_button.set(new_state);
+
+        if new_state {
+            // Enabled - set full opacity and re-enable shortcuts
+            button.set_opacity(1.0);
+            button.set_tooltip_text(Some("Global hotkeys enabled (Win, Alt+Tab, etc.)"));
+            
+            // Inhibit system shortcuts again if mouse is over window
+            if let Some(surface) = rd_window_for_hotkey.surface() {
+                if let Ok(tl) = surface.downcast::<gdk::Toplevel>() {
+                    tl.inhibit_system_shortcuts(None::<&gdk::Event>);
+                }
+            }
+        } else {
+            // Disabled - set reduced opacity and restore shortcuts
+            button.set_opacity(0.4);
+            button.set_tooltip_text(Some("Global hotkeys disabled (click to enable)"));
+            
+            // Restore system shortcuts
+            if let Some(surface) = rd_window_for_hotkey.surface() {
+                if let Ok(tl) = surface.downcast::<gdk::Toplevel>() {
+                    tl.restore_system_shortcuts();
+                }
+            }
+        }
+
+        rdp_focus_for_hotkey.grab_focus();
+    });
+
     // Pin button functionality
     let control_bar_for_pin = control_bar.clone();
     let is_pinned_clone = is_pinned.clone();
@@ -1990,14 +2068,14 @@ fn create_remote_desktop_window(
         *pinned = !*pinned;
 
         if *pinned {
-            // Add pressed/active state styling
-            button.add_css_class("suggested-action");
+            // Pinned - set full opacity
+            button.set_opacity(1.0);
             button.set_tooltip_text(Some("Unpin controls"));
             control_bar_for_pin.set_visible(true);
             apply_toolbar_position_for_pin(None);
         } else {
-            // Remove pressed/active state styling
-            button.remove_css_class("suggested-action");
+            // Unpinned - set reduced opacity
+            button.set_opacity(0.4);
             button.set_tooltip_text(Some("Pin controls"));
             // In windowed mode, always show controls
             // In fullscreen mode, hide unless mouse is at top
@@ -3009,6 +3087,42 @@ fn build_ui(app: &Application, autologon: bool) {
     dpi_frame.set_child(Some(&dpi_box));
     display_page.append(&dpi_frame);
 
+    // H.264 Hardware Acceleration
+    let h264_frame = gtk::Frame::new(Some("Video Codec"));
+    let h264_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    h264_box.set_margin_top(5);
+    h264_box.set_margin_bottom(5);
+    h264_box.set_margin_start(5);
+    h264_box.set_margin_end(5);
+
+    let h264_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+
+    let h264_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let h264_label = gtk::Label::new(Some("Enable H.264 hardware acceleration"));
+    h264_label.set_xalign(0.0);
+    h264_label_box.append(&h264_label);
+
+    let h264_description = gtk::Label::new(Some(
+        "Use GPU for H.264 video decoding (may not work on all systems)"
+    ));
+    h264_description.set_xalign(0.0);
+    h264_description.add_css_class("dim-label");
+    h264_description.add_css_class("caption");
+    h264_label_box.append(&h264_description);
+
+    let h264_switch = gtk::Switch::new();
+    h264_switch.set_active(settings_for_ui.get_h264_hw_accel());
+    h264_switch.set_valign(gtk::Align::Center);
+
+    h264_row.append(&h264_label_box);
+    h264_row.append(&h264_switch);
+    h264_row.set_hexpand(true);
+    h264_label_box.set_hexpand(true);
+
+    h264_box.append(&h264_row);
+    h264_frame.set_child(Some(&h264_box));
+    display_page.append(&h264_frame);
+
     notebook.append_page(&display_page, Some(&gtk::Label::new(Some("Display"))));
 
     // Show/Hide options button
@@ -3109,6 +3223,13 @@ fn build_ui(app: &Application, autologon: bool) {
     dpi_dropdown.connect_selected_notify(move |dropdown| {
         let scale = dpi_value_from_index(dropdown.selected());
         rdp_settings_for_dpi.borrow_mut().set_dpi_scaling(scale);
+    });
+
+    // H.264 hardware acceleration switch handler
+    let rdp_settings_for_h264 = rdp_settings.clone();
+    h264_switch.connect_state_set(move |_switch, enabled| {
+        rdp_settings_for_h264.borrow_mut().set_h264_hw_accel(enabled);
+        glib::Propagation::Proceed
     });
 
     // Save button handler

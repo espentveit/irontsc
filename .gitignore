@@ -1,0 +1,15 @@
+# Environment variables (contains credentials)
+.env
+
+# Build artifacts
+/target/
+Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+
+# Generated files
+samples/*-w11.pcapng
+samples/*-w11.keys
+samples/*-w11.log

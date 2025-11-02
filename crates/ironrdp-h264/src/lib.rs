@@ -9,7 +9,7 @@
 //! ```no_run
 //! use ironrdp_h264::{H264Decoder, FfmpegDecoder, AvcKind};
 //!
-//! let mut decoder = FfmpegDecoder::new()?;
+//! let mut decoder = FfmpegDecoder::new(false)?; // false = software decoding
 //!
 //! let gfx_payload = vec![...]; // From WIRE_TO_SURFACE
 //! let frame = decoder.decode_gfx_stream(AvcKind::Avc420, &gfx_payload)?;
@@ -62,7 +62,11 @@ pub struct DecodedFrame {
 /// H.264 decoder trait
 pub trait H264Decoder {
     /// Decode RDPEGFX H.264 stream
-    fn decode_gfx_stream(&mut self, kind: AvcKind, gfx_payload: &[u8]) -> Result<DecodedFrame>;
+    /// 
+    /// The optional `region` parameter (left, top, width, height) specifies which sub-rectangle
+    /// of the decoded frame to convert to BGRA. This significantly reduces CPU usage when only
+    /// a portion of the frame needs to be updated.
+    fn decode_gfx_stream(&mut self, kind: AvcKind, gfx_payload: &[u8], region: Option<(u16, u16, u16, u16)>) -> Result<DecodedFrame>;
 }
 
 /// H.264 quantization/quality data

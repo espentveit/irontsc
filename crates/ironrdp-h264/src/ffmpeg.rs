@@ -67,13 +67,14 @@ impl HardwareContext {
     fn try_setup(
         codec: &ffmpeg::Codec,
         context: &mut ffmpeg::codec::Context,
+        enable_hw_accel: bool,
     ) -> Result<Option<Box<Self>>> {
-        let forced = env::var("IRONRDP_FFMPEG_HWACCEL").ok();
-        let candidates = forced
-            .as_deref()
-            .and_then(|raw| HardwareContext::parse_forced_list(raw).transpose())
-            .transpose()?
-            .unwrap_or_else(HardwareContext::default_candidates);
+        if !enable_hw_accel {
+            debug!("Hardware acceleration disabled by configuration");
+            return Ok(None);
+        }
+
+        let candidates = HardwareContext::default_candidates();
 
         if candidates.is_empty() {
             return Ok(None);
@@ -109,14 +110,7 @@ impl HardwareContext {
             }
         }
 
-        if let Some(raw) = forced {
-            if !errors.is_empty() {
-                warn!(
-                    "IRONRDP_FFMPEG_HWACCEL={} requested hardware decode but all attempts failed; falling back to software",
-                    raw
-                );
-            }
-        } else if !errors.is_empty() {
+        if !errors.is_empty() {
             debug!("All hardware decoders failed; falling back to software decode");
         }
 
@@ -764,7 +758,7 @@ pub struct FfmpegDecoder {
 
 impl FfmpegDecoder {
     /// Create a new FFmpeg H.264 decoder
-    pub fn new() -> Result<Self> {
+    pub fn new(enable_hw_accel: bool) -> Result<Self> {
         init_ffmpeg()?;
 
         // Find H.264 decoder codec
@@ -772,7 +766,7 @@ impl FfmpegDecoder {
             .ok_or_else(|| anyhow::anyhow!("H.264 decoder not found"))?;
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
-        let hardware = HardwareContext::try_setup(&codec, &mut context)?;
+        let hardware = HardwareContext::try_setup(&codec, &mut context, enable_hw_accel)?;
 
         if let Some(ref hw) = hardware {
             debug!(
@@ -780,6 +774,8 @@ impl FfmpegDecoder {
                 hw.device_type,
                 hw.hw_pix_fmt()
             );
+        } else if enable_hw_accel {
+            debug!("Hardware acceleration requested but not available; using software decoding");
         }
 
         // Create decoder context from codec
@@ -831,13 +827,12 @@ impl FfmpegDecoder {
 
     /// Convert FFmpeg frame to BGRA format
     ///
-    /// This matches FreeRDP's approach: convert YUV to RGB first, then the
-    /// data is interpreted as BGRA by the graphics system.
-    ///
-    /// Note: FFmpeg's RGBA pixel format produces R,G,B,A byte order which
-    /// gets interpreted as B,G,R,A when displayed by the graphics system
-    /// (due to little-endian interpretation of 32-bit pixels).
-    fn convert_to_bgra(&mut self, frame: &ffmpeg::util::frame::Video) -> Result<DecodedFrame> {
+    /// Converts YUV frame to BGRA pixel format for display.
+    /// Uses FFmpeg's BGRA pixel format which produces B,G,R,A byte order.
+    /// 
+    /// If `region` is specified as (left, top, width, height), only converts that sub-rectangle.
+    /// This significantly reduces CPU usage when only a portion of the frame is needed.
+    fn convert_to_bgra(&mut self, frame: &ffmpeg::util::frame::Video, region: Option<(u16, u16, u16, u16)>) -> Result<DecodedFrame> {
         let (src_format, color_range) = normalize_pixel_format(frame.format());
         let mut owned_frame: Option<ffmpeg::util::frame::Video> = None;
 
@@ -852,8 +847,15 @@ impl FfmpegDecoder {
 
         let input_frame = owned_frame.as_ref().unwrap_or(frame);
 
-        let width = input_frame.width();
-        let height = input_frame.height();
+        let full_width = input_frame.width();
+        let full_height = input_frame.height();
+        
+        // Determine conversion region
+        let (region_left, region_top, width, height) = if let Some((left, top, w, h)) = region {
+            (left as u32, top as u32, w as u32, h as u32)
+        } else {
+            (0, 0, full_width, full_height)
+        };
 
         // Reset converter if source parameters changed
         if self.converter_src_format != Some(src_format)
@@ -864,14 +866,14 @@ impl FfmpegDecoder {
         }
 
         // Initialize converter if needed
-        // Use RGBA pixel format to match FreeRDP's YUV-to-RGB conversion
+        // Use BGRA pixel format for proper color channel ordering
         if self.converter.is_none() {
             self.converter = Some(
                 ffmpeg::software::scaling::Context::get(
                     src_format,
                     width,
                     height,
-                    ffmpeg::format::Pixel::RGBA,
+                    ffmpeg::format::Pixel::BGRA,
                     width,
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
@@ -883,30 +885,127 @@ impl FfmpegDecoder {
             self.converter_height = Some(height);
         }
 
-        // Convert frame
+        // Convert frame (or sub-rectangle of it)
         let converter = self.converter.as_mut().unwrap();
-        let mut rgba_frame = ffmpeg::util::frame::Video::empty();
-        converter
-            .run(input_frame, &mut rgba_frame)
-            .context("Failed to convert frame")?;
+        let mut bgra_frame = ffmpeg::util::frame::Video::empty();
+        
+        if let Some((left, top, w, h)) = region {
+            // For sub-rectangle conversion, we create a new YUV frame that contains only the region
+            // This avoids converting pixels we don't need
+            let mut region_frame = ffmpeg::util::frame::Video::new(src_format, w as u32, h as u32);
+            
+            // Copy Y plane (luma) - full resolution
+            {
+                let src_y_plane = input_frame.data(0);
+                let src_y_stride = input_frame.stride(0);
+                let dst_y_stride = region_frame.stride(0);
+                let dst_y_plane = region_frame.data_mut(0);
+                
+                for y in 0..(h as usize) {
+                    let src_offset = ((top as usize + y) * src_y_stride) + left as usize;
+                    let dst_offset = y * dst_y_stride;
+                    dst_y_plane[dst_offset..dst_offset + w as usize]
+                        .copy_from_slice(&src_y_plane[src_offset..src_offset + w as usize]);
+                }
+            }
+            
+            // For YUV420P and YUV444P, we need to handle chroma planes
+            // YUV420P: U/V are half resolution (subsampled 2x2)
+            // YUV444P: U/V are full resolution
+            let (chroma_w, chroma_h, chroma_left, chroma_top) = match src_format {
+                ffmpeg::format::Pixel::YUV420P => {
+                    // Chroma is half resolution
+                    ((w + 1) / 2, (h + 1) / 2, left / 2, top / 2)
+                }
+                ffmpeg::format::Pixel::YUV444P => {
+                    // Chroma is full resolution
+                    (w, h, left, top)
+                }
+                _ => {
+                    // For other formats, fall back to full frame conversion
+                    converter
+                        .run(input_frame, &mut bgra_frame)
+                        .context("Failed to convert frame")?;
+                    
+                    // Extract BGRA data
+                    let stride = bgra_frame.stride(0);
+                    let data = bgra_frame.data(0);
 
-        // Extract RGBA data
-        let stride = rgba_frame.stride(0);
-        let data = rgba_frame.data(0);
+                    // Copy to contiguous buffer
+                    let mut bgra_data = Vec::with_capacity((width * height * 4) as usize);
+                    for y in 0..height as usize {
+                        let row_start = y * stride;
+                        let row_end = row_start + (width as usize * 4);
+                        bgra_data.extend_from_slice(&data[row_start..row_end]);
+                    }
+
+                    return Ok(DecodedFrame {
+                        width,
+                        height,
+                        format: PixelFormat::Bgra,
+                        planes: vec![bgra_data],
+                        line_sizes: vec![width as usize * 4],
+                    });
+                }
+            };
+            
+            // Copy U plane (Cb - blue chroma)
+            {
+                let src_u_plane = input_frame.data(1);
+                let src_u_stride = input_frame.stride(1);
+                let dst_u_stride = region_frame.stride(1);
+                let dst_u_plane = region_frame.data_mut(1);
+                
+                for y in 0..(chroma_h as usize) {
+                    let src_offset = ((chroma_top as usize + y) * src_u_stride) + chroma_left as usize;
+                    let dst_offset = y * dst_u_stride;
+                    dst_u_plane[dst_offset..dst_offset + chroma_w as usize]
+                        .copy_from_slice(&src_u_plane[src_offset..src_offset + chroma_w as usize]);
+                }
+            }
+            
+            // Copy V plane (Cr - red chroma)
+            {
+                let src_v_plane = input_frame.data(2);
+                let src_v_stride = input_frame.stride(2);
+                let dst_v_stride = region_frame.stride(2);
+                let dst_v_plane = region_frame.data_mut(2);
+                
+                for y in 0..(chroma_h as usize) {
+                    let src_offset = ((chroma_top as usize + y) * src_v_stride) + chroma_left as usize;
+                    let dst_offset = y * dst_v_stride;
+                    dst_v_plane[dst_offset..dst_offset + chroma_w as usize]
+                        .copy_from_slice(&src_v_plane[src_offset..src_offset + chroma_w as usize]);
+                }
+            }
+            
+            // Now convert only this smaller YUV region to BGRA
+            converter
+                .run(&region_frame, &mut bgra_frame)
+                .context("Failed to convert region frame")?;
+        } else {
+            converter
+                .run(input_frame, &mut bgra_frame)
+                .context("Failed to convert frame")?;
+        }
+
+        // Extract BGRA data
+        let stride = bgra_frame.stride(0);
+        let data = bgra_frame.data(0);
 
         // Copy to contiguous buffer
-        let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+        let mut bgra_data = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height as usize {
             let row_start = y * stride;
             let row_end = row_start + (width as usize * 4);
-            rgba_data.extend_from_slice(&data[row_start..row_end]);
+            bgra_data.extend_from_slice(&data[row_start..row_end]);
         }
 
         Ok(DecodedFrame {
             width,
             height,
             format: PixelFormat::Bgra,
-            planes: vec![rgba_data],
+            planes: vec![bgra_data],
             line_sizes: vec![width as usize * 4],
         })
     }
@@ -930,8 +1029,8 @@ impl FfmpegDecoder {
 }
 
 impl H264Decoder for FfmpegDecoder {
-    fn decode_gfx_stream(&mut self, kind: AvcKind, gfx_payload: &[u8]) -> Result<DecodedFrame> {
-        trace!("Decoding {:?} stream, {} bytes", kind, gfx_payload.len());
+    fn decode_gfx_stream(&mut self, kind: AvcKind, gfx_payload: &[u8], region: Option<(u16, u16, u16, u16)>) -> Result<DecodedFrame> {
+        trace!("Decoding {:?} stream, {} bytes, region={:?}", kind, gfx_payload.len(), region);
 
         match kind {
             AvcKind::Avc420 => {
@@ -945,7 +1044,7 @@ impl H264Decoder for FfmpegDecoder {
                 let frame = self.decode_h264_stream(&h264_streams[0])?;
                 let luma = copy_luma(&frame)?;
                 let chroma_state = yuv420_to_chroma_state(&frame)?;
-                let decoded = self.convert_to_bgra(&frame)?;
+                let decoded = self.convert_to_bgra(&frame, region)?;
                 self.prev_luma = Some(luma);
                 self.prev_chroma = Some(chroma_state);
                 Ok(decoded)
@@ -970,7 +1069,7 @@ impl H264Decoder for FfmpegDecoder {
                         }
                         let luma = copy_luma(&frame1)?;
                         let chroma_state = yuv420_to_chroma_state(&frame1)?;
-                        let decoded = self.convert_to_bgra(&frame1)?;
+                        let decoded = self.convert_to_bgra(&frame1, region)?;
                         self.prev_luma = Some(luma);
                         self.prev_chroma = Some(chroma_state);
                         Ok(decoded)
@@ -980,7 +1079,7 @@ impl H264Decoder for FfmpegDecoder {
                         // This is a full frame update - save for future Progressive2 frames
                         let luma = copy_luma(&frame1)?;
                         let chroma_state = yuv420_to_chroma_state(&frame1)?;
-                        let decoded = self.convert_to_bgra(&frame1)?;
+                        let decoded = self.convert_to_bgra(&frame1, region)?;
                         self.prev_luma = Some(luma);
                         self.prev_chroma = Some(chroma_state);
                         Ok(decoded)
@@ -997,13 +1096,13 @@ impl H264Decoder for FfmpegDecoder {
                             );
                             apply_progressive2_chroma_to_yuv444(chroma_state, &frame1)?;
                             let yuv_frame = chroma_state_to_ffmpeg_frame(luma, chroma_state)?;
-                            let decoded = self.convert_to_bgra(&yuv_frame)?;
+                            let decoded = self.convert_to_bgra(&yuv_frame, region)?;
                             Ok(decoded)
                         } else {
                             debug!(
                                 "Progressive2 frame without cached base - falling back to direct decode"
                             );
-                            let decoded = self.convert_to_bgra(&frame1)?;
+                            let decoded = self.convert_to_bgra(&frame1, region)?;
                             Ok(decoded)
                         }
                     }
@@ -1039,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_decoder_creation() {
-        let result = FfmpegDecoder::new();
+        let result = FfmpegDecoder::new(false); // Test software decoding
         assert!(
             result.is_ok(),
             "Failed to create decoder: {:?}",

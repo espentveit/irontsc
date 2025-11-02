@@ -70,10 +70,10 @@ pub struct VideoRedirectionManager {
 }
 
 impl VideoRedirectionManager {
-    pub fn new(event_sender: Box<dyn RdpEventSender>) -> Result<Self> {
+    pub fn new(event_sender: Box<dyn RdpEventSender>, h264_hw_accel: bool) -> Result<Self> {
         #[cfg(feature = "video-redirection")]
         let h264_decoder = {
-            match FfmpegDecoder::new() {
+            match FfmpegDecoder::new(h264_hw_accel) {
                 Ok(decoder) => {
                     info!("✅ Video Redirection: H.264 decoder initialized");
                     Some(SendFfmpegDecoder(decoder))
@@ -384,7 +384,7 @@ impl VideoRedirectionManager {
         // Decode H.264 frame
         let frame = decoder
             .0
-            .decode_gfx_stream(AvcKind::Avc420, sample_data)
+            .decode_gfx_stream(AvcKind::Avc420, sample_data, None)
             .context("Failed to decode H.264 frame")?;
 
         debug!(

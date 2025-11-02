@@ -80,6 +80,30 @@ The configuration file stores:
 For best performance:
 1. **Always use release builds**: `cargo build --release` (3-10x faster than debug builds)
 
+## Debug Features
+
+### Codec Visualization
+
+Enable visual debugging of codec blocks with color-coded outlines:
+
+```bash
+RDP_DEBUG_CODEC_OUTLINES=1 ./target/release/irontsc
+```
+
+This will draw colored rectangles around decoded regions to identify which codec is being used:
+
+- **Pink**: ClearCodec compressed tiles
+- **Blue**: RFX Progressive codec tiles  
+- **Green**: H.264/AVC420 frames
+- **Yellow**: H.264/AVC444/AVC444v2 frames
+- **Orange**: Uncompressed (raw BGRA) data
+
+This feature is useful for:
+- Understanding codec usage patterns
+- Debugging graphics corruption issues
+- Analyzing performance characteristics
+- Verifying codec negotiation
+
 ## Technology Stack
 
 - **[IronRDP](https://github.com/Devolutions/IronRDP)**: Pure Rust RDP protocol implementation by Devolutions
