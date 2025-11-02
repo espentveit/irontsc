@@ -384,7 +384,7 @@ impl VideoRedirectionManager {
         // Decode H.264 frame
         let frame = decoder
             .0
-            .decode_gfx_stream(AvcKind::Avc420, sample_data)
+            .decode_gfx_stream(AvcKind::Avc420, sample_data, None)
             .context("Failed to decode H.264 frame")?;
 
         debug!(

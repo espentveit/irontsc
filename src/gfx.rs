@@ -372,18 +372,23 @@ impl GfxContext for GfxState {
             }
             #[cfg(feature = "h264")]
             codec::codec_id::AVC420 => {
-                debug!(
-                    "🎬 Decoding H.264/AVC420 frame ({} bytes)...",
-                    bitmap_data.len()
-                );
-                // Decode H.264/AVC420
+                use tracing::info;
+
+                // Decode H.264/AVC420 with region optimization
+                let region = Some((dest_rect.left, dest_rect.top, dest_rect.width(), dest_rect.height()));
                 let frame = self
                     .h264_decoder
                     .0
-                    .decode_gfx_stream(AvcKind::Avc420, bitmap_data)
+                    .decode_gfx_stream(AvcKind::Avc420, bitmap_data, region)
                     .context("Failed to decode AVC420 frame")?;
 
-                debug!("✅ H.264 decode complete, blitting to surface");
+                info!(
+                    "🎬 H.264 AVC420: frame={}x{}, dest_rect={}x{} at ({},{}), surface={}x{}",
+                    frame.width, frame.height,
+                    dest_rect.width(), dest_rect.height(),
+                    dest_rect.left, dest_rect.top,
+                    surface.width, surface.height
+                );
                 Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
                 
                 // Draw debug outline (green for AVC420)
@@ -400,15 +405,25 @@ impl GfxContext for GfxState {
             }
             #[cfg(feature = "h264")]
             codec::codec_id::AVC444 | codec::codec_id::AVC444V2 => {
-                // Decode H.264/AVC444
+                use tracing::info;
+
+                // Decode H.264/AVC444 with region optimization
                 let kind = if codec_id == codec::codec_id::AVC444 {
                     AvcKind::Avc444
                 } else {
                     AvcKind::Avc444v2
                 };
 
-                match self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data) {
+                let region = Some((dest_rect.left, dest_rect.top, dest_rect.width(), dest_rect.height()));
+                match self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data, region) {
                     Ok(frame) => {
+                        info!(
+                            "🎬 H.264 {:?}: frame={}x{}, dest_rect={}x{} at ({},{}), surface={}x{}",
+                            kind, frame.width, frame.height,
+                            dest_rect.width(), dest_rect.height(),
+                            dest_rect.left, dest_rect.top,
+                            surface.width, surface.height
+                        );
                         Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
                         
                         // Draw debug outline (yellow for AVC444/AVC444V2)
@@ -1063,34 +1078,74 @@ impl GfxState {
 
         // Blit to surface buffer
         let buffer = Arc::make_mut(&mut surface.buffer);
-        for y in 0..rect_height {
-            let src_offset = y * frame_stride;
-            let dst_y = dest_rect.top as usize + y;
-            let dst_x = dest_rect.left as usize;
-            let dst_offset = (dst_y * surface_width + dst_x) * 4;
+        
+        // Check if the frame is already the exact region (region-optimized decode)
+        // or if it's the full surface and we need to extract the region
+        let frame_is_region = frame_width_usize == rect_width 
+            && frame_height_usize == rect_height;
+        
+        let bytes_per_row = rect_width * 4;
+        
+        if frame_is_region {
+            // Frame is already the region we need - just copy it directly to dest_rect position
+            for y in 0..rect_height {
+                // Source: frame starts at (0,0) and is exactly rect_width x rect_height
+                let src_offset = y * frame_stride;
+                
+                // Destination: write to dest_rect position on surface
+                let dst_y = dest_rect.top as usize + y;
+                let dst_x = dest_rect.left as usize;
+                let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
-            // Fail on bounds violations instead of silently skipping
-            if dst_offset + rect_width * 4 > buffer.len() {
-                anyhow::bail!(
-                    "Blit destination out of bounds: line={}, offset={}, size={}, buffer={}",
-                    y,
-                    dst_offset,
-                    rect_width * 4,
-                    buffer.len()
-                );
-            }
-            if src_offset + rect_width * 4 > frame_data.len() {
-                anyhow::bail!(
-                    "Blit source out of bounds: line={}, offset={}, size={}, frame={}",
-                    y,
-                    src_offset,
-                    rect_width * 4,
-                    frame_data.len()
-                );
-            }
+                // Bounds check
+                if src_offset + bytes_per_row > frame_data.len() {
+                    anyhow::bail!(
+                        "Blit source out of bounds: y={}, frame={}x{}, stride={}, need {} bytes at offset {}, have {}",
+                        y, frame_width, frame_height, frame_stride, bytes_per_row, src_offset, frame_data.len()
+                    );
+                }
+                if dst_offset + bytes_per_row > buffer.len() {
+                    anyhow::bail!(
+                        "Blit dest out of bounds: y={}, dst at ({},{}), surface={}x{}, need {} bytes at offset {}, have {}",
+                        y, dst_x, dst_y, surface.width, surface.height, bytes_per_row, dst_offset, buffer.len()
+                    );
+                }
 
-            buffer[dst_offset..dst_offset + rect_width * 4]
-                .copy_from_slice(&frame_data[src_offset..src_offset + rect_width * 4]);
+                // Single memcpy per row
+                buffer[dst_offset..dst_offset + bytes_per_row]
+                    .copy_from_slice(&frame_data[src_offset..src_offset + bytes_per_row]);
+            }
+        } else {
+            // Frame is full-sized - extract the region from it
+            for y in 0..rect_height {
+                // Source: read from the region in the full decoded frame
+                let src_y = dest_rect.top as usize + y;
+                let src_x = dest_rect.left as usize;
+                let src_offset = (src_y * frame_width_usize + src_x) * 4;
+                
+                // Destination: write to dest_rect position on surface
+                let dst_y = dest_rect.top as usize + y;
+                let dst_x = dest_rect.left as usize;
+                let dst_offset = (dst_y * surface_width + dst_x) * 4;
+
+                // Bounds check
+                if src_offset + bytes_per_row > frame_data.len() {
+                    anyhow::bail!(
+                        "Blit source out of bounds: y={}, src at ({},{}), frame={}x{}, need {} bytes at offset {}, have {}",
+                        y, src_x, src_y, frame_width, frame_height, bytes_per_row, src_offset, frame_data.len()
+                    );
+                }
+                if dst_offset + bytes_per_row > buffer.len() {
+                    anyhow::bail!(
+                        "Blit dest out of bounds: y={}, dst at ({},{}), surface={}x{}, need {} bytes at offset {}, have {}",
+                        y, dst_x, dst_y, surface.width, surface.height, bytes_per_row, dst_offset, buffer.len()
+                    );
+                }
+
+                // Single memcpy per row
+                buffer[dst_offset..dst_offset + bytes_per_row]
+                    .copy_from_slice(&frame_data[src_offset..src_offset + bytes_per_row]);
+            }
         }
 
         Ok(())
