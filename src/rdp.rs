@@ -1295,12 +1295,12 @@ fn detect_multitransport_request(
     // causes false positives when random bytes match the security header pattern.
     if let Some(expected_channel) = message_channel_id {
         if channel_id != expected_channel {
-            warn!(
+            debug!(
                 channel_id,
                 expected_channel,
-                "Initiate Multitransport Request delivered on unexpected MCS channel \
-                 (required per MS-RDPBCGR §2.2.15.1). Accepting for compatibility."
+                "Ignoring apparent multitransport request on wrong MCS channel (binary data false positive)"
             );
+            return None;
         }
     }
 
@@ -1539,6 +1539,11 @@ async fn active_session<T: RdpEventSender + Clone>(
     let correlation_id = connection_result.correlation_id;
     let message_channel_id = connection_result.message_channel_id;
     let selected_protocol = connection_result.selected_protocol;
+    
+    // Extract multitransport information received during connection
+    let multitransport_request_id = connection_result.multitransport_request_id;
+    let multitransport_security_cookie = connection_result.multitransport_security_cookie;
+    let multitransport_protocol = connection_result.multitransport_protocol;
 
     let mut active_stage = ActiveStage::new(connection_result);
 
@@ -1565,6 +1570,70 @@ async fn active_session<T: RdpEventSender + Clone>(
 
     // Track active UDP transport tunnel (currently only one tunnel is supported)
     let mut udp_tunnel: Option<ActiveUdpTunnel> = None;
+
+    // **CRITICAL**: Automatically create UDP tunnel if multitransport was negotiated during connection
+    // Per MS-RDPEMT spec, the InitiateMultitransportRequest is sent during CapabilitiesExchange,
+    // and we responded with InitiateMultitransportResponse. Now we need to create the actual
+    // UDP tunnel and send the Tunnel Create Request PDU.
+    if let (Some(request_id), Some(security_cookie), Some(protocol)) = (
+        multitransport_request_id,
+        multitransport_security_cookie,
+        multitransport_protocol,
+    ) {
+        info!(
+            "🚀 Auto-starting UDP tunnel from stored multitransport info: request_id={}, protocol={:?}",
+            request_id, protocol
+        );
+        
+        // Create a synthetic MultitransportRequestInfo from the stored data
+        let protocol_bits = protocol.as_u16();
+        let requested_reliable = (protocol_bits & MultitransportProtocol::RELIABLE_BIT) != 0;
+        let requested_lossy = (protocol_bits & MultitransportProtocol::LOSSY_BIT) != 0;
+        let fallback_reliable = !requested_reliable && !requested_lossy;
+
+        if requested_lossy && !requested_reliable && !fallback_reliable {
+            warn!(
+                "Server requested UDP lossy transport only; declining because client only implements reliable mode"
+            );
+        } else {
+            // Create synthetic request info for start_udp_tunnel
+            let request_info = MultitransportRequestInfo {
+                request_id,
+                protocol,
+                security_cookie,
+                security_flags_hi: 0, // Not used for tunnel creation
+                initiator_id: 0, // Not used for tunnel creation
+                channel_id: 0, // Not used for tunnel creation
+            };
+
+            match start_udp_tunnel(
+                &destination,
+                correlation_id,
+                selected_protocol,
+                &request_info,
+            )
+            .await
+            {
+                Ok(handle) => {
+                    info!("✅ UDP transport auto-initialized successfully for request_id={}", request_id);
+                    udp_tunnel = Some(handle);
+                }
+                Err(err) => {
+                    error!(
+                        "❌ Failed to auto-initialize UDP transport for request_id={}: {}",
+                        request_id, err
+                    );
+                }
+            }
+        }
+    } else if multitransport_request_id.is_some() || multitransport_security_cookie.is_some() || multitransport_protocol.is_some() {
+        warn!(
+            "⚠️  Incomplete multitransport info stored (request_id={:?}, cookie={:?}, protocol={:?})",
+            multitransport_request_id.is_some(),
+            multitransport_security_cookie.is_some(),
+            multitransport_protocol.is_some()
+        );
+    }
 
     let disconnect_reason = 'outer: loop {
         let outputs = tokio::select! {

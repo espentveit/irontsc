@@ -26,6 +26,10 @@ pub struct ConnectionActivationSequence {
     pub state: ConnectionActivationState,
     config: Config,
     message_channel_id: Option<u16>,
+    /// Multitransport request information received during CapabilitiesExchange
+    pub multitransport_request_id: Option<u32>,
+    pub multitransport_security_cookie: Option<[u8; 16]>,
+    pub multitransport_protocol: Option<ironrdp_pdu::rdp::multitransport::MultitransportProtocol>,
 }
 
 impl ConnectionActivationSequence {
@@ -42,6 +46,9 @@ impl ConnectionActivationSequence {
             },
             config,
             message_channel_id,
+            multitransport_request_id: None,
+            multitransport_security_cookie: None,
+            multitransport_protocol: None,
         }
     }
 
@@ -138,6 +145,20 @@ impl Sequence for ConnectionActivationSequence {
                     debug!(
                         "Received InitiateMultitransportRequest: request_id={}, protocol={:?}",
                         multitransport_request.request_id,
+                        multitransport_request.requested_protocol
+                    );
+
+                    // **CRITICAL**: Store the multitransport information for later use
+                    // Per MS-RDPEMT spec, the client MUST use these exact values when creating
+                    // the Tunnel Create Request PDU over the UDP connection
+                    self.multitransport_request_id = Some(multitransport_request.request_id);
+                    self.multitransport_security_cookie = Some(multitransport_request.security_cookie);
+                    self.multitransport_protocol = Some(multitransport_request.requested_protocol);
+
+                    debug!(
+                        "💾 Stored multitransport info: request_id={}, cookie={:02x?}, protocol={:?}",
+                        multitransport_request.request_id,
+                        &multitransport_request.security_cookie[..8], // Show first 8 bytes
                         multitransport_request.requested_protocol
                     );
 
