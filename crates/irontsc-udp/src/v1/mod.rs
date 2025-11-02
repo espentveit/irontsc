@@ -573,7 +573,10 @@ pub struct Packet {
 impl Packet {
     fn validate(&self) -> Result<()> {
         self.header.validate()?;
-        if self.ack.is_some() != self.header.flags.contains(HeaderFlags::ACK) {
+        // ACK vector is only present when BOTH ACK and DATA flags are set
+        let should_have_ack = self.header.flags.contains(HeaderFlags::ACK) 
+            && self.header.flags.contains(HeaderFlags::DATA);
+        if self.ack.is_some() != should_have_ack {
             return Err(UdpError::InvalidField("ack.flag_mismatch"));
         }
         if self.ack_of_acks.is_some() != self.header.flags.contains(HeaderFlags::ACK_OF_ACKS) {
@@ -652,39 +655,55 @@ impl Packet {
     /// Parses a packet from raw bytes.
     pub fn decode(input: &[u8]) -> Result<Self> {
         let (header, mut rest) = RdpUdpFecHeader::decode_from(input)?;
-        let ack = if header.flags.contains(HeaderFlags::ACK) {
+        eprintln!("🔍 Packet decode: flags={:?}, rest_len={}", header.flags, rest.len());
+        
+        // Per MS-RDPEUDP, the ACK vector section is only present when ACK flag is set
+        // AND the packet is a DATA packet (not just SYN+ACK which has ACK flag but no vector)
+        let ack = if header.flags.contains(HeaderFlags::ACK) && header.flags.contains(HeaderFlags::DATA) {
+            eprintln!("   Parsing ACK vector...");
             let (ack, tail) = AckSection::decode(rest)?;
             rest = tail;
             Some(ack)
         } else {
+            eprintln!("   Skipping ACK vector (no DATA flag or no ACK flag)");
             None
         };
         let ack_of_acks = if header.flags.contains(HeaderFlags::ACK_OF_ACKS) {
+            eprintln!("   Parsing ACK_OF_ACKS...");
             let (aoa, tail) = AckOfAcks::decode_from(rest)?;
             rest = tail;
             Some(aoa)
         } else {
+            eprintln!("   Skipping ACK_OF_ACKS");
             None
         };
         let syn_data = if header.flags.contains(HeaderFlags::SYN) {
+            eprintln!("   Parsing SYN data (rest_len={})...", rest.len());
             let (syn, tail) = SynDataPayload::decode_from(rest)?;
+            eprintln!("   SYN data parsed: {:?}, tail_len={}", syn, tail.len());
             rest = tail;
             Some(syn)
         } else {
+            eprintln!("   Skipping SYN data");
             None
         };
         let correlation_id = if header.flags.contains(HeaderFlags::CORRELATION_ID) {
+            eprintln!("   Parsing CORRELATION_ID...");
             let (cid, tail) = CorrelationIdPayload::decode_from(rest)?;
             rest = tail;
             Some(cid)
         } else {
+            eprintln!("   Skipping CORRELATION_ID");
             None
         };
         let syn_data_ex = if header.flags.contains(HeaderFlags::SYN_EX) {
+            eprintln!("   Parsing SYN_EX (rest_len={})...", rest.len());
             let (syn_ex, tail) = SynDataExPayload::decode_from(rest)?;
+            eprintln!("   SYN_EX parsed successfully, tail_len={}", tail.len());
             rest = tail;
             Some(syn_ex)
         } else {
+            eprintln!("   Skipping SYN_EX");
             None
         };
         let (source_payload, fec_payload) = if header.flags.contains(HeaderFlags::DATA) {
@@ -700,7 +719,9 @@ impl Packet {
         } else {
             (None, None)
         };
-        if !rest.is_empty() {
+        // Per MS-RDPEUDP section 3.1.5.1.1: SYN datagrams (including SYN+ACK) are zero-padded
+        // to the MTU size, so we should allow trailing bytes for SYN packets
+        if !rest.is_empty() && !header.flags.contains(HeaderFlags::SYN) {
             return Err(UdpError::InvalidField("packet.trailing_bytes"));
         }
         let packet = Self {
