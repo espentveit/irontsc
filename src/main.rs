@@ -1282,7 +1282,7 @@ impl GtkRdpWidget {
         let texture = gtk::gdk::MemoryTexture::new(
             width as i32,
             height as i32,
-            gtk::gdk::MemoryFormat::R8g8b8x8,
+            gtk::gdk::MemoryFormat::B8g8r8a8, // Native BGRA format - no conversion needed!
             &bytes,
             stride,
         );
