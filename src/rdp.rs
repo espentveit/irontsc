@@ -1545,6 +1545,11 @@ async fn active_session<T: RdpEventSender + Clone>(
     let multitransport_security_cookie = connection_result.multitransport_security_cookie;
     let multitransport_protocol = connection_result.multitransport_protocol;
 
+    info!("🔍 Multitransport info: request_id={:?}, cookie={:?}, protocol={:?}", 
+        multitransport_request_id, 
+        multitransport_security_cookie.as_ref().map(|c| &c[..8]),
+        multitransport_protocol);
+
     let mut active_stage = ActiveStage::new(connection_result);
 
     // Set the event sender on GFX processor now that we have the real event loop proxy
