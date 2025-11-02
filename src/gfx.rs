@@ -53,14 +53,12 @@ struct GraphicsOutput {
 
 impl GraphicsOutput {
     fn new(width: u16, height: u16, monitors: &[MonitorDefinition]) -> Self {
-        let mut output = Self {
+        Self {
             width,
             height,
             buffer: Arc::new(vec![0; (width as usize) * (height as usize) * 4]),
             monitors: monitors.to_vec(),
-        };
-        output.clear();
-        output
+        }
     }
 
     fn resize(&mut self, width: u16, height: u16, monitors: &[MonitorDefinition]) {
@@ -70,11 +68,17 @@ impl GraphicsOutput {
         let len = (width as usize) * (height as usize) * 4;
         let buffer = Arc::make_mut(&mut self.buffer);
         buffer.resize(len, 0);
-        self.clear();
+        self.clear_fast();
     }
 
-    fn clear(&mut self) {
-        Arc::make_mut(&mut self.buffer).fill(0);
+    /// Fast clear using unsafe memset (much faster than fill(0) for large buffers)
+    #[inline]
+    fn clear_fast(&mut self) {
+        let buffer = Arc::make_mut(&mut self.buffer);
+        // SAFETY: ptr is valid, buffer is properly sized, and 0 is valid for u8
+        unsafe {
+            std::ptr::write_bytes(buffer.as_mut_ptr(), 0, buffer.len());
+        }
     }
 }
 
@@ -271,13 +275,38 @@ impl GfxContext for GfxState {
     fn on_end_frame(&mut self, frame_id: u32) -> Result<()> {
         trace!("GFX frame end frame_id={}", frame_id);
 
-        if let Some(output) = self.graphics_output.as_mut() {
-            if self.surface_output_mappings.is_empty() {
+        if self.graphics_output.is_some() {
+            let mapping_count = self.surface_output_mappings.len();
+
+            if mapping_count == 0 {
+                trace!("📊 Path: no mappings, sending surface 0");
                 if let Some(surface) = self.surfaces.get(&0) {
                     self.send_surface_to_ui(surface)?;
                 }
+            } else if mapping_count == 1 {
+                // Single surface case: ALWAYS send directly to GTK for GPU-accelerated rendering
+                // GTK handles ALL scaling, positioning, and composition on GPU - much faster than CPU
+                let mapping = &self.surface_output_mappings[0];
+                if let Some(surface) = self.surfaces.get(&mapping.surface_id) {
+                    debug!(
+                        "🚀 FAST PATH: sending surface {} directly to GTK ({}x{})",
+                        mapping.surface_id,
+                        surface.width,
+                        surface.height
+                    );
+                    self.send_surface_to_ui(surface)?;
+                    return Ok(());
+                }
             } else {
-                output.clear();
+                warn!("🐌 SLOW PATH: {} surfaces - CPU compositing", mapping_count);
+            }
+
+            // Multiple surfaces or partial updates: need CPU compositing
+            if mapping_count > 1 {
+                let output = self.graphics_output.as_mut().unwrap();
+
+                // Fast clear - RDP may only update dirty regions, so we need to clear stale pixels
+                output.clear_fast();
 
                 for mapping in &self.surface_output_mappings {
                     match self.surfaces.get(&mapping.surface_id) {
@@ -292,12 +321,10 @@ impl GfxContext for GfxState {
                         }
                     }
                 }
-            }
 
-            if !self.surface_output_mappings.is_empty() {
-                if let Some(output) = self.graphics_output.as_ref() {
-                    self.send_graphics_output_to_ui(output)?;
-                }
+                // Drop the mutable borrow before calling send
+                let output = self.graphics_output.as_ref().unwrap();
+                self.send_graphics_output_to_ui(output)?;
             }
 
             return Ok(());
@@ -560,37 +587,12 @@ impl GfxContext for GfxState {
             }
         }
 
-        // Send update to UI if we have surface mappings and graphics output
-        // This handles cases where END_FRAME might not be sent immediately
-        if self.graphics_output.is_some() && !self.surface_output_mappings.is_empty() {
-            // Check if this surface is mapped to output
-            if self
-                .surface_output_mappings
-                .iter()
-                .any(|m| m.surface_id == surface_id)
-            {
-                debug!(
-                    "📺 Updating graphics output with decoded surface {}",
-                    surface_id
-                );
-                let output = self.graphics_output.as_mut().unwrap();
-                output.clear();
-                for mapping in &self.surface_output_mappings {
-                    if let Some(surf) = self.surfaces.get(&mapping.surface_id) {
-                        Self::blit_surface_to_output(output, surf, mapping)?;
-                    }
-                }
-                // Send output to UI after blitting is complete
-                let output_ref = self.graphics_output.as_ref().unwrap();
-                self.send_graphics_output_to_ui(output_ref)?;
-            }
-        } else {
-            // Fallback: send surface directly if no graphics output composition
-            debug!("📺 Sending surface {} directly to UI", surface_id);
-            if let Some(surf) = self.surfaces.get(&surface_id) {
-                self.send_surface_to_ui(surf)?;
-            }
-        }
+        // Don't send updates immediately - batch them until EndFrame
+        // This prevents visible tearing from tile-by-tile updates
+        trace!(
+            "📝 Decoded surface {} - waiting for EndFrame to send",
+            surface_id
+        );
 
         Ok(())
     }
