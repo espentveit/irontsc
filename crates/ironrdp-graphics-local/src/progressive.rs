@@ -909,8 +909,13 @@ impl<'a> TileDecoder<'a> {
             }
         }
 
-        // Clone only the used portion of the buffer
-        let pixels = pixel_buffer[..pixel_count].to_vec();
+        // Take ownership of the buffer and truncate to actual size
+        // This avoids an extra allocation compared to to_vec()
+        pixel_buffer.truncate(pixel_count);
+        let mut pixels = std::mem::take(pixel_buffer);
+        
+        // Restore buffer capacity for next use
+        *pixel_buffer = Vec::with_capacity(TILE_PIXELS * 4);
 
         tiles.push(TileUpdate {
             coordinate: coord,
