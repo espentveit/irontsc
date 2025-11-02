@@ -387,7 +387,15 @@ impl SynDataExPayload {
             return Err(UdpError::InvalidField("syn_ex.udp_version"));
         }
         if let Some(version) = self.udp_version {
-            if version.contains(UdpVersionFlags::VERSION_3) && self.cookie_hash.is_none() {
+            let bits = version.bits();
+            let requires_cookie = bits == UdpVersionFlags::VERSION_3.bits();
+            let is_known = bits == UdpVersionFlags::VERSION_1.bits()
+                || bits == UdpVersionFlags::VERSION_2.bits()
+                || bits == UdpVersionFlags::VERSION_3.bits();
+            if !is_known {
+                return Err(UdpError::InvalidField("syn_ex.udp_version_value"));
+            }
+            if requires_cookie && self.cookie_hash.is_none() {
                 return Err(UdpError::InvalidField("syn_ex.cookie_hash"));
             }
         }
@@ -611,11 +619,11 @@ impl Packet {
         if let Some(ack_of_acks) = self.ack_of_acks {
             ack_of_acks.encode_into(&mut out);
         }
-        if let Some(correlation_id) = &self.correlation_id {
-            correlation_id.encode_into(&mut out);
-        }
         if let Some(syn_data) = &self.syn_data {
             syn_data.encode_into(&mut out);
+        }
+        if let Some(correlation_id) = &self.correlation_id {
+            correlation_id.encode_into(&mut out);
         }
         if let Some(syn_data_ex) = &self.syn_data_ex {
             syn_data_ex.encode_into(&mut out);
@@ -646,17 +654,17 @@ impl Packet {
         } else {
             None
         };
-        let correlation_id = if header.flags.contains(HeaderFlags::CORRELATION_ID) {
-            let (cid, tail) = CorrelationIdPayload::decode_from(rest)?;
-            rest = tail;
-            Some(cid)
-        } else {
-            None
-        };
         let syn_data = if header.flags.contains(HeaderFlags::SYN) {
             let (syn, tail) = SynDataPayload::decode_from(rest)?;
             rest = tail;
             Some(syn)
+        } else {
+            None
+        };
+        let correlation_id = if header.flags.contains(HeaderFlags::CORRELATION_ID) {
+            let (cid, tail) = CorrelationIdPayload::decode_from(rest)?;
+            rest = tail;
+            Some(cid)
         } else {
             None
         };
@@ -702,6 +710,7 @@ impl Packet {
 mod tests {
     use super::fec::{encode_block, recover_single, SourceBlock};
     use super::*;
+    use crate::rdpudp_v1_packet;
 
     #[test]
     fn syn_packet_round_trip() {
@@ -738,18 +747,13 @@ mod tests {
             },
             data: b"payload-data".to_vec(),
         };
-        let packet = Packet {
-            header,
+        let packet = rdpudp_v1_packet!(
+            header: header,
             ack: Some(AckSection {
                 ack_vector: ack_vector.clone(),
             }),
-            ack_of_acks: None,
-            correlation_id: None,
-            syn_data: None,
-            syn_data_ex: None,
-            source_payload: Some(source_payload.clone()),
-            fec_payload: None,
-        };
+            source_payload: Some(source_payload.clone())
+        );
         let encoded = packet.encode().expect("encode");
         let decoded = Packet::decode(&encoded).expect("decode");
         assert_eq!(

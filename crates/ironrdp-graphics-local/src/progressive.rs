@@ -672,11 +672,7 @@ impl<'a> TileDecoder<'a> {
         Ok(())
     }
 
-    fn process_component_coefficients(
-        buffer: &mut [i16],
-        quant: &QuantLevels,
-        extrapolate: bool,
-    ) {
+    fn process_component_coefficients(buffer: &mut [i16], quant: &QuantLevels, extrapolate: bool) {
         if !extrapolate {
             Self::apply_subband_diff_standard(buffer);
         } else {
@@ -797,7 +793,7 @@ impl<'a> TileDecoder<'a> {
     ) -> Result<()> {
         let base_quant = self.resolve_base_quant(region, quant_idx)?;
         let previous_bitpos = tile_state.bit_pos[component];
-        
+
         // **THE FIX**: The logic for calculating the state and deltas is now correct
         // in the context of an un-shifted persistent state.
         let new_bitpos = base_quant.add(prog_quant);
@@ -1216,7 +1212,7 @@ fn progressive_idwt_x(
 
         let mut h0 = high_band.get(high_idx).copied().unwrap_or_default();
         high_idx += 1;
-        
+
         // **THE FIX IS HERE**: `l0` is now `mut` and is updated inside the loop.
         let mut l0 = low_band.get(low_idx).copied().unwrap_or_default();
         low_idx += 1;
@@ -1227,7 +1223,7 @@ fn progressive_idwt_x(
         for _ in 0..high_count.saturating_sub(1) {
             let h1 = high_band.get(high_idx).copied().unwrap_or_default();
             high_idx += 1;
-            
+
             l0 = low_band.get(low_idx).copied().unwrap_or_default();
             low_idx += 1;
 
@@ -1262,13 +1258,12 @@ fn progressive_idwt_x(
             let l0_first = low_band.get(low_idx).copied().unwrap_or_default();
             low_idx += 1;
             let x_next = clamp_i16(i32::from(l0_first) - (i32::from(h0) / 2));
-            
+
             let l0_second = low_band.get(low_idx).copied().unwrap_or_default();
-            
+
             if let Some(slice) = dst_band.get_mut(dst_idx..dst_idx + 4) {
                 slice[0] = x2;
-                slice[1] =
-                    clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
+                slice[1] = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
                 slice[2] = x_next;
                 slice[3] = clamp_i16((i32::from(x_next) + i32::from(l0_second)) / 2);
             }
@@ -1297,59 +1292,81 @@ fn progressive_idwt_y(
 
         let mut l0 = low_band.get(low_idx).copied().unwrap_or_default();
         low_idx += low_step;
-        
+
         let mut x0 = clamp_i16(i32::from(l0) - i32::from(h0));
         let mut x2 = x0;
 
         for _ in 0..high_count.saturating_sub(1) {
             let h1 = high_band.get(high_idx).copied().unwrap_or_default();
             high_idx += high_step;
-            
+
             l0 = low_band.get(low_idx).copied().unwrap_or_default();
             low_idx += low_step;
 
             x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
             let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-            
-            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x0; }
+
+            if let Some(val) = dst_band.get_mut(dst_idx) {
+                *val = x0;
+            }
             dst_idx += dst_step;
-            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x1; }
+            if let Some(val) = dst_band.get_mut(dst_idx) {
+                *val = x1;
+            }
             dst_idx += dst_step;
-            
+
             x0 = x2;
             h0 = h1;
         }
 
         if low_count <= high_count + 1 {
             if low_count <= high_count {
-                if let Some(val) = dst_band.get_mut(dst_idx) { *val = x2; }
+                if let Some(val) = dst_band.get_mut(dst_idx) {
+                    *val = x2;
+                }
                 dst_idx += dst_step;
-                if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16(i32::from(x2) + 2 * i32::from(h0)); }
+                if let Some(val) = dst_band.get_mut(dst_idx) {
+                    *val = clamp_i16(i32::from(x2) + 2 * i32::from(h0));
+                }
             } else {
                 // Here we use the final `l0` value updated from the loop.
                 l0 = low_band.get(low_idx).copied().unwrap_or_default();
                 let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
 
-                if let Some(val) = dst_band.get_mut(dst_idx) { *val = x2; }
+                if let Some(val) = dst_band.get_mut(dst_idx) {
+                    *val = x2;
+                }
                 dst_idx += dst_step;
-                if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0)); }
+                if let Some(val) = dst_band.get_mut(dst_idx) {
+                    *val = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
+                }
                 dst_idx += dst_step;
-                if let Some(val) = dst_band.get_mut(dst_idx) { *val = x_next; }
+                if let Some(val) = dst_band.get_mut(dst_idx) {
+                    *val = x_next;
+                }
             }
         } else {
             let l0_first = low_band.get(low_idx).copied().unwrap_or_default();
             low_idx += low_step;
             let x_next = clamp_i16(i32::from(l0_first) - (i32::from(h0) / 2));
-            
-            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x2; }
+
+            if let Some(val) = dst_band.get_mut(dst_idx) {
+                *val = x2;
+            }
             dst_idx += dst_step;
-            if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0)); }
+            if let Some(val) = dst_band.get_mut(dst_idx) {
+                *val = clamp_i16(((i32::from(x_next) + i32::from(x2)) / 2) + 2 * i32::from(h0));
+            }
             dst_idx += dst_step;
-            if let Some(val) = dst_band.get_mut(dst_idx) { *val = x_next; }
+            if let Some(val) = dst_band.get_mut(dst_idx) {
+                *val = x_next;
+            }
             dst_idx += dst_step;
 
             let l0_second = low_band.get(low_idx).copied().unwrap_or_default();
-            if let Some(val) = dst_band.get_mut(dst_idx) { *val = clamp_i16((i32::from(x_next) + i32::from(l0_second)) / 2); }
+            if let Some(val) = dst_band.get_mut(dst_idx) {
+                *val = clamp_i16((i32::from(x_next) + i32::from(l0_second)) / 2);
+            }
         }
     }
 }
@@ -1384,7 +1401,9 @@ fn progressive_dwt_decode_block(
     }
 
     // Use provided scratch buffers instead of allocating
-    let ll_actual_len = ll_len.min(buffer.len() - (hl_len + lh_len + hh_len)).min(ll_scratch.len());
+    let ll_actual_len = ll_len
+        .min(buffer.len() - (hl_len + lh_len + hh_len))
+        .min(ll_scratch.len());
 
     let hl_copy = &mut hl_scratch[..hl_len];
     let lh_copy = &mut lh_scratch[..lh_len];
@@ -1425,9 +1444,33 @@ fn dwt_extrapolate_decode(
         return;
     }
 
-    progressive_dwt_decode_block(&mut buffer[3807..], temp, 3, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
-    progressive_dwt_decode_block(&mut buffer[3007..], temp, 2, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
-    progressive_dwt_decode_block(&mut buffer[0..], temp, 1, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
+    progressive_dwt_decode_block(
+        &mut buffer[3807..],
+        temp,
+        3,
+        hl_scratch,
+        lh_scratch,
+        hh_scratch,
+        ll_scratch,
+    );
+    progressive_dwt_decode_block(
+        &mut buffer[3007..],
+        temp,
+        2,
+        hl_scratch,
+        lh_scratch,
+        hh_scratch,
+        ll_scratch,
+    );
+    progressive_dwt_decode_block(
+        &mut buffer[0..],
+        temp,
+        1,
+        hl_scratch,
+        lh_scratch,
+        hh_scratch,
+        ll_scratch,
+    );
 }
 
 struct BitStream<'a> {
@@ -1694,13 +1737,13 @@ fn progressive_upgrade_decode(
         if band_num_bits <= 0 {
             continue;
         }
-        
+
         state.non_ll = meta.band != Band::Ll3;
         let start = meta.offset;
         let end = start + meta.len;
 
         if end > coefficients.len() || end > sign.len() {
-             return Err(ProgressiveError::Invalid(format!(
+            return Err(ProgressiveError::Invalid(format!(
                 "Subband slice [{start}..{end}] is out of bounds for coefficient/sign buffers"
             )));
         }

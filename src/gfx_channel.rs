@@ -168,7 +168,7 @@ impl DvcProcessor for GfxDvcProcessor {
     }
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
-        use tracing::{debug, info};
+        use tracing::{debug, info, warn};
 
         // If UDP is active, ignore TCP GFX data
         if self.udp_active {
@@ -217,10 +217,24 @@ impl DvcProcessor for GfxDvcProcessor {
         }
 
         // Process PDUs
-        self.client.process_pdu_stream(&decompressed).map_err(|e| {
-            info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
-            ironrdp_pdu::pdu_other_err!("GFX PDU processing failed")
-        })?;
+        if let Err(err) = self.client.process_pdu_stream(&decompressed) {
+            use tracing::warn;
+
+            let raw_preview = &payload[..payload.len().min(32)];
+            let decompressed_preview = &decompressed[..decompressed.len().min(32)];
+
+            warn!(
+                "❌ RDPEGFX: PDU processing failed: {:?} (raw_len={}, raw_first={:02X?}, \
+                 decompressed_len={}, decompressed_first={:02X?})",
+                err,
+                payload.len(),
+                raw_preview,
+                decompressed.len(),
+                decompressed_preview
+            );
+
+            return Err(ironrdp_pdu::pdu_other_err!("GFX PDU processing failed"));
+        }
 
         // Get any outgoing messages (acknowledgements, etc.)
         let messages = self.client.ctx.take_outgoing_messages();

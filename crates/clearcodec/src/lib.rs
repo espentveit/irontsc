@@ -441,11 +441,11 @@ impl ClearCodec {
                     let vbar_index = (vbar_header & 0x3FFF) as usize;
                     let vbar_y_on = read_u8(cursor)? as u32;
                     suboffset += 1;
-                    
+
                     let short_entry = &self.short_vbar_storage[vbar_index];
                     let short_pixel_count = short_entry.count;
                     let vbar_y_off = vbar_y_on + short_pixel_count;
-                    
+
                     // Build full vbar in vbar_storage
                     let full_entry = &mut self.vbar_storage[self.vbar_cursor];
                     full_entry.resize(vbar_height)?;
@@ -463,8 +463,9 @@ impl ClearCodec {
                     for y in 0..short_pixel_count {
                         let src_offset = (y * 4) as usize;
                         let dst_offset = ((vbar_y_on + y) * 4) as usize;
-                        if src_offset + 4 <= short_entry.pixels.len() 
-                            && dst_offset + 4 <= full_entry.pixels.len() {
+                        if src_offset + 4 <= short_entry.pixels.len()
+                            && dst_offset + 4 <= full_entry.pixels.len()
+                        {
                             full_entry.pixels[dst_offset..dst_offset + 4]
                                 .copy_from_slice(&short_entry.pixels[src_offset..src_offset + 4]);
                         }

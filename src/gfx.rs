@@ -290,9 +290,7 @@ impl GfxContext for GfxState {
                 if let Some(surface) = self.surfaces.get(&mapping.surface_id) {
                     debug!(
                         "🚀 FAST PATH: sending surface {} directly to GTK ({}x{})",
-                        mapping.surface_id,
-                        surface.width,
-                        surface.height
+                        mapping.surface_id, surface.width, surface.height
                     );
                     self.send_surface_to_ui(surface)?;
                     return Ok(());
@@ -384,7 +382,7 @@ impl GfxContext for GfxState {
 
                 debug!("✅ ClearCodec decode complete, blitting to surface");
                 Self::blit_raw_to_surface(surface, &dest_rect, &decoded_buffer)?;
-                
+
                 // Draw debug outline (pink for ClearCodec)
                 Self::draw_debug_outline(
                     surface,
@@ -402,7 +400,12 @@ impl GfxContext for GfxState {
                 use tracing::info;
 
                 // Decode H.264/AVC420 with region optimization
-                let region = Some((dest_rect.left, dest_rect.top, dest_rect.width(), dest_rect.height()));
+                let region = Some((
+                    dest_rect.left,
+                    dest_rect.top,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                ));
                 let frame = self
                     .h264_decoder
                     .0
@@ -411,13 +414,17 @@ impl GfxContext for GfxState {
 
                 info!(
                     "🎬 H.264 AVC420: frame={}x{}, dest_rect={}x{} at ({},{}), surface={}x{}",
-                    frame.width, frame.height,
-                    dest_rect.width(), dest_rect.height(),
-                    dest_rect.left, dest_rect.top,
-                    surface.width, surface.height
+                    frame.width,
+                    frame.height,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                    dest_rect.left,
+                    dest_rect.top,
+                    surface.width,
+                    surface.height
                 );
                 Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
-                
+
                 // Draw debug outline (green for AVC420)
                 Self::draw_debug_outline(
                     surface,
@@ -441,18 +448,32 @@ impl GfxContext for GfxState {
                     AvcKind::Avc444v2
                 };
 
-                let region = Some((dest_rect.left, dest_rect.top, dest_rect.width(), dest_rect.height()));
-                match self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data, region) {
+                let region = Some((
+                    dest_rect.left,
+                    dest_rect.top,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                ));
+                match self
+                    .h264_decoder
+                    .0
+                    .decode_gfx_stream(kind, bitmap_data, region)
+                {
                     Ok(frame) => {
                         info!(
                             "🎬 H.264 {:?}: frame={}x{}, dest_rect={}x{} at ({},{}), surface={}x{}",
-                            kind, frame.width, frame.height,
-                            dest_rect.width(), dest_rect.height(),
-                            dest_rect.left, dest_rect.top,
-                            surface.width, surface.height
+                            kind,
+                            frame.width,
+                            frame.height,
+                            dest_rect.width(),
+                            dest_rect.height(),
+                            dest_rect.left,
+                            dest_rect.top,
+                            surface.width,
+                            surface.height
                         );
                         Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
-                        
+
                         // Draw debug outline (yellow for AVC444/AVC444V2)
                         Self::draw_debug_outline(
                             surface,
@@ -486,7 +507,7 @@ impl GfxContext for GfxState {
             codec::codec_id::UNCOMPRESSED => {
                 // Raw BGRA bitmap
                 Self::blit_raw_to_surface(surface, &dest_rect, bitmap_data)?;
-                
+
                 // Draw debug outline (orange for uncompressed)
                 Self::draw_debug_outline(
                     surface,
@@ -527,7 +548,7 @@ impl GfxContext for GfxState {
                         for tile in &update.tiles {
                             Self::blit_tile_to_surface(surface, tile)
                                 .context("Failed to blit progressive tile")?;
-                            
+
                             // Draw debug outline (blue for Progressive)
                             let tile_rect = Rectangle {
                                 left: tile.rect.x,
@@ -1080,20 +1101,19 @@ impl GfxState {
 
         // Blit to surface buffer
         let buffer = Arc::make_mut(&mut surface.buffer);
-        
+
         // Check if the frame is already the exact region (region-optimized decode)
         // or if it's the full surface and we need to extract the region
-        let frame_is_region = frame_width_usize == rect_width 
-            && frame_height_usize == rect_height;
-        
+        let frame_is_region = frame_width_usize == rect_width && frame_height_usize == rect_height;
+
         let bytes_per_row = rect_width * 4;
-        
+
         if frame_is_region {
             // Frame is already the region we need - just copy it directly to dest_rect position
             for y in 0..rect_height {
                 // Source: frame starts at (0,0) and is exactly rect_width x rect_height
                 let src_offset = y * frame_stride;
-                
+
                 // Destination: write to dest_rect position on surface
                 let dst_y = dest_rect.top as usize + y;
                 let dst_x = dest_rect.left as usize;
@@ -1103,13 +1123,26 @@ impl GfxState {
                 if src_offset + bytes_per_row > frame_data.len() {
                     anyhow::bail!(
                         "Blit source out of bounds: y={}, frame={}x{}, stride={}, need {} bytes at offset {}, have {}",
-                        y, frame_width, frame_height, frame_stride, bytes_per_row, src_offset, frame_data.len()
+                        y,
+                        frame_width,
+                        frame_height,
+                        frame_stride,
+                        bytes_per_row,
+                        src_offset,
+                        frame_data.len()
                     );
                 }
                 if dst_offset + bytes_per_row > buffer.len() {
                     anyhow::bail!(
                         "Blit dest out of bounds: y={}, dst at ({},{}), surface={}x{}, need {} bytes at offset {}, have {}",
-                        y, dst_x, dst_y, surface.width, surface.height, bytes_per_row, dst_offset, buffer.len()
+                        y,
+                        dst_x,
+                        dst_y,
+                        surface.width,
+                        surface.height,
+                        bytes_per_row,
+                        dst_offset,
+                        buffer.len()
                     );
                 }
 
@@ -1124,7 +1157,7 @@ impl GfxState {
                 let src_y = dest_rect.top as usize + y;
                 let src_x = dest_rect.left as usize;
                 let src_offset = (src_y * frame_width_usize + src_x) * 4;
-                
+
                 // Destination: write to dest_rect position on surface
                 let dst_y = dest_rect.top as usize + y;
                 let dst_x = dest_rect.left as usize;
@@ -1134,13 +1167,27 @@ impl GfxState {
                 if src_offset + bytes_per_row > frame_data.len() {
                     anyhow::bail!(
                         "Blit source out of bounds: y={}, src at ({},{}), frame={}x{}, need {} bytes at offset {}, have {}",
-                        y, src_x, src_y, frame_width, frame_height, bytes_per_row, src_offset, frame_data.len()
+                        y,
+                        src_x,
+                        src_y,
+                        frame_width,
+                        frame_height,
+                        bytes_per_row,
+                        src_offset,
+                        frame_data.len()
                     );
                 }
                 if dst_offset + bytes_per_row > buffer.len() {
                     anyhow::bail!(
                         "Blit dest out of bounds: y={}, dst at ({},{}), surface={}x{}, need {} bytes at offset {}, have {}",
-                        y, dst_x, dst_y, surface.width, surface.height, bytes_per_row, dst_offset, buffer.len()
+                        y,
+                        dst_x,
+                        dst_y,
+                        surface.width,
+                        surface.height,
+                        bytes_per_row,
+                        dst_offset,
+                        buffer.len()
                     );
                 }
 
@@ -1292,7 +1339,7 @@ impl GfxState {
         let rect_width = rect.width() as usize;
         let rect_height = rect.height() as usize;
         let surface_width = surface.width as usize;
-        
+
         if rect_width == 0 || rect_height == 0 {
             return Ok(());
         }
@@ -1305,14 +1352,14 @@ impl GfxState {
         // Draw top and bottom horizontal lines
         for x in 0..rect_width {
             let dst_x = rect.left as usize + x;
-            
+
             // Top line
             let top_y = rect.top as usize;
             let top_offset = (top_y * surface_width + dst_x) * 4;
             if top_offset + 4 <= buffer.len() {
                 buffer[top_offset..top_offset + 4].copy_from_slice(&pixel);
             }
-            
+
             // Bottom line
             if rect_height > 1 {
                 let bottom_y = rect.top as usize + rect_height - 1;
@@ -1326,14 +1373,14 @@ impl GfxState {
         // Draw left and right vertical lines
         for y in 0..rect_height {
             let dst_y = rect.top as usize + y;
-            
+
             // Left line
             let left_x = rect.left as usize;
             let left_offset = (dst_y * surface_width + left_x) * 4;
             if left_offset + 4 <= buffer.len() {
                 buffer[left_offset..left_offset + 4].copy_from_slice(&pixel);
             }
-            
+
             // Right line
             if rect_width > 1 {
                 let right_x = rect.left as usize + rect_width - 1;
