@@ -2,16 +2,22 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::error::{Result, UdpError};
+use crate::rdpudp_v1_packet;
+use crate::rdpudp_v1_packet_bytes;
+use crate::rdpudp_v1_syn_ex;
+use crate::rdpudp_v1_syn_packet_bytes;
+use crate::rdpudp_v2_flags;
+use crate::rdpudp_v2_packet;
+use crate::rdpudp_v2_packet_bytes;
 use crate::v1::fec::{self, SourceBlock as FecSourceBlock};
 use crate::v1::{
     AckSection, AckVector, AckVectorElement, CorrelationIdPayload, FecPayload, FecPayloadHeader,
     HeaderFlags as V1HeaderFlags, Packet as V1Packet, RdpUdpFecHeader, SourcePayload,
-    SourcePayloadHeader, SynDataExPayload, SynDataPayload, TransportMode, UdpVersionFlags,
-    VectorElementState,
+    SourcePayloadHeader, SynDataPayload, TransportMode, UdpVersionFlags, VectorElementState,
 };
 use crate::v2::{
     AckPayload as V2AckPayload, DataBodyPayload, DataHeaderPayload, HeaderFlags as V2HeaderFlags,
-    Packet as V2Packet, PacketHeader as V2PacketHeader, PacketPrefixByte,
+    Packet as V2Packet, PacketHeader as V2PacketHeader,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,14 +65,11 @@ impl UdpProtocolVersion {
     }
 
     fn to_version_flags(self) -> UdpVersionFlags {
-        let mut flags = UdpVersionFlags::VERSION_1;
-        if self >= Self::V2 {
-            flags |= UdpVersionFlags::VERSION_2;
+        match self {
+            Self::V1 => UdpVersionFlags::VERSION_1,
+            Self::V2 => UdpVersionFlags::VERSION_2,
+            Self::V3 => UdpVersionFlags::VERSION_3,
         }
-        if self >= Self::V3 {
-            flags |= UdpVersionFlags::VERSION_3;
-        }
-        flags
     }
 
     fn to_synex_version(self) -> UdpVersionFlags {
@@ -233,41 +236,32 @@ impl UdpConnection {
             downstream_mtu: self.config.mtu,
         };
 
-        let mut packet = V1Packet::default();
-        packet.header = RdpUdpFecHeader::syn(
-            self.config.receive_window_size,
-            self.config.mode == TransportMode::Lossy,
-        );
-        packet.syn_data = Some(syn_data);
-
-        if let Some(correlation) = self.correlation_id {
-            packet.correlation_id = Some(correlation.payload());
-            packet.header.flags |= V1HeaderFlags::CORRELATION_ID;
-        }
-
-        if self.negotiated_version != UdpProtocolVersion::V1 {
-            let mut syn_ex = SynDataExPayload {
-                flags: crate::v1::SynExFlags::VERSION_INFO_VALID,
-                udp_version: Some(self.negotiated_version.to_synex_version()),
-                cookie_hash: None,
-            };
-            if self.negotiated_version == UdpProtocolVersion::V3 {
-                if let Some(cookie) = self.cookie_hash {
-                    syn_ex.cookie_hash = Some(cookie);
+        let correlation_payload = self.correlation_id.map(|id| id.payload());
+        let syn_data_ex_payload = if self.negotiated_version != UdpProtocolVersion::V1 {
+            let version_flags = self.negotiated_version.to_synex_version();
+            let syn_ex = if self.negotiated_version == UdpProtocolVersion::V3 {
+                match self.cookie_hash {
+                    Some(cookie) => rdpudp_v1_syn_ex!(udp_version = version_flags, cookie_hash = cookie),
+                    None => rdpudp_v1_syn_ex!(udp_version = version_flags),
                 }
-            }
-            packet.syn_data_ex = Some(syn_ex);
-            packet.header.flags |= V1HeaderFlags::SYN_EX;
-        }
-
-        packet.header.flags |= if self.config.mode == TransportMode::Lossy {
-            V1HeaderFlags::SYN_LOSSY
+            } else {
+                rdpudp_v1_syn_ex!(udp_version = version_flags)
+            };
+            Some(syn_ex)
         } else {
-            V1HeaderFlags::empty()
+            None
         };
 
+        let syn_bytes = rdpudp_v1_syn_packet_bytes!(
+            self.config.receive_window_size,
+            self.config.mode == TransportMode::Lossy,
+            syn_data,
+            correlation = correlation_payload,
+            syn_ex = syn_data_ex_payload
+        )?;
+
         self.state = ConnectionState::SynSent;
-        packet.encode()
+        Ok(syn_bytes)
     }
 
     pub fn process_syn_ack(&mut self, bytes: &[u8]) -> Result<()> {
@@ -301,24 +295,38 @@ impl UdpConnection {
         }
 
         if let Some(syn_ex) = packet.syn_data_ex {
-            if let Some(remote_versions) = syn_ex.udp_version {
-                if remote_versions.contains(UdpVersionFlags::VERSION_3)
-                    && self.negotiated_version == UdpProtocolVersion::V3
-                    && syn_ex.cookie_hash.is_none()
-                {
-                    // Remote downgraded us
-                    self.negotiated_version = UdpProtocolVersion::V2;
-                } else if remote_versions.contains(UdpVersionFlags::VERSION_2)
-                    && self.negotiated_version == UdpProtocolVersion::V3
-                    && !remote_versions.contains(UdpVersionFlags::VERSION_3)
-                {
-                    self.negotiated_version = UdpProtocolVersion::V2;
-                } else if !remote_versions.contains(UdpVersionFlags::VERSION_2) {
-                    self.negotiated_version = UdpProtocolVersion::V1;
+            if let Some(remote_flags) = syn_ex.udp_version {
+                let remote_version = udp_version_from_flags(remote_flags);
+                match remote_version {
+                    Some(UdpProtocolVersion::V3) => {
+                        if self.negotiated_version == UdpProtocolVersion::V3
+                            && syn_ex.cookie_hash.is_none()
+                        {
+                            self.negotiated_version = UdpProtocolVersion::V2;
+                        } else {
+                            self.negotiated_version =
+                                self.negotiated_version.min(UdpProtocolVersion::V3);
+                        }
+                    }
+                    Some(UdpProtocolVersion::V2) => {
+                        self.negotiated_version =
+                            self.negotiated_version.min(UdpProtocolVersion::V2);
+                    }
+                    Some(UdpProtocolVersion::V1) => {
+                        self.negotiated_version = UdpProtocolVersion::V1;
+                    }
+                    None => {
+                        // Unknown value: fall back to the most compatible mode.
+                        self.negotiated_version = UdpProtocolVersion::V1;
+                    }
                 }
+            } else {
+                // Version not advertised, assume V1.
+                self.negotiated_version = UdpProtocolVersion::V1;
             }
         }
 
+        self.config.protocol_version = self.negotiated_version;
         self.config.retransmit_timeout_ms = self.negotiated_version.min_retransmit_timeout_ms();
         self.state = ConnectionState::Connected;
         self.last_activity = Instant::now();
@@ -437,17 +445,20 @@ impl UdpConnection {
             data: encoded.payload,
         };
 
-        let mut packet = V1Packet::default();
-        packet.header = self.base_header(V1HeaderFlags::DATA | V1HeaderFlags::FEC);
-        packet.fec_payload = Some(fec_payload);
+        let ack_section = if let Some(PendingAck::V1 { run_length }) = self.pending_ack.take() {
+            Some(self.build_ack_section(run_length)?)
+        } else {
+            None
+        };
 
-        if let Some(PendingAck::V1 { run_length }) = self.pending_ack.take() {
-            packet.header.flags |= V1HeaderFlags::ACK;
-            packet.ack = Some(self.build_ack_section(run_length)?);
-        }
+        let packet_bytes = rdpudp_v1_packet_bytes!(
+            header: self.base_header(V1HeaderFlags::DATA | V1HeaderFlags::FEC),
+            fec_payload: Some(fec_payload),
+            ack: ack_section
+        )?;
 
         self.source_block.clear();
-        Ok(Some(packet.encode()?))
+        Ok(Some(packet_bytes))
     }
 
     pub fn needs_keepalive(&self) -> bool {
@@ -460,10 +471,10 @@ impl UdpConnection {
         match self.negotiated_version {
             UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => {
                 let ack_section = self.build_ack_section(1)?;
-                let mut packet = V1Packet::default();
-                packet.header = self.base_header(V1HeaderFlags::ACK);
-                packet.ack = Some(ack_section);
-                packet.encode()
+                rdpudp_v1_packet_bytes!(
+                    header: self.base_header(V1HeaderFlags::ACK),
+                    ack: Some(ack_section)
+                )
             }
             UdpProtocolVersion::V3 => {
                 let header = V2PacketHeader::new(V2HeaderFlags::ACK, 0)?;
@@ -475,17 +486,7 @@ impl UdpConnection {
                     delay_ack_time_scale: 0,
                     delay_ack_time_additions: Vec::new(),
                 };
-                let packet = V2Packet {
-                    header,
-                    ack: Some(ack_payload),
-                    overhead_size: None,
-                    delay_ack_info: None,
-                    ack_of_acks: None,
-                    ack_vector: None,
-                    data_header: None,
-                    data_body: None,
-                };
-                packet.encode_on_wire(PacketPrefixByte::TYPE_STANDARD)
+                rdpudp_v2_packet_bytes!(header = header, ack = Some(ack_payload))
             }
         }
     }
@@ -496,23 +497,23 @@ impl UdpConnection {
         self.next_coded_sequence = self.next_coded_sequence.wrapping_add(1);
         self.next_source_sequence = self.next_source_sequence.wrapping_add(1);
 
-        let mut packet = V1Packet::default();
-        packet.header = self.base_header(V1HeaderFlags::DATA);
+        let ack_section = if let Some(PendingAck::V1 { run_length }) = self.pending_ack.take() {
+            Some(self.build_ack_section(run_length)?)
+        } else {
+            None
+        };
 
-        if let Some(PendingAck::V1 { run_length }) = self.pending_ack.take() {
-            packet.header.flags |= V1HeaderFlags::ACK;
-            packet.ack = Some(self.build_ack_section(run_length)?);
-        }
-
-        packet.source_payload = Some(SourcePayload {
-            header: SourcePayloadHeader {
-                sn_coded,
-                sn_source_start: sn_source,
-            },
-            data: data.clone(),
-        });
-
-        let encoded = packet.encode()?;
+        let encoded = rdpudp_v1_packet_bytes!(
+            header: self.base_header(V1HeaderFlags::DATA),
+            ack: ack_section,
+            source_payload: Some(SourcePayload {
+                header: SourcePayloadHeader {
+                    sn_coded,
+                    sn_source_start: sn_source,
+                },
+                data: data.clone(),
+            })
+        )?;
         self.track_pending(PendingKey::V1(sn_coded), encoded.clone());
         if self.config.enable_fec {
             self.source_block.push(SourceRecord {
@@ -529,10 +530,10 @@ impl UdpConnection {
         self.v3_next_data_sequence = self.v3_next_data_sequence.wrapping_add(1);
         self.v3_next_channel_sequence = self.v3_next_channel_sequence.wrapping_add(1);
 
-        let mut flags = V2HeaderFlags::DATA;
+        let mut flags = rdpudp_v2_flags!(DATA);
         let mut ack_payload = None;
         if let Some(PendingAck::V3 { sequence }) = self.pending_ack.take() {
-            flags |= V2HeaderFlags::ACK;
+            flags |= rdpudp_v2_flags!(ACK);
             ack_payload = Some(V2AckPayload {
                 sequence_number: sequence,
                 received_timestamp: 0,
@@ -544,23 +545,17 @@ impl UdpConnection {
         }
 
         let header = V2PacketHeader::new(flags, 0)?;
-        let packet = V2Packet {
-            header,
-            ack: ack_payload,
-            overhead_size: None,
-            delay_ack_info: None,
-            ack_of_acks: None,
-            ack_vector: None,
-            data_header: Some(DataHeaderPayload {
+        let encoded = rdpudp_v2_packet_bytes!(
+            header = header,
+            ack = ack_payload,
+            data_header = Some(DataHeaderPayload {
                 data_sequence_number: data_sequence,
             }),
-            data_body: Some(DataBodyPayload {
+            data_body = Some(DataBodyPayload {
                 channel_sequence_number: channel_sequence,
                 data: data.clone(),
-            }),
-        };
-
-        let encoded = packet.encode_on_wire(PacketPrefixByte::TYPE_STANDARD)?;
+            })
+        )?;
         self.track_pending(PendingKey::V3(data_sequence), encoded.clone());
         Ok(encoded)
     }
@@ -692,5 +687,51 @@ impl UdpConnection {
             PendingKey::V3(seq) => *seq > ack_sequence,
             PendingKey::V1(_) => true,
         });
+    }
+}
+
+fn udp_version_from_flags(flags: UdpVersionFlags) -> Option<UdpProtocolVersion> {
+    let bits = flags.bits();
+    if bits == UdpVersionFlags::VERSION_1.bits() {
+        Some(UdpProtocolVersion::V1)
+    } else if bits == UdpVersionFlags::VERSION_2.bits() {
+        Some(UdpProtocolVersion::V2)
+    } else if bits == UdpVersionFlags::VERSION_3.bits() {
+        Some(UdpProtocolVersion::V3)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config(protocol_version: UdpProtocolVersion) -> UdpConfig {
+        UdpConfig {
+            protocol_version,
+            ..UdpConfig::default()
+        }
+    }
+
+    #[test]
+    fn syn_advertises_requested_version_with_cookie() {
+        let mut conn = UdpConnection::new(default_config(UdpProtocolVersion::V3));
+        conn.set_cookie_hash([0xAA; 32]);
+        let syn = conn.create_syn().expect("syn encode");
+        let packet = V1Packet::decode(&syn).expect("decode syn");
+        let syn_ex = packet.syn_data_ex.expect("syn ex present");
+        let version = syn_ex.udp_version.expect("version present");
+        assert_eq!(version.bits(), UdpVersionFlags::VERSION_3.bits());
+    }
+
+    #[test]
+    fn syn_falls_back_to_v2_without_cookie_hash() {
+        let mut conn = UdpConnection::new(default_config(UdpProtocolVersion::V3));
+        let syn = conn.create_syn().expect("syn encode");
+        let packet = V1Packet::decode(&syn).expect("decode syn");
+        let syn_ex = packet.syn_data_ex.expect("syn ex present");
+        let version = syn_ex.udp_version.expect("version present");
+        assert_eq!(version.bits(), UdpVersionFlags::VERSION_2.bits());
     }
 }

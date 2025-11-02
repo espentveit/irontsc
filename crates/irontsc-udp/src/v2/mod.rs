@@ -630,6 +630,7 @@ fn write_u24_le(value: u32, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rdpudp_v2_packet;
 
     #[test]
     fn packet_round_trip_with_ack_and_data() {
@@ -649,16 +650,12 @@ mod tests {
             channel_sequence_number: 0x5566,
             data: vec![1, 2, 3, 4, 5],
         };
-        let packet = Packet {
-            header,
-            ack: Some(ack.clone()),
-            overhead_size: None,
-            delay_ack_info: None,
-            ack_of_acks: None,
-            ack_vector: None,
-            data_header: Some(data_header),
-            data_body: Some(data_body.clone()),
-        };
+        let packet = rdpudp_v2_packet!(
+            header = header,
+            ack = Some(ack.clone()),
+            data_header = Some(data_header),
+            data_body = Some(data_body.clone())
+        );
         let encoded = packet
             .encode_on_wire(PacketPrefixByte::TYPE_STANDARD)
             .expect("encode");
@@ -689,16 +686,7 @@ mod tests {
                 },
             ],
         };
-        let packet = Packet {
-            header,
-            ack: None,
-            overhead_size: None,
-            delay_ack_info: None,
-            ack_of_acks: None,
-            ack_vector: Some(ack_vec.clone()),
-            data_header: None,
-            data_body: None,
-        };
+        let packet = rdpudp_v2_packet!(header = header, ack_vector = Some(ack_vec.clone()));
         let encoded = packet
             .encode_on_wire(PacketPrefixByte::TYPE_STANDARD)
             .expect("encode");

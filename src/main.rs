@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 mod config;
+mod dtls_udp;
 mod gfx;
 mod gfx_channel;
 mod h264_codec_caps;
 mod rdp;
-mod dtls_udp;
 mod udp_gfx;
 mod udp_transport;
 mod ws;
@@ -671,7 +671,10 @@ impl RdpSettings {
         }
 
         // Add irontsc-specific settings (custom extension)
-        lines.push(format!("irontsc:h264_hw_accel:i:{}", if self.h264_hw_accel { 1 } else { 0 }));
+        lines.push(format!(
+            "irontsc:h264_hw_accel:i:{}",
+            if self.h264_hw_accel { 1 } else { 0 }
+        ));
 
         lines.join("\n")
     }
@@ -1598,7 +1601,7 @@ fn create_remote_desktop_window(
             }
         };
     let user_has_moved_toolbar = std::rc::Rc::new(std::cell::RefCell::new(false));
-    
+
     // State for hotkey capture (Win key, Alt+Tab, etc.)
     let hotkey_capture_enabled = std::rc::Rc::new(std::cell::Cell::new(false)); // Global hotkey capture disabled by default
 
@@ -2034,7 +2037,7 @@ fn create_remote_desktop_window(
             // Enabled - set full opacity and re-enable shortcuts
             button.set_opacity(1.0);
             button.set_tooltip_text(Some("Global hotkeys enabled (Win, Alt+Tab, etc.)"));
-            
+
             // Inhibit system shortcuts again if mouse is over window
             if let Some(surface) = rd_window_for_hotkey.surface() {
                 if let Ok(tl) = surface.downcast::<gdk::Toplevel>() {
@@ -2045,7 +2048,7 @@ fn create_remote_desktop_window(
             // Disabled - set reduced opacity and restore shortcuts
             button.set_opacity(0.4);
             button.set_tooltip_text(Some("Global hotkeys disabled (click to enable)"));
-            
+
             // Restore system shortcuts
             if let Some(surface) = rd_window_for_hotkey.surface() {
                 if let Ok(tl) = surface.downcast::<gdk::Toplevel>() {
@@ -3103,7 +3106,7 @@ fn build_ui(app: &Application, autologon: bool) {
     h264_label_box.append(&h264_label);
 
     let h264_description = gtk::Label::new(Some(
-        "Use GPU for H.264 video decoding (may not work on all systems)"
+        "Use GPU for H.264 video decoding (may not work on all systems)",
     ));
     h264_description.set_xalign(0.0);
     h264_description.add_css_class("dim-label");
@@ -3228,7 +3231,9 @@ fn build_ui(app: &Application, autologon: bool) {
     // H.264 hardware acceleration switch handler
     let rdp_settings_for_h264 = rdp_settings.clone();
     h264_switch.connect_state_set(move |_switch, enabled| {
-        rdp_settings_for_h264.borrow_mut().set_h264_hw_accel(enabled);
+        rdp_settings_for_h264
+            .borrow_mut()
+            .set_h264_hw_accel(enabled);
         glib::Propagation::Proceed
     });
 

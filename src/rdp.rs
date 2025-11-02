@@ -25,7 +25,6 @@ use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
-use ironrdp_pdu::nego;
 use ironrdp::session::desktop_composition::DesktopCompositionHandler;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
@@ -36,6 +35,7 @@ use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
 use ironrdp_connector::legacy;
 use ironrdp_core::impl_as_any;
 use ironrdp_core::{Encode, IntoOwned, WriteBuf, WriteCursor};
+use ironrdp_pdu::nego;
 use ironrdp_rdpsnd_native::cpal;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
@@ -1254,6 +1254,23 @@ struct ActiveUdpTunnel {
     tunnel_established: bool,
 }
 
+impl Drop for ActiveUdpTunnel {
+    fn drop(&mut self) {
+        debug!(
+            request_id = self.request_id,
+            protocol = ?self.protocol,
+            "Shutting down UDP transport manager"
+        );
+
+        if let Err(err) = self.command_tx.send(UdpTransportCommand::Shutdown) {
+            trace!(
+                request_id = self.request_id,
+                "Failed to signal UDP shutdown (likely already dropped): {err}"
+            );
+        }
+    }
+}
+
 fn detect_multitransport_request(
     action: ironrdp::pdu::Action,
     payload: &[u8],
@@ -1278,12 +1295,12 @@ fn detect_multitransport_request(
     // causes false positives when random bytes match the security header pattern.
     if let Some(expected_channel) = message_channel_id {
         if channel_id != expected_channel {
-            // Not on the message channel - skip scanning to avoid false positives
-            trace!(
-                "Skipping MultiTransport scan on channel 0x{:04x} (expected message channel 0x{:04x})",
-                channel_id, expected_channel
+            warn!(
+                channel_id,
+                expected_channel,
+                "Initiate Multitransport Request delivered on unexpected MCS channel \
+                 (required per MS-RDPBCGR §2.2.15.1). Accepting for compatibility."
             );
-            return None;
         }
     }
 
@@ -1448,12 +1465,34 @@ async fn start_udp_tunnel(
 
     let mut config = UdpTransportConfig::default();
     config.server_addr = server_addr;
-    config.mode = if request.protocol.has_reliable_bit() {
-        TransportMode::Reliable
-    } else {
-        TransportMode::Lossy
-    };
-    config.use_dtls = !selected_protocol.is_standard_rdp_security();
+    let protocol_bits = request.protocol.as_u16();
+    let requested_reliable = (protocol_bits & MultitransportProtocol::RELIABLE_BIT) != 0;
+    let requested_lossy = (protocol_bits & MultitransportProtocol::LOSSY_BIT) != 0;
+    let fallback_reliable = !requested_reliable && !requested_lossy;
+
+    if requested_lossy && !requested_reliable && !fallback_reliable {
+        warn!(
+            "Server requested UDP lossy transport only; declining because client only implements reliable mode"
+        );
+        return Err(anyhow!("server requested unsupported lossy-only UDP mode"));
+    }
+
+    if requested_lossy && requested_reliable {
+        info!("Server offered both reliable and lossy UDP. Selecting reliable mode.");
+    } else if fallback_reliable {
+        info!(
+            "Server did not explicitly advertise reliable UDP; proceeding with reliable mode for compatibility."
+        );
+    } else if requested_lossy && !requested_reliable {
+        info!(
+            "Server set unknown bits alongside lossy flag (0x{:04x}); proceeding with reliable mode",
+            protocol_bits
+        );
+    }
+
+    config.mode = TransportMode::Reliable;
+    // Initial implementation sticks to TLS-protected TCP channel without DTLS per MS-RDPEUDP guidance for LAN scenarios.
+    config.use_dtls = false;
 
     let correlation = correlation_id.map(UdpCorrelationId::new);
     let server_name = destination.name().to_string();
@@ -1603,13 +1642,27 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                 }
 
+                let protocol_bits = request_info.protocol.as_u16();
+                let requested_reliable =
+                    (protocol_bits & MultitransportProtocol::RELIABLE_BIT) != 0;
+                let requested_lossy =
+                    (protocol_bits & MultitransportProtocol::LOSSY_BIT) != 0;
+                let fallback_reliable = !requested_reliable && !requested_lossy;
+
+                if fallback_reliable {
+                    info!(
+                        "   request_id={}, Protocol omitted reliable/lossy bits; defaulting to reliable mode",
+                        request_id
+                    );
+                }
+
                 // Start UDP transport if supported and not already running
                 if udp_tunnel.is_some() {
                     warn!(
                         "⚠️  Additional multitransport request (id={}) received while a UDP tunnel is already active; ignoring",
                         request_id
                     );
-                } else if request_info.protocol.has_lossy_bit() || request_info.protocol.has_reliable_bit() {
+                } else if requested_lossy || requested_reliable || fallback_reliable {
                     match start_udp_tunnel(
                         &destination,
                         correlation_id,

@@ -209,8 +209,16 @@ impl NsCodec {
         let tile_stride = width * 4;
         for y in 0..height {
             let mut y_index = y * y_stride;
-            let mut co_index = if subsampled { (y / 2) * chroma_stride } else { y * chroma_stride };
-            let mut cg_index = if subsampled { (y / 2) * chroma_stride } else { y * chroma_stride };
+            let mut co_index = if subsampled {
+                (y / 2) * chroma_stride
+            } else {
+                y * chroma_stride
+            };
+            let mut cg_index = if subsampled {
+                (y / 2) * chroma_stride
+            } else {
+                y * chroma_stride
+            };
             let mut alpha_index = y * alpha_stride;
             for x in 0..width {
                 let y_val = self.y_plane[y_index] as i16;
@@ -356,7 +364,7 @@ fn round_up_to(value: usize, align: usize) -> usize {
 fn signed_chroma(value: u8, shift: u8) -> i16 {
     // 1. Perform a wrapping left shift on the original unsigned 8-bit value.
     let shifted_value = value.wrapping_shl(shift as u32);
-    
+
     // 2. Reinterpret the bits of the *shifted* result as a signed 8-bit integer.
     let signed_result = i8::from_ne_bytes([shifted_value]);
 

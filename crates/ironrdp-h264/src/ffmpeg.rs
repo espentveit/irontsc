@@ -829,10 +829,14 @@ impl FfmpegDecoder {
     ///
     /// Converts YUV frame to BGRA pixel format for display.
     /// Uses FFmpeg's BGRA pixel format which produces B,G,R,A byte order.
-    /// 
+    ///
     /// If `region` is specified as (left, top, width, height), only converts that sub-rectangle.
     /// This significantly reduces CPU usage when only a portion of the frame is needed.
-    fn convert_to_bgra(&mut self, frame: &ffmpeg::util::frame::Video, region: Option<(u16, u16, u16, u16)>) -> Result<DecodedFrame> {
+    fn convert_to_bgra(
+        &mut self,
+        frame: &ffmpeg::util::frame::Video,
+        region: Option<(u16, u16, u16, u16)>,
+    ) -> Result<DecodedFrame> {
         let (src_format, color_range) = normalize_pixel_format(frame.format());
         let mut owned_frame: Option<ffmpeg::util::frame::Video> = None;
 
@@ -849,7 +853,7 @@ impl FfmpegDecoder {
 
         let full_width = input_frame.width();
         let full_height = input_frame.height();
-        
+
         // Determine conversion region
         let (region_left, region_top, width, height) = if let Some((left, top, w, h)) = region {
             (left as u32, top as u32, w as u32, h as u32)
@@ -888,19 +892,19 @@ impl FfmpegDecoder {
         // Convert frame (or sub-rectangle of it)
         let converter = self.converter.as_mut().unwrap();
         let mut bgra_frame = ffmpeg::util::frame::Video::empty();
-        
+
         if let Some((left, top, w, h)) = region {
             // For sub-rectangle conversion, we create a new YUV frame that contains only the region
             // This avoids converting pixels we don't need
             let mut region_frame = ffmpeg::util::frame::Video::new(src_format, w as u32, h as u32);
-            
+
             // Copy Y plane (luma) - full resolution
             {
                 let src_y_plane = input_frame.data(0);
                 let src_y_stride = input_frame.stride(0);
                 let dst_y_stride = region_frame.stride(0);
                 let dst_y_plane = region_frame.data_mut(0);
-                
+
                 for y in 0..(h as usize) {
                     let src_offset = ((top as usize + y) * src_y_stride) + left as usize;
                     let dst_offset = y * dst_y_stride;
@@ -908,7 +912,7 @@ impl FfmpegDecoder {
                         .copy_from_slice(&src_y_plane[src_offset..src_offset + w as usize]);
                 }
             }
-            
+
             // For YUV420P and YUV444P, we need to handle chroma planes
             // YUV420P: U/V are half resolution (subsampled 2x2)
             // YUV444P: U/V are full resolution
@@ -926,7 +930,7 @@ impl FfmpegDecoder {
                     converter
                         .run(input_frame, &mut bgra_frame)
                         .context("Failed to convert frame")?;
-                    
+
                     // Extract BGRA data
                     let stride = bgra_frame.stride(0);
                     let data = bgra_frame.data(0);
@@ -948,37 +952,39 @@ impl FfmpegDecoder {
                     });
                 }
             };
-            
+
             // Copy U plane (Cb - blue chroma)
             {
                 let src_u_plane = input_frame.data(1);
                 let src_u_stride = input_frame.stride(1);
                 let dst_u_stride = region_frame.stride(1);
                 let dst_u_plane = region_frame.data_mut(1);
-                
+
                 for y in 0..(chroma_h as usize) {
-                    let src_offset = ((chroma_top as usize + y) * src_u_stride) + chroma_left as usize;
+                    let src_offset =
+                        ((chroma_top as usize + y) * src_u_stride) + chroma_left as usize;
                     let dst_offset = y * dst_u_stride;
                     dst_u_plane[dst_offset..dst_offset + chroma_w as usize]
                         .copy_from_slice(&src_u_plane[src_offset..src_offset + chroma_w as usize]);
                 }
             }
-            
+
             // Copy V plane (Cr - red chroma)
             {
                 let src_v_plane = input_frame.data(2);
                 let src_v_stride = input_frame.stride(2);
                 let dst_v_stride = region_frame.stride(2);
                 let dst_v_plane = region_frame.data_mut(2);
-                
+
                 for y in 0..(chroma_h as usize) {
-                    let src_offset = ((chroma_top as usize + y) * src_v_stride) + chroma_left as usize;
+                    let src_offset =
+                        ((chroma_top as usize + y) * src_v_stride) + chroma_left as usize;
                     let dst_offset = y * dst_v_stride;
                     dst_v_plane[dst_offset..dst_offset + chroma_w as usize]
                         .copy_from_slice(&src_v_plane[src_offset..src_offset + chroma_w as usize]);
                 }
             }
-            
+
             // Now convert only this smaller YUV region to BGRA
             converter
                 .run(&region_frame, &mut bgra_frame)
@@ -1029,8 +1035,18 @@ impl FfmpegDecoder {
 }
 
 impl H264Decoder for FfmpegDecoder {
-    fn decode_gfx_stream(&mut self, kind: AvcKind, gfx_payload: &[u8], region: Option<(u16, u16, u16, u16)>) -> Result<DecodedFrame> {
-        trace!("Decoding {:?} stream, {} bytes, region={:?}", kind, gfx_payload.len(), region);
+    fn decode_gfx_stream(
+        &mut self,
+        kind: AvcKind,
+        gfx_payload: &[u8],
+        region: Option<(u16, u16, u16, u16)>,
+    ) -> Result<DecodedFrame> {
+        trace!(
+            "Decoding {:?} stream, {} bytes, region={:?}",
+            kind,
+            gfx_payload.len(),
+            region
+        );
 
         match kind {
             AvcKind::Avc420 => {
