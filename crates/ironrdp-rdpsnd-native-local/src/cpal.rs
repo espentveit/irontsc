@@ -47,21 +47,34 @@ impl Drop for RdpsndBackend {
 impl RdpsndClientHandler for RdpsndBackend {
     fn get_formats(&self) -> &[AudioFormat] {
         &[
+            // AAC format - provides good compression with wide server support
+            #[cfg(feature = "aac")]
+            AudioFormat {
+                format: WaveFormat::AAC_MS,
+                n_channels: 2,
+                n_samples_per_sec: 44100,
+                n_avg_bytes_per_sec: 24000, // 192 kbps
+                n_block_align: 4,
+                bits_per_sample: 16,
+                data: None,
+            },
+            // PCM as fallback - universally supported but high bandwidth
+            AudioFormat {
+                format: WaveFormat::PCM,
+                n_channels: 2,
+                n_samples_per_sec: 44100,
+                n_avg_bytes_per_sec: 176400,
+                n_block_align: 4,
+                bits_per_sample: 16,
+                data: None,
+            },
+            // OPUS support is available but may not work with all servers
             #[cfg(feature = "opus")]
             AudioFormat {
                 format: WaveFormat::OPUS,
                 n_channels: 2,
                 n_samples_per_sec: 48000,
                 n_avg_bytes_per_sec: 192000,
-                n_block_align: 4,
-                bits_per_sample: 16,
-                data: None,
-            },
-            AudioFormat {
-                format: WaveFormat::PCM,
-                n_channels: 2,
-                n_samples_per_sec: 44100,
-                n_avg_bytes_per_sec: 176400,
                 n_block_align: 4,
                 bits_per_sample: 16,
                 data: None,
@@ -141,6 +154,74 @@ impl DecodeStream {
     pub fn new(rx_format: &AudioFormat, mut rx: Receiver<Vec<u8>>) -> anyhow::Result<Self> {
         let mut dec_thread = None;
         match rx_format.format {
+            #[cfg(feature = "aac")]
+            WaveFormat::AAC_MS => {
+                use fdk_aac::dec::{Decoder, Transport};
+                
+                let (dec_tx, dec_rx) = mpsc::channel();
+                let channels = rx_format.n_channels;
+                let sample_rate = rx_format.n_samples_per_sec;
+                
+                dec_thread = Some(thread::spawn(move || {
+                    // Initialize AAC decoder with ADTS transport
+                    let mut decoder = Decoder::new(Transport::Adts);
+                    
+                    // Set output channel configuration
+                    if let Err(e) = decoder.set_max_output_channels(channels as usize) {
+                        error!(?e, "Failed to set AAC max output channels");
+                        return;
+                    }
+                    
+                    debug!(channels, sample_rate, "AAC decoder initialized");
+                    
+                    while let Ok(pkt) = rx.recv() {
+                        // Fill decoder with packet data
+                        let bytes_consumed = match decoder.fill(&pkt) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                error!(?e, "Failed to fill AAC decoder");
+                                continue;
+                            }
+                        };
+                        
+                        // Only try to decode if we consumed the whole packet
+                        // This indicates the decoder has enough data for a frame
+                        if bytes_consumed == pkt.len() {
+                            // Get the expected output size
+                            let frame_size = decoder.decoded_frame_size();
+                            if frame_size == 0 {
+                                // Decoder hasn't initialized yet, skip decode
+                                continue;
+                            }
+                            
+                            let mut output_buffer = vec![0i16; frame_size];
+                            
+                            // Decode frame
+                            match decoder.decode_frame(&mut output_buffer) {
+                                Ok(_) => {
+                                    // Convert i16 samples to bytes
+                                    let mut pcm_bytes = Vec::with_capacity(output_buffer.len() * 2);
+                                    for sample in output_buffer {
+                                        pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+                                    }
+                                    
+                                    if dec_tx.send(pcm_bytes).is_err() {
+                                        error!("Failed to send decoded AAC data");
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    // Log but continue - some errors are recoverable
+                                    debug!(?e, "AAC decode error (may be recoverable)");
+                                }
+                            }
+                        } else {
+                            debug!(consumed = bytes_consumed, total = pkt.len(), "Partial AAC packet consumed");
+                        }
+                    }
+                }));
+                rx = dec_rx;
+            }
             #[cfg(feature = "opus")]
             WaveFormat::OPUS => {
                 let chan = match rx_format.n_channels {

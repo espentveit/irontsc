@@ -289,7 +289,7 @@ fn create_rdp_config(
             }
         },
         request_data: None,
-        enable_audio_playback: false,
+        enable_audio_playback: true,
         performance_flags: PerformanceFlags::DISABLE_WALLPAPER
             | PerformanceFlags::DISABLE_FULLWINDOWDRAG
             | PerformanceFlags::DISABLE_MENUANIMATIONS

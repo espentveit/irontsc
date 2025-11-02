@@ -15,13 +15,15 @@ doctest = false
 test = false
 
 [features]
-default = ["opus"]
+default = ["opus", "aac"]
 opus = ["dep:opus2", "dep:bytemuck"]
+aac = ["dep:fdk-aac"]
 
 [dependencies]
 anyhow = "1"
 bytemuck = { version = "1.24", optional = true }
 cpal = "0.16"
+fdk-aac = { version = "0.7", optional = true }
 ironrdp-rdpsnd = { path = "../ironrdp-rdpsnd-local", version = "0.6" } # public
 opus2 = { version = "0.3", optional = true, features = ["bundled"] }
 tracing = { version = "0.1", features = ["log"] }
