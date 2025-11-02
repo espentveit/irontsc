@@ -79,12 +79,13 @@ impl DtlsUdpSocket {
             SslContext::builder(ssl_method)
                 .with_context(|| format!("Failed to create {} context", protocol_name))?;
 
-        // Set version to 1.2 (required by most RDP servers)
+        // Set version range to support TLS 1.0 through 1.3 (match FreeRDP)
+        // The working capture shows: TLS 1.3, 1.2, 1.1, 1.0 support
         ctx_builder
-            .set_min_proto_version(Some(SslVersion::TLS1_2))
+            .set_min_proto_version(Some(SslVersion::TLS1))
             .with_context(|| format!("Failed to set min {} version", protocol_name))?;
         ctx_builder
-            .set_max_proto_version(Some(SslVersion::TLS1_2))
+            .set_max_proto_version(Some(SslVersion::TLS1_3))
             .with_context(|| format!("Failed to set max {} version", protocol_name))?;
 
         // Configure certificate verification
@@ -98,13 +99,37 @@ impl DtlsUdpSocket {
             ctx_builder.set_verify(SslVerifyMode::NONE);
         }
 
-        // Set recommended cipher suites for RDP
+        // Set comprehensive cipher suites matching FreeRDP/Windows RDP behavior
+        // Includes TLS 1.3 ciphers, ECDHE, and RSA variants
+        // Working capture shows: TLS_AES_256_GCM_SHA384, TLS_AES_128_GCM_SHA256, etc.
+        ctx_builder
+            .set_ciphersuites(
+                "TLS_AES_256_GCM_SHA384:\
+                 TLS_AES_128_GCM_SHA256:\
+                 TLS_CHACHA20_POLY1305_SHA256"
+            )
+            .context("Failed to set TLS 1.3 ciphersuites")?;
+        
         ctx_builder
             .set_cipher_list(
-                "ECDHE-RSA-AES256-GCM-SHA384:\
+                "ECDHE-ECDSA-AES256-GCM-SHA384:\
+                 ECDHE-ECDSA-AES128-GCM-SHA256:\
+                 ECDHE-RSA-AES256-GCM-SHA384:\
                  ECDHE-RSA-AES128-GCM-SHA256:\
+                 ECDHE-ECDSA-AES256-SHA384:\
+                 ECDHE-ECDSA-AES128-SHA256:\
+                 ECDHE-RSA-AES256-SHA384:\
+                 ECDHE-RSA-AES128-SHA256:\
+                 ECDHE-ECDSA-AES256-SHA:\
+                 ECDHE-ECDSA-AES128-SHA:\
+                 ECDHE-RSA-AES256-SHA:\
+                 ECDHE-RSA-AES128-SHA:\
                  AES256-GCM-SHA384:\
-                 AES128-GCM-SHA256",
+                 AES128-GCM-SHA256:\
+                 AES256-SHA256:\
+                 AES128-SHA256:\
+                 AES256-SHA:\
+                 AES128-SHA",
             )
             .context("Failed to set cipher list")?;
 

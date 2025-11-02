@@ -890,7 +890,7 @@ impl UdpTransportManager {
         Ok(())
     }
 
-    /// Send data over UDP
+    /// Send data over UDP (wraps in RDP UDP DATA packet)
     async fn send_data(&mut self, data: Vec<u8>) -> Result<()> {
         trace!("Sending data ({} bytes)", data.len());
 
@@ -923,6 +923,40 @@ impl UdpTransportManager {
         Ok(())
     }
 
+    /// Send tunnel PDU (encrypts if TLS/DTLS is active, per MS-RDPEMT spec)
+    async fn send_tunnel_pdu(&mut self, plaintext: Vec<u8>) -> Result<()> {
+        // Per MS-RDPEMT: After TLS/DTLS handshake completes, all tunnel PDUs must be encrypted
+        if let Some(tls) = self.tls_socket.as_mut() {
+            if tls.is_handshake_complete() {
+                debug!("🔐 Encrypting tunnel PDU ({} bytes plaintext) with TLS", plaintext.len());
+                let encrypted_packets = tls.encrypt(&plaintext)
+                    .context("Failed to TLS-encrypt tunnel PDU")?;
+                
+                for encrypted in encrypted_packets {
+                    debug!("   TLS record: {} bytes", encrypted.len());
+                    self.send_data(encrypted).await?;
+                }
+                return Ok(());
+            }
+        } else if let Some(dtls) = self.dtls_socket.as_mut() {
+            if dtls.is_handshake_complete() {
+                debug!("🔐 Encrypting tunnel PDU ({} bytes plaintext) with DTLS", plaintext.len());
+                let encrypted_packets = dtls.encrypt(&plaintext)
+                    .context("Failed to DTLS-encrypt tunnel PDU")?;
+                
+                for encrypted in encrypted_packets {
+                    debug!("   DTLS record: {} bytes", encrypted.len());
+                    self.send_data(encrypted).await?;
+                }
+                return Ok(());
+            }
+        }
+        
+        // No encryption - send as plaintext (Standard RDP Security)
+        debug!("📤 Sending tunnel PDU ({} bytes) unencrypted (Standard RDP Security)", plaintext.len());
+        self.send_data(plaintext).await
+    }
+
     /// Create MS-RDPEMT tunnel for binding DVC channels to this UDP transport
     async fn create_tunnel(&mut self, request_id: u32, security_cookie: [u8; 16]) -> Result<()> {
         info!("🔧 Creating MS-RDPEMT tunnel for request_id={}", request_id);
@@ -943,28 +977,13 @@ impl UdpTransportManager {
         );
         debug!("   Tunnel PDU bytes: {:02x?}", &buf[..buf.len().min(32)]);
 
-        // Send the tunnel request wrapped in MS-RDPEUDP packet
-        // Use the UDP connection's send_data to properly frame it
-        let mut conn = self.connection.lock().await;
-        let udp_packet = conn
-            .send_data(buf)
-            .context("Failed to create UDP packet for tunnel request")?;
-        drop(conn); // Release lock
-
-        debug!("   MS-RDPEUDP packet: {} bytes total", udp_packet.len());
-        debug!(
-            "   First 32 bytes of UDP packet: {:02x?}",
-            &udp_packet[..udp_packet.len().min(32)]
-        );
-
-        self.send_over_udp(&udp_packet)
+        // Per MS-RDPEMT spec: Tunnel PDUs must be encrypted after TLS/DTLS handshake completes
+        // This method will automatically encrypt if TLS/DTLS is active
+        self.send_tunnel_pdu(buf)
             .await
             .context("Failed to send TunnelCreateRequest")?;
 
-        info!(
-            "✅ Sent TunnelCreateRequest (UDP packet {} bytes), waiting for response...",
-            udp_packet.len()
-        );
+        info!("✅ Sent TunnelCreateRequest, waiting for response...");
 
         // Note: The response will come through the normal packet handling in handle_received_packet
         // For now, we'll mark the tunnel as pending and handle the response asynchronously
