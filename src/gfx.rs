@@ -403,8 +403,12 @@ impl GfxContext for GfxState {
             #[cfg(feature = "h264")]
             codec::codec_id::AVC420 => {
                 debug!(
-                    "🎬 Decoding H.264/AVC420 frame ({} bytes)...",
-                    bitmap_data.len()
+                    "🎬 Decoding H.264/AVC420 frame ({} bytes) for rect={}x{} at ({},{})",
+                    bitmap_data.len(),
+                    dest_rect.width(),
+                    dest_rect.height(),
+                    dest_rect.left,
+                    dest_rect.top
                 );
                 // Decode H.264/AVC420
                 let frame = self
@@ -413,7 +417,13 @@ impl GfxContext for GfxState {
                     .decode_gfx_stream(AvcKind::Avc420, bitmap_data)
                     .context("Failed to decode AVC420 frame")?;
 
-                debug!("✅ H.264 decode complete, blitting to surface");
+                debug!(
+                    "✅ H.264 decoded: {}x{} format={:?}, blitting to surface {}",
+                    frame.width,
+                    frame.height,
+                    frame.format,
+                    surface_id
+                );
                 Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
                 
                 // Draw debug outline (green for AVC420)
@@ -1066,36 +1076,57 @@ impl GfxState {
             .get(0)
             .ok_or_else(|| anyhow::anyhow!("Decoded frame missing BGRA data plane"))?;
 
+        // H.264 decoder outputs full surface, but we only need dest_rect region
+        // This is normal - decoder gives us the complete frame, we extract the tile
+        trace!(
+            "H.264 frame: decoded={}x{} extracting region={}x{} at ({},{})",
+            frame_width_usize,
+            frame_height_usize,
+            rect_width,
+            rect_height,
+            dest_rect.left,
+            dest_rect.top
+        );
+
         // Blit to surface buffer
+        // Extract the dest_rect region from the decoded frame
         let buffer = Arc::make_mut(&mut surface.buffer);
-        for y in 0..rect_height {
-            let src_offset = y * frame_stride;
+        let copy_width = rect_width.min(frame_width_usize - (dest_rect.left as usize));
+        let copy_height = rect_height.min(frame_height_usize - (dest_rect.top as usize));
+
+        for y in 0..copy_height {
+            // Extract from decoded frame at dest_rect position
+            let src_y = dest_rect.top as usize + y;
+            let src_x = dest_rect.left as usize;
+            let src_offset = src_y * frame_stride + src_x * 4;
+
+            // Write to surface at dest_rect position
             let dst_y = dest_rect.top as usize + y;
             let dst_x = dest_rect.left as usize;
             let dst_offset = (dst_y * surface_width + dst_x) * 4;
 
             // Fail on bounds violations instead of silently skipping
-            if dst_offset + rect_width * 4 > buffer.len() {
+            if dst_offset + copy_width * 4 > buffer.len() {
                 anyhow::bail!(
                     "Blit destination out of bounds: line={}, offset={}, size={}, buffer={}",
                     y,
                     dst_offset,
-                    rect_width * 4,
+                    copy_width * 4,
                     buffer.len()
                 );
             }
-            if src_offset + rect_width * 4 > frame_data.len() {
+            if src_offset + copy_width * 4 > frame_data.len() {
                 anyhow::bail!(
                     "Blit source out of bounds: line={}, offset={}, size={}, frame={}",
                     y,
                     src_offset,
-                    rect_width * 4,
+                    copy_width * 4,
                     frame_data.len()
                 );
             }
 
-            buffer[dst_offset..dst_offset + rect_width * 4]
-                .copy_from_slice(&frame_data[src_offset..src_offset + rect_width * 4]);
+            buffer[dst_offset..dst_offset + copy_width * 4]
+                .copy_from_slice(&frame_data[src_offset..src_offset + copy_width * 4]);
         }
 
         Ok(())
