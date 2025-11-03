@@ -362,6 +362,11 @@ impl DtlsUdpSocket {
         self.handshake_complete
     }
 
+    /// Manually mark the handshake as complete (e.g., when tunnel establishment confirms encryption is ready)
+    pub fn mark_handshake_complete(&mut self) {
+        self.handshake_complete = true;
+    }
+
     /// Encrypt plaintext payload(s) into DTLS records.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<Vec<u8>>> {
         if !self.handshake_complete {
