@@ -108,7 +108,7 @@ pub struct UdpTransportManager {
     /// Tunnel established flag
     tunnel_established: bool,
     /// Pending tunnel response received before TLS handshake completed
-    pending_tunnel_response: Option<i32>,
+    pending_tunnel_response: Option<Vec<u8>>,
     /// Server name for TLS/DTLS
     server_name: String,
     /// TLS socket wrapper for reliable mode (if TLS is required per MS-RDPEMT)
@@ -246,6 +246,7 @@ impl UdpTransportManager {
             request_id: None,
             security_cookie: None,
             tunnel_established: false,
+            pending_tunnel_response: None,
             server_name,
             tls_socket: None,
             dtls_socket: None,
@@ -738,6 +739,15 @@ impl UdpTransportManager {
                                         protocol_name
                                     );
 
+                                    // Check if there's a queued TunnelCreateResponse to process
+                                    if let Some(pending_response) = self.pending_tunnel_response.take() {
+                                        info!("📥 Processing queued TunnelCreateResponse now that {} is complete", protocol_name);
+                                        if let Err(e) = self.process_tunnel_response(&pending_response) {
+                                            error!("Failed to process queued TunnelCreateResponse: {}", e);
+                                            return Err(e);
+                                        }
+                                    }
+
                                     // Now that TLS/DTLS is complete, create the tunnel
                                     if let (Some(request_id), Some(security_cookie)) =
                                         (self.request_id, self.security_cookie)
@@ -768,6 +778,15 @@ impl UdpTransportManager {
                                         "✅ {} handshake complete, tunnel PDUs will be encrypted",
                                         protocol_name
                                     );
+
+                                    // Check if there's a queued TunnelCreateResponse to process
+                                    if let Some(pending_response) = self.pending_tunnel_response.take() {
+                                        info!("📥 Processing queued TunnelCreateResponse now that {} is complete", protocol_name);
+                                        if let Err(e) = self.process_tunnel_response(&pending_response) {
+                                            error!("Failed to process queued TunnelCreateResponse: {}", e);
+                                            return Err(e);
+                                        }
+                                    }
 
                                     // Now that TLS/DTLS is complete, create the tunnel
                                     if let (Some(request_id), Some(security_cookie)) =
@@ -1093,31 +1112,53 @@ impl UdpTransportManager {
         // 0x0003 = DATA
         if action == 0x0002 {
             info!("✅ Received TunnelCreateResponse!");
-            
-            // RDP_TUNNEL_CREATERESPONSE = TunnelHeader (10 bytes) + HrResponse (4 bytes)
-            // However, the exact structure seems to vary - sometimes HrResponse is missing
-            // If we got a response at all, assume success and establish the tunnel
-            let hr_response = if tunnel_data.len() >= 14 {
-                i32::from_le_bytes([tunnel_data[10], tunnel_data[11], tunnel_data[12], tunnel_data[13]])
+
+            // Check if TLS/DTLS handshake is complete
+            let tls_ready = if let Some(tls) = self.tls_socket.as_ref() {
+                tls.is_handshake_complete()
+            } else if let Some(dtls) = self.dtls_socket.as_ref() {
+                dtls.is_handshake_complete()
             } else {
-                0 // Assume success if HrResponse not present
+                true // No TLS/DTLS, can process immediately
             };
-            
-            if hr_response == 0 {
-                info!("   ✅ Tunnel creation successful! MS-RDPEMT tunnel established.");
-                self.tunnel_established = true;
-                
-                // Note: We don't manually mark TLS/DTLS as complete here.
-                // The handshake must complete naturally via the TLS protocol.
-                // Only when is_handshake_complete() returns true can we decrypt tunnel data.
-                
-                // Send event to notify tunnel is established
-                let _ = self.event_tx.send(UdpTransportEvent::TunnelEstablished);
+
+            if !tls_ready {
+                info!("   ⏳ TLS/DTLS handshake not complete yet, queueing TunnelCreateResponse");
+                self.pending_tunnel_response = Some(tunnel_data.to_vec());
             } else {
-                warn!("   Tunnel creation failed (HRESULT = 0x{:08x})", hr_response);
+                // TLS/DTLS ready, process immediately
+                self.process_tunnel_response(&tunnel_data)?;
             }
         } else {
             debug!("   Unknown tunnel action: 0x{:04x}", action);
+        }
+
+        Ok(())
+    }
+
+    /// Process a TunnelCreateResponse
+    fn process_tunnel_response(&mut self, tunnel_data: &[u8]) -> Result<()> {
+        // RDP_TUNNEL_CREATERESPONSE = TunnelHeader (10 bytes) + HrResponse (4 bytes)
+        // However, the exact structure seems to vary - sometimes HrResponse is missing
+        // If we got a response at all, assume success and establish the tunnel
+        let hr_response = if tunnel_data.len() >= 14 {
+            i32::from_le_bytes([tunnel_data[10], tunnel_data[11], tunnel_data[12], tunnel_data[13]])
+        } else {
+            0 // Assume success if HrResponse not present
+        };
+
+        if hr_response == 0 {
+            info!("   ✅ Tunnel creation successful! MS-RDPEMT tunnel established.");
+            self.tunnel_established = true;
+
+            // Note: We don't manually mark TLS/DTLS as complete here.
+            // The handshake must complete naturally via the TLS protocol.
+            // Only when is_handshake_complete() returns true can we decrypt tunnel data.
+
+            // Send event to notify tunnel is established
+            let _ = self.event_tx.send(UdpTransportEvent::TunnelEstablished);
+        } else {
+            warn!("   Tunnel creation failed (HRESULT = 0x{:08x})", hr_response);
         }
 
         Ok(())
