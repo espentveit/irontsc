@@ -104,7 +104,7 @@ impl Default for UdpConfig {
             enable_fec: true,
             fec_block_size: 8,
             retransmit_timeout_ms: 300,
-            max_retransmits: 5,
+            max_retransmits: 20,  // Increased to handle slow server responses (can take 3-4 seconds)
             keepalive_interval_ms: 5_000,
         }
     }
@@ -290,21 +290,28 @@ impl UdpConnection {
                     self.expected_remote_sequence, self.next_source_sequence, self.next_coded_sequence);
             }
             UdpProtocolVersion::V3 => {
-                let seq16 = syn.initial_sequence_number as u16;
-                self.v3_expected_sequence = seq16;
-                self.v3_next_data_sequence = seq16.wrapping_add(1);
+                // For V3, the 32-bit Initial SequenceNumber in SYN/SYN+ACK appears to be
+                // for V1/V2 compatibility only. The actual V3 16-bit DATA sequence space
+                // starts from a different value that we learn from the first DATA packet.
+                // Initialize to 0 and let the first packet set the expected sequence.
+                self.v3_expected_sequence = 0;
+                
+                // Our initial sequence (what we send to server) - lower 16 bits of our config
+                let our_seq16 = self.config.initial_sequence_number as u16;
+                self.v3_next_data_sequence = our_seq16.wrapping_add(1);
+                
                 // Channel sequence is independent and starts from 1 (matches FreeRDP behavior)
                 self.v3_next_channel_sequence = 1;
                 // V3 does not send ACK payload in first DATA packet (only AckOfAcks)
                 self.pending_ack = None;
-                debug!("📊 V3: Server initial_seq={} (0x{:08X}), lower 16-bit={} (0x{:04X})", 
-                    syn.initial_sequence_number, syn.initial_sequence_number, seq16, seq16);
-                debug!("📊 V3: Our next_data_seq={} (0x{:04X}), next_channel_seq={} (0x{:04X})", 
+                debug!("📊 V3: Server initial_seq={} (0x{:08X}) [for V1/V2 compat only]", 
+                    syn.initial_sequence_number, syn.initial_sequence_number);
+                debug!("📊 V3: Will learn server's DATA sequence from first packet");
+                debug!("📊 V3: Our initial_seq={} (0x{:08X}), lower 16-bit={} (0x{:04X})", 
+                    self.config.initial_sequence_number, self.config.initial_sequence_number, our_seq16, our_seq16);
+                debug!("📊 V3: We send to server: next_data_seq={} (0x{:04X}), next_channel_seq={} (0x{:04X})", 
                     self.v3_next_data_sequence, self.v3_next_data_sequence, 
                     self.v3_next_channel_sequence, self.v3_next_channel_sequence);
-                debug!("📊 V3: Our initial_seq={} (0x{:08X}), next_source={}, next_coded={}", 
-                    self.config.initial_sequence_number, self.config.initial_sequence_number,
-                    self.next_source_sequence, self.next_coded_sequence);
                 if let Some(hash) = &self.cookie_hash {
                     debug!("📊 V3: Cookie hash = {:02X?}", hash);
                 }
@@ -626,13 +633,41 @@ impl UdpConnection {
             self.update_remote_ack_v3(ack.sequence_number);
         }
 
-        if let Some(body) = packet.data_body {
-            let sequence = packet
-                .data_header
-                .map(|h| h.data_sequence_number)
-                .unwrap_or(0);
-            self.v3_receive_buffer.insert(sequence, body.data);
-            return Ok(self.collect_ready_packets_v3());
+        // Check if this packet has data (could be Dummy packet with just sequence, or Standard with data)
+        if let Some(data_header) = packet.data_header {
+            let sequence = data_header.data_sequence_number;
+            
+            if let Some(body) = packet.data_body {
+                // Standard packet with actual data
+                debug!("📥 V3 DATA packet: seq={} (expected={}), data_len={}", 
+                    sequence, self.v3_expected_sequence, body.data.len());
+                
+                // If this is the first DATA packet (expected==0), initialize from it
+                if self.v3_expected_sequence == 0 {
+                    debug!("📥 V3: First DATA packet! Initializing expected_seq from {}", sequence);
+                    self.v3_expected_sequence = sequence;
+                }
+                
+                self.v3_receive_buffer.insert(sequence, body.data);
+                return Ok(self.collect_ready_packets_v3());
+            } else {
+                // Dummy packet - has sequence but no data, just acknowledge it
+                debug!("📥 V3 DUMMY packet: seq={} (expected={})", sequence, self.v3_expected_sequence);
+                
+                // If this is the first packet (expected==0), initialize from it
+                if self.v3_expected_sequence == 0 {
+                    debug!("📥 V3: First DUMMY packet! Initializing expected_seq from {}", sequence);
+                    self.v3_expected_sequence = sequence;
+                }
+                
+                // Update expected sequence if this is the next one we're waiting for
+                if sequence == self.v3_expected_sequence {
+                    self.v3_expected_sequence = sequence.wrapping_add(1);
+                    self.pending_ack = Some(PendingAck::V3 { sequence });
+                }
+                // Dummy packets don't deliver any payload
+                return Ok(Vec::new());
+            }
         }
 
         Ok(Vec::new())
