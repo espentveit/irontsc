@@ -54,6 +54,13 @@ impl UdpGfxChannel {
                     info!("🔐 MS-RDPEMT tunnel established");
                     // Tunnel establishment is good, but wait for Connected event
                 }
+                UdpTransportEvent::SoftSyncCompleted { .. } => {
+                    info!("✅ Soft-Sync completed");
+                    // Soft-sync is good, but wait for Connected event
+                }
+                UdpTransportEvent::TunnelDvcData(_) => {
+                    // DVC data from tunnel - not relevant here, handled in main RDP loop
+                }
                 UdpTransportEvent::Disconnected(reason) => {
                     warn!("UDP connection failed: {}", reason);
                     anyhow::bail!("UDP connection failed: {}", reason);
@@ -97,6 +104,14 @@ impl UdpGfxChannel {
             }
             Ok(UdpTransportEvent::TunnelEstablished) => {
                 // Tunnel established - good for data flow
+                None
+            }
+            Ok(UdpTransportEvent::SoftSyncCompleted { .. }) => {
+                // Soft-sync completed - good for data flow
+                None
+            }
+            Ok(UdpTransportEvent::TunnelDvcData(_)) => {
+                // DVC data from tunnel - not relevant here, handled in main RDP loop
                 None
             }
             Err(_) => None,
