@@ -88,10 +88,9 @@ impl PacketPrefixByte {
         if packet_type_index != Self::TYPE_STANDARD && packet_type_index != Self::TYPE_DUMMY {
             return Err(UdpError::InvalidField("packet_type_index"));
         }
-        // Use short_length=0 for extended length encoding to avoid bit conflict with type 0
-        // PacketType uses bits 4-1, short_length uses bits 2-0, so they overlap at bits 2-1
-        // Type 0 requires bits 4-1 = 0000, so short_length must be 0-1 to avoid conflict
-        let short = if layout_len < 7 { layout_len as u8 } else { 0 };
+        // Per MS-RDPEUDP2 spec: If length > 7 bytes, short_length MUST be set to 7
+        // If length <= 7 bytes, short_length specifies the actual length
+        let short = if layout_len < 7 { layout_len as u8 } else { 7 };
         let padded = if layout_len < 7 { 7 } else { layout_len };
         Ok((
             Self {
@@ -103,15 +102,20 @@ impl PacketPrefixByte {
     }
 
     pub fn encode(self) -> u8 {
-        ((self.packet_type_index & 0x0f) << 1) | (self.short_length & 0x07)
+        // Bit layout: [Short_Length:3][Packet_Type_Index:4][Reserved:1]
+        // Bits 7-5: Short_Packet_Length (3 bits)
+        // Bits 4-1: Packet_Type_Index (4 bits)  
+        // Bit 0: Reserved (must be 0)
+        ((self.short_length & 0x07) << 5) | ((self.packet_type_index & 0x0f) << 1)
     }
 
     pub fn decode(byte: u8) -> Result<Self> {
-        if byte & 0x80 != 0 {
+        // Bit layout: [Short_Length:3][Packet_Type_Index:4][Reserved:1]
+        if byte & 0x01 != 0 {
             return Err(UdpError::InvalidField("packet_prefix.reserved"));
         }
+        let short_length = (byte >> 5) & 0x07;
         let packet_type_index = (byte >> 1) & 0x0f;
-        let short_length = byte & 0x07;
         if packet_type_index != Self::TYPE_STANDARD && packet_type_index != Self::TYPE_DUMMY {
             return Err(UdpError::InvalidField("packet_type_index"));
         }
