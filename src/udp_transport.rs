@@ -689,7 +689,15 @@ impl UdpTransportManager {
                             protocol_name,
                             payload.len()
                         );
-                        match socket.process_handshake_data(&payload) {
+                        
+                        // Process handshake and collect response packets
+                        let handshake_result = socket.process_handshake_data(&payload);
+                        let handshake_complete = socket.is_handshake_complete();
+                        
+                        // Drop the socket borrow before we potentially call create_tunnel
+                        drop(socket);
+                        
+                        match handshake_result {
                             Ok(Some(response_packets)) => {
                                 // TLS/DTLS wants to send response packets
                                 for response in response_packets {
@@ -700,10 +708,40 @@ impl UdpTransportManager {
                                     );
                                     self.send_data(response).await?;
                                 }
+                                
+                                // Check if handshake completed (may have completed while producing response)
+                                if handshake_complete {
+                                    info!(
+                                        "✅ {} handshake complete, tunnel PDUs will be encrypted",
+                                        protocol_name
+                                    );
+
+                                    // Now that TLS/DTLS is complete, create the tunnel
+                                    if let (Some(request_id), Some(security_cookie)) =
+                                        (self.request_id, self.security_cookie)
+                                    {
+                                        if !self.tunnel_established {
+                                            info!(
+                                                "🔧 {} complete, now creating MS-RDPEMT tunnel",
+                                                protocol_name
+                                            );
+                                            if let Err(e) = self
+                                                .create_tunnel(request_id, security_cookie)
+                                                .await
+                                            {
+                                                error!(
+                                                    "Tunnel creation after {} failed: {}",
+                                                    protocol_name, e
+                                                );
+                                                return Err(e);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             Ok(None) => {
                                 // Handshake either complete or waiting for more data
-                                if socket.is_handshake_complete() {
+                                if handshake_complete {
                                     info!(
                                         "✅ {} handshake complete, tunnel PDUs will be encrypted",
                                         protocol_name

@@ -327,6 +327,12 @@ impl DtlsUdpSocket {
                 let error_str = unsafe {
                     let err = ffi::ERR_get_error();
                     if err == 0 {
+                        // No error in queue - might be normal (e.g., need more data)
+                        // Treat like WANT_READ if we have packets to send
+                        if !outgoing_packets.is_empty() {
+                            debug!("🔍 SSL_do_handshake needs more data, but produced {} packets - sending them", outgoing_packets.len());
+                            return Ok(Some(outgoing_packets));
+                        }
                         format!("No OpenSSL error details (error code {:?})", other)
                     } else {
                         let mut buf = vec![0u8; 256];
