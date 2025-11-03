@@ -62,7 +62,8 @@ impl<'a> DecodeFrom<'a> for PacketHeader {
         let raw = u16::from_le_bytes([input[0], input[1]]);
         let flags_bits = raw & 0x0fff;
         let log_window_size = ((raw >> 12) & 0x0f) as u8;
-        let flags = HeaderFlags::from_bits(flags_bits).ok_or(UdpError::InvalidFlags(flags_bits))?;
+        // Use from_bits_truncate to ignore unknown/reserved flag bits that the server may send
+        let flags = HeaderFlags::from_bits_truncate(flags_bits);
         Ok((
             Self {
                 flags,
@@ -461,8 +462,10 @@ impl Packet {
         if self.ack.is_some() && self.ack_vector.is_some() {
             return Err(UdpError::InvalidField("ack.flags_conflict"));
         }
-        if self.data_header.is_some() != self.data_body.is_some() {
-            return Err(UdpError::InvalidField("data.header_body_mismatch"));
+        // Dummy packets can have data_header without data_body (sequence number only)
+        // Standard packets must have both header and body
+        if self.data_body.is_some() && self.data_header.is_none() {
+            return Err(UdpError::InvalidField("data.body_without_header"));
         }
         let mut expected = HeaderFlags::empty();
         if self.ack.is_some() {
@@ -552,10 +555,11 @@ impl Packet {
             layout.truncate(prefix.short_length as usize);
         }
         // For short_length == 0 or 7, use the full layout length (extended length encoding)
-        Self::decode_layout(&layout)
+        let is_dummy = prefix.packet_type_index == PacketPrefixByte::TYPE_DUMMY;
+        Self::decode_layout(&layout, is_dummy)
     }
 
-    fn decode_layout(layout: &[u8]) -> Result<Self> {
+    fn decode_layout(layout: &[u8], is_dummy: bool) -> Result<Self> {
         let (header, mut rest) = PacketHeader::decode_from(layout)?;
         if header.flags.contains(HeaderFlags::ACK) && header.flags.contains(HeaderFlags::ACKVEC) {
             return Err(UdpError::InvalidField("ack.flags_conflict"));
@@ -588,12 +592,26 @@ impl Packet {
         } else {
             None
         };
-        let data_header = if header.flags.contains(HeaderFlags::DATA) {
-            let (dh, tail) = DataHeaderPayload::decode_from(rest)?;
-            rest = tail;
-            Some(dh)
+        // Dummy packets have simpler DATA structure: just 2-byte sequence number
+        // Standard packets have full structure: 2-byte data_header + (2-byte channel_seq + payload)
+        let (data_header, data_body) = if header.flags.contains(HeaderFlags::DATA) {
+            if is_dummy {
+                // Dummy packet: just read 2-byte sequence number
+                ensure_min_length(rest, 2)?;
+                let sequence = u16::from_le_bytes([rest[0], rest[1]]);
+                rest = &rest[2..];
+                // Create data_header with the sequence, but no data_body (dummy packets carry no data)
+                (Some(DataHeaderPayload { data_sequence_number: sequence }), None)
+            } else {
+                // Standard packet: read full header + body
+                let (dh, tail) = DataHeaderPayload::decode_from(rest)?;
+                rest = tail;
+                let (body, tail) = DataBodyPayload::decode_from(rest)?;
+                rest = tail;
+                (Some(dh), Some(body))
+            }
         } else {
-            None
+            (None, None)
         };
         let ack_vector = if header.flags.contains(HeaderFlags::ACKVEC) {
             let (ack_vec, tail) = AckVectorPayload::decode_from(rest)?;
@@ -602,16 +620,12 @@ impl Packet {
         } else {
             None
         };
-        let data_body = if header.flags.contains(HeaderFlags::DATA) {
-            let (body, tail) = DataBodyPayload::decode_from(rest)?;
-            rest = tail;
-            Some(body)
-        } else {
-            None
-        };
-        if !rest.is_empty() {
-            return Err(UdpError::InvalidField("packet.trailing_bytes"));
-        }
+        // Dummy packets (and potentially all packets) can have trailing padding bytes.
+        // The packet boundary is already enforced by the short_length field or overall packet length,
+        // so we don't need to reject packets with trailing bytes.
+        // if !rest.is_empty() {
+        //     return Err(UdpError::InvalidField("packet.trailing_bytes"));
+        // }
         let packet = Self {
             header,
             ack,
