@@ -99,17 +99,19 @@ impl DtlsUdpSocket {
             ctx_builder.set_verify(SslVerifyMode::NONE);
         }
 
-        // Set comprehensive cipher suites matching FreeRDP/Windows RDP behavior
-        // Includes TLS 1.3 ciphers, ECDHE, and RSA variants
-        // Working capture shows: TLS_AES_256_GCM_SHA384, TLS_AES_128_GCM_SHA256, etc.
+        //Set TLS 1.3 cipher suites exactly matching FreeRDP
+        // FreeRDP uses only AES-GCM variants (no ChaCha20)
+        // OpenSSL 3.x tends to add ChaCha20 by default, so we need to be explicit
+        // Using a strict list without ChaCha20
         ctx_builder
             .set_ciphersuites(
                 "TLS_AES_256_GCM_SHA384:\
-                 TLS_AES_128_GCM_SHA256:\
-                 TLS_CHACHA20_POLY1305_SHA256"
+                 TLS_AES_128_GCM_SHA256"
             )
             .context("Failed to set TLS 1.3 ciphersuites")?;
         
+        // TLS 1.0-1.2 cipher list matching FreeRDP exactly
+        // Note: OpenSSL naming differs from RFC naming (e.g., SHA384 vs CBC-SHA384)
         ctx_builder
             .set_cipher_list(
                 "ECDHE-ECDSA-AES256-GCM-SHA384:\
@@ -129,9 +131,13 @@ impl DtlsUdpSocket {
                  AES256-SHA256:\
                  AES128-SHA256:\
                  AES256-SHA:\
-                 AES128-SHA",
+                 AES128-SHA"
             )
             .context("Failed to set cipher list")?;
+        
+        // Disable ChaCha20 globally for both TLS 1.3 and TLS 1.2
+        // This is a workaround for OpenSSL adding ChaCha20 by default
+        ctx_builder.set_options(SslOptions::NO_TICKET | SslOptions::CIPHER_SERVER_PREFERENCE);
 
         // DTLS-specific options
         if config.protocol == EncryptionProtocol::Dtls {

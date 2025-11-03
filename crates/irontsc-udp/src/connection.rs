@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use log::debug;
+
 use crate::error::{Result, UdpError};
 use crate::rdpudp_v1_packet;
 use crate::rdpudp_v1_packet_bytes;
@@ -284,13 +286,28 @@ impl UdpConnection {
         match self.negotiated_version {
             UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => {
                 self.pending_ack = Some(PendingAck::V1 { run_length: 1 });
+                debug!("📊 V1/V2: expected_remote={}, next_source={}, next_coded={}", 
+                    self.expected_remote_sequence, self.next_source_sequence, self.next_coded_sequence);
             }
             UdpProtocolVersion::V3 => {
                 let seq16 = syn.initial_sequence_number as u16;
                 self.v3_expected_sequence = seq16;
                 self.v3_next_data_sequence = seq16.wrapping_add(1);
-                self.v3_next_channel_sequence = seq16.wrapping_add(1);
-                self.pending_ack = Some(PendingAck::V3 { sequence: seq16 });
+                // Channel sequence is independent and starts from 1 (matches FreeRDP behavior)
+                self.v3_next_channel_sequence = 1;
+                // V3 does not send ACK payload in first DATA packet (only AckOfAcks)
+                self.pending_ack = None;
+                debug!("📊 V3: Server initial_seq={} (0x{:08X}), lower 16-bit={} (0x{:04X})", 
+                    syn.initial_sequence_number, syn.initial_sequence_number, seq16, seq16);
+                debug!("📊 V3: Our next_data_seq={} (0x{:04X}), next_channel_seq={} (0x{:04X})", 
+                    self.v3_next_data_sequence, self.v3_next_data_sequence, 
+                    self.v3_next_channel_sequence, self.v3_next_channel_sequence);
+                debug!("📊 V3: Our initial_seq={} (0x{:08X}), next_source={}, next_coded={}", 
+                    self.config.initial_sequence_number, self.config.initial_sequence_number,
+                    self.next_source_sequence, self.next_coded_sequence);
+                if let Some(hash) = &self.cookie_hash {
+                    debug!("📊 V3: Cookie hash = {:02X?}", hash);
+                }
             }
         }
 
@@ -530,6 +547,9 @@ impl UdpConnection {
         self.v3_next_data_sequence = self.v3_next_data_sequence.wrapping_add(1);
         self.v3_next_channel_sequence = self.v3_next_channel_sequence.wrapping_add(1);
 
+        debug!("📤 V3 DATA: data_seq={} (0x{:04X}), channel_seq={} (0x{:04X}), payload_len={}", 
+            data_sequence, data_sequence, channel_sequence, channel_sequence, data.len());
+
         let mut flags = rdpudp_v2_flags!(DATA);
         let mut ack_payload = None;
         if let Some(PendingAck::V3 { sequence }) = self.pending_ack.take() {
@@ -542,6 +562,7 @@ impl UdpConnection {
                 delay_ack_time_scale: 0,
                 delay_ack_time_additions: Vec::new(),
             });
+            debug!("📤 V3 DATA: Including ACK payload for seq={} (0x{:04X})", sequence, sequence);
         }
 
         // Per MS-RDPEUDP2, include DelayAckInfo for reliable mode
@@ -557,7 +578,12 @@ impl UdpConnection {
         // This acknowledges the peer's ACKs
         let ack_of_acks = Some(rdpudp_v2_ack_of_acks!(data_sequence as u16));
 
-        let header = V2PacketHeader::new(flags, 15)?; // LogWindow=15 (matches FreeRDP)
+        // Calculate LogWindowSize as log₂ of receive_window_size (per MS-RDPEUDP2 section 2.2.1.1)
+        // Maximum value is 15, which gives a window of 2^15 = 32,768 packets
+        let log_window = (self.config.receive_window_size as f32).log2().ceil() as u8;
+        let log_window = log_window.min(15); // Clamp to maximum allowed value
+        
+        let header = V2PacketHeader::new(flags, log_window)?;
         let encoded = rdpudp_v2_packet_bytes!(
             header = header,
             ack = ack_payload,
