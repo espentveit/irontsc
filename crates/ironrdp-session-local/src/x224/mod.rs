@@ -27,6 +27,9 @@ pub enum ProcessorOutput {
     ///
     /// [Deactivation-Reactivation Sequence]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/dfc234ce-481a-4674-9a5d-2a7bafb14432
     DeactivateAll(Box<ConnectionActivationSequence>),
+    /// Data received on the multitransport/tunnel channel (1008) that needs to be processed
+    /// by the UDP transport layer (e.g., TunnelCreateResponse).
+    Tunnel(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -135,9 +138,9 @@ impl Processor {
         } else if channel_id == 1008 {
             // Channel 1008 is used for multitransport/UDP protocol data during handshake
             // This is not a registered static or dynamic channel - it's a special protocol channel
-            // Just ignore the data as it's handled at a different layer
-            debug!("Received data on multitransport channel {channel_id}, ignoring");
-            Ok(Vec::new())
+            // Return the raw data so it can be processed by the multitransport handler
+            debug!("Received {} bytes on multitransport channel {}, forwarding for processing", data_ctx.user_data.len(), channel_id);
+            Ok(vec![ProcessorOutput::Tunnel(data_ctx.user_data.to_vec())])
         } else if self.get_dvc_by_channel_id(channel_id.into()).is_some() {
             // This is a dynamic virtual channel (DVC) managed by drdynvc
             debug!("Received data on DVC channel {channel_id}, ignoring in X224 processor");

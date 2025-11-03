@@ -72,6 +72,8 @@ pub enum UdpTransportCommand {
     SendData(Vec<u8>),
     /// Shutdown the transport
     Shutdown,
+    /// Process tunnel data received on TCP channel 1008 (e.g., TunnelCreateResponse)
+    TunnelData(Vec<u8>),
 }
 
 /// Events from the UDP transport
@@ -458,6 +460,12 @@ impl UdpTransportManager {
                         UdpTransportCommand::Shutdown => {
                             info!("UDP transport shutdown requested");
                             break;
+                        }
+                        UdpTransportCommand::TunnelData(data) => {
+                            debug!("📦 Processing tunnel data from TCP channel ({} bytes)", data.len());
+                            if let Err(e) = self.process_tunnel_data(&data).await {
+                                warn!("Error processing tunnel data: {}", e);
+                            }
                         }
                     }
                 }
@@ -1028,6 +1036,70 @@ impl UdpTransportManager {
 
         // For initial implementation, assume tunnel will be established
         // (response handling will be added in next iteration)
+        Ok(())
+    }
+
+    /// Process tunnel data received on TCP channel 1008 (e.g., TunnelCreateResponse)
+    async fn process_tunnel_data(&mut self, data: &[u8]) -> Result<()> {
+        info!("📥 Received tunnel data from TCP channel ({} bytes)", data.len());
+        debug!("   First 32 bytes: {:02x?}", &data[..data.len().min(32)]);
+
+        // There appears to be an 11-byte wrapper before the actual MS-RDPEMT tunnel PDU
+        // Skip it to get to the tunnel header
+        let wrapper_size = 11;
+        if data.len() < wrapper_size + 10 {
+            debug!("   Data too short ({} bytes), might be heartbeat or other message", data.len());
+            return Ok(());
+        }
+
+        let tunnel_data = &data[wrapper_size..];
+        debug!("   After skipping {}-byte wrapper, tunnel PDU ({} bytes): {:02x?}", 
+               wrapper_size, tunnel_data.len(), &tunnel_data[..tunnel_data.len().min(16)]);
+
+        // MS-RDPEMT RDP_TUNNEL_HEADER structure (little-endian):
+        // HeaderLength (2 bytes)
+        // HeaderVersion (2 bytes)
+        // Action (2 bytes)
+        // Flags (2 bytes)
+        // PayloadLength (2 bytes)
+        let header_length = u16::from_le_bytes([tunnel_data[0], tunnel_data[1]]) as usize;
+        let header_version = u16::from_le_bytes([tunnel_data[2], tunnel_data[3]]);
+        let action = u16::from_le_bytes([tunnel_data[4], tunnel_data[5]]);
+        let flags = u16::from_le_bytes([tunnel_data[6], tunnel_data[7]]);
+        let payload_length = u16::from_le_bytes([tunnel_data[8], tunnel_data[9]]);
+
+        debug!("   Header length: {}, Version: {}, Action: 0x{:04x}, Flags: 0x{:04x}, Payload: {}", 
+               header_length, header_version, action, flags, payload_length);
+
+        // Action codes from MS-RDPEMT:
+        // 0x0001 = CREATEREQUEST
+        // 0x0002 = CREATERESPONSE
+        // 0x0003 = DATA
+        if action == 0x0002 {
+            info!("✅ Received TunnelCreateResponse!");
+            
+            // RDP_TUNNEL_CREATERESPONSE = TunnelHeader (10 bytes) + HrResponse (4 bytes)
+            // However, the exact structure seems to vary - sometimes HrResponse is missing
+            // If we got a response at all, assume success and establish the tunnel
+            let hr_response = if tunnel_data.len() >= 14 {
+                i32::from_le_bytes([tunnel_data[10], tunnel_data[11], tunnel_data[12], tunnel_data[13]])
+            } else {
+                0 // Assume success if HrResponse not present
+            };
+            
+            if hr_response == 0 {
+                info!("   ✅ Tunnel creation successful! MS-RDPEMT tunnel established.");
+                self.tunnel_established = true;
+                
+                // Send event to notify tunnel is established
+                let _ = self.event_tx.send(UdpTransportEvent::TunnelEstablished);
+            } else {
+                warn!("   Tunnel creation failed (HRESULT = 0x{:08x})", hr_response);
+            }
+        } else {
+            debug!("   Unknown tunnel action: 0x{:04x}", action);
+        }
+
         Ok(())
     }
 }
