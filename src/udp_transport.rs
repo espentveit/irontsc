@@ -732,6 +732,19 @@ impl UdpTransportManager {
                                     self.send_data(response).await?;
                                 }
                                 
+                                // Send ACK for the received data to prevent retransmissions
+                                let mut conn = self.connection.lock().await;
+                                if let Ok(ack_packet) = conn.create_ack() {
+                                    drop(conn);
+                                    if let Err(e) = self.send_over_udp(&ack_packet).await {
+                                        warn!("Failed to send ACK after {} handshake data: {}", protocol_name, e);
+                                    } else {
+                                        debug!("✓ Sent ACK for {} handshake data", protocol_name);
+                                    }
+                                } else {
+                                    drop(conn);
+                                }
+                                
                                 // Check if handshake completed (may have completed while producing response)
                                 if handshake_complete {
                                     info!(
@@ -811,11 +824,75 @@ impl UdpTransportManager {
                                     }
                                 } else {
                                     trace!("{} waiting for more handshake data", protocol_name);
+                                    
+                                    // Still send ACK even if no response needed
+                                    let mut conn = self.connection.lock().await;
+                                    if let Ok(ack_packet) = conn.create_ack() {
+                                        drop(conn);
+                                        if let Err(e) = self.send_over_udp(&ack_packet).await {
+                                            warn!("Failed to send ACK: {}", e);
+                                        } else {
+                                            debug!("✓ Sent ACK for received data");
+                                        }
+                                    } else {
+                                        drop(conn);
+                                    }
                                 }
                             }
                             Err(e) => {
                                 error!("❌ {} handshake processing failed: {}", protocol_name, e);
+                                
+                                // Send ACK anyway to prevent retransmissions
+                                let mut conn = self.connection.lock().await;
+                                if let Ok(ack_packet) = conn.create_ack() {
+                                    drop(conn);
+                                    let _ = self.send_over_udp(&ack_packet).await;
+                                } else {
+                                    drop(conn);
+                                }
+                                
                                 return Err(e);
+                            }
+                            Ok(None) => {
+                                // No response packets, but still send ACK
+                                let mut conn = self.connection.lock().await;
+                                if let Ok(ack_packet) = conn.create_ack() {
+                                    drop(conn);
+                                    if let Err(e) = self.send_over_udp(&ack_packet).await {
+                                        warn!("Failed to send ACK: {}", e);
+                                    } else {
+                                        debug!("✓ Sent ACK (no response needed)");
+                                    }
+                                } else {
+                                    drop(conn);
+                                }
+                                
+                                // Check if handshake just completed
+                                if handshake_complete {
+                                    info!("✅ {} handshake complete", protocol_name);
+                                    
+                                    // Check if there's a queued TunnelCreateResponse to process
+                                    if let Some(pending_response) = self.pending_tunnel_response.take() {
+                                        info!("📥 Processing queued TunnelCreateResponse now that {} is complete", protocol_name);
+                                        if let Err(e) = self.process_tunnel_response(&pending_response) {
+                                            error!("Failed to process queued TunnelCreateResponse: {}", e);
+                                            return Err(e);
+                                        }
+                                    }
+                                    
+                                    // Now that TLS/DTLS is complete, create the tunnel
+                                    if let (Some(request_id), Some(security_cookie)) =
+                                        (self.request_id, self.security_cookie)
+                                    {
+                                        if !self.tunnel_established {
+                                            info!("🔧 {} complete, now creating MS-RDPEMT tunnel", protocol_name);
+                                            if let Err(e) = self.create_tunnel(request_id, security_cookie).await {
+                                                error!("Tunnel creation after {} failed: {}", protocol_name, e);
+                                                return Err(e);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         continue; // Don't process as tunnel PDU yet

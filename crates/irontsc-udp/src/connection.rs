@@ -104,7 +104,7 @@ impl Default for UdpConfig {
             enable_fec: true,
             fec_block_size: 8,
             retransmit_timeout_ms: 300,
-            max_retransmits: 20,  // Increased to handle slow server responses (can take 3-4 seconds)
+            max_retransmits: 60,  // Increased to handle slow server responses (can take 3-4 seconds)
             keepalive_interval_ms: 5_000,
         }
     }
