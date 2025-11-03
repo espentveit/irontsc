@@ -2190,6 +2190,19 @@ async fn active_session<T: RdpEventSender + Clone>(
                         }
                     }
                 }
+                ActiveStageOutput::Tunnel(data) => {
+                    // Data received on the multitransport/tunnel channel (1008)
+                    // This needs to be forwarded to the UDP transport layer
+                    debug!("📦 Received {} bytes on tunnel channel, forwarding to UDP transport", data.len());
+                    
+                    if let Some(tunnel) = &udp_tunnel {
+                        if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::TunnelData(data)) {
+                            warn!("Failed to forward tunnel data to UDP transport: {}", e);
+                        }
+                    } else {
+                        warn!("Received tunnel data but UDP tunnel not initialized");
+                    }
+                }
                 ActiveStageOutput::Terminate(reason) => break 'outer reason,
             }
         }

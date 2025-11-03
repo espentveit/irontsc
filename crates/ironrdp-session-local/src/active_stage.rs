@@ -279,6 +279,7 @@ pub enum ActiveStageOutput {
     Orders(Vec<DrawingOrder>),
     Terminate(GracefulDisconnectReason),
     DeactivateAll(Box<ConnectionActivationSequence>),
+    Tunnel(Vec<u8>),
 }
 
 impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
@@ -306,6 +307,7 @@ impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
                 Ok(Self::Terminate(desc))
             }
             x224::ProcessorOutput::DeactivateAll(cas) => Ok(Self::DeactivateAll(cas)),
+            x224::ProcessorOutput::Tunnel(data) => Ok(Self::Tunnel(data)),
         }
     }
 }
