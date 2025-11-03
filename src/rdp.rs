@@ -30,7 +30,7 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
 };
-use ironrdp::svc::SvcMessage;
+use ironrdp::svc::{SvcMessage, SvcProcessor};
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
 use ironrdp_connector::legacy;
 use ironrdp_core::impl_as_any;
@@ -1845,18 +1845,52 @@ async fn active_session<T: RdpEventSender + Clone>(
                             tunnel.tunnel_established = true;
                         }
                         info!("🔐 UDP tunnel established (MS-RDPEMT)");
-                        if let Some(channel) =
-                            active_stage.get_dvc_mut::<crate::gfx_channel::GfxDvcProcessor>()
-                        {
-                            if let Some(gfx) = channel
-                                .channel_processor_downcast_mut::<crate::gfx_channel::GfxDvcProcessor>()
-                            {
-                                gfx.enable_udp_mode();
-                            } else {
-                                warn!("UDP tunnel established but GFX processor could not be downcast");
+                        info!("⏳ Waiting for server to send Soft-Sync Request...");
+                        // Note: Server will initiate Soft-Sync by sending SOFT_SYNC_REQUEST_PDU
+                        // We will respond with SOFT_SYNC_RESPONSE_PDU in the DRDYNVC handler
+                    }
+                    Some(UdpTransportEvent::TunnelDvcData(dvc_data)) => {
+                        // DVC data extracted from tunnel DATA packet - process it as DRDYNVC data
+                        debug!("📨 Processing {} bytes of DVC data from tunnel", dvc_data.len());
+                        
+                        // Feed the DVC data to the DRDYNVC processor  
+                        if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
+                            match drdynvc.process(&dvc_data) {
+                                Ok(response_messages) => {
+                                    if !response_messages.is_empty() {
+                                        info!("📦 Generated {} response messages from tunnel DVC data", response_messages.len());
+                                        // Encode responses and send back through the tunnel
+                                        match active_stage.encode_dvc_messages(response_messages) {
+                                            Ok(frame) => {
+                                                outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to encode DVC response messages: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("❌ Failed to process tunnel DVC data: {:?}", e);
+                                }
                             }
                         } else {
-                            warn!("UDP tunnel established but GFX processor is not available");
+                            warn!("Tunnel DVC data received but DRDYNVC processor not available");
+                        }
+                    }
+                    Some(UdpTransportEvent::SoftSyncCompleted { tunnel_type }) => {
+                        info!("🔄 Received SoftSyncCompleted event for tunnel_type=0x{:08X}", tunnel_type);
+                        // Enable UDP mode for the GFX channel
+                        use crate::gfx_channel::GfxDvcProcessor;
+                        if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
+                            if let Some(gfx) = channel.channel_processor_downcast_mut::<GfxDvcProcessor>() {
+                                gfx.enable_udp_mode();
+                                info!("✅ UDP mode enabled for graphics channel");
+                            } else {
+                                warn!("SoftSyncCompleted received but GFX processor could not be downcast");
+                            }
+                        } else {
+                            warn!("SoftSyncCompleted received but GFX processor is unavailable");
                         }
                     }
                     Some(UdpTransportEvent::DataReceived(data)) => {
@@ -2204,6 +2238,23 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                 }
                 ActiveStageOutput::Terminate(reason) => break 'outer reason,
+            }
+        }
+
+        // Check if Soft-Sync was completed by DRDYNVC processor
+        if let Some(drdynvc_client) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
+            if let Some(tunnel_type) = drdynvc_client.soft_sync_completed() {
+                info!("✅ Soft-Sync completed for tunnel_type=0x{:08X}, signaling UDP transport", tunnel_type);
+                // Clear the completion flag
+                drdynvc_client.clear_soft_sync_completed();
+                // Signal the UDP transport that soft-sync is complete
+                if let Some(tunnel) = &udp_tunnel {
+                    if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SoftSyncComplete { tunnel_type }) {
+                        warn!("Failed to send SoftSyncComplete event to UDP transport: {}", e);
+                    }
+                } else {
+                    warn!("Soft-Sync completed but UDP tunnel not initialized");
+                }
             }
         }
 

@@ -74,6 +74,8 @@ pub enum UdpTransportCommand {
     Shutdown,
     /// Process tunnel data received on TCP channel 1008 (e.g., TunnelCreateResponse)
     TunnelData(Vec<u8>),
+    /// Soft-Sync completed, channels should switch to UDP
+    SoftSyncComplete { tunnel_type: u32 },
 }
 
 /// Events from the UDP transport
@@ -83,6 +85,10 @@ pub enum UdpTransportEvent {
     Connected,
     /// MS-RDPEMT tunnel established
     TunnelEstablished,
+    /// Soft-Sync completed for switching channels to UDP
+    SoftSyncCompleted { tunnel_type: u32 },
+    /// DVC data extracted from tunnel DATA packet (needs to be processed by DRDYNVC)
+    TunnelDvcData(Vec<u8>),
     /// Data received
     DataReceived(Vec<u8>),
     /// Connection lost
@@ -468,6 +474,13 @@ impl UdpTransportManager {
                             debug!("📦 Processing tunnel data from TCP channel ({} bytes)", data.len());
                             if let Err(e) = self.process_tunnel_data(&data).await {
                                 warn!("Error processing tunnel data: {}", e);
+                            }
+                        }
+                        UdpTransportCommand::SoftSyncComplete { tunnel_type } => {
+                            info!("✅ Soft-Sync completed for tunnel_type=0x{:08X}", tunnel_type);
+                            // Emit event to signal that channels should switch to UDP
+                            if let Err(e) = self.event_tx.send(UdpTransportEvent::SoftSyncCompleted { tunnel_type }) {
+                                warn!("Failed to send SoftSyncCompleted event: {}", e);
                             }
                         }
                     }
@@ -1206,6 +1219,19 @@ impl UdpTransportManager {
                 // TLS/DTLS ready, process immediately
                 self.process_tunnel_response(&tunnel_data)?;
             }
+        } else if action == 0x0003 {
+            // DATA packet - extract DVC payload and forward to DRDYNVC processor
+            if tunnel_data.len() < header_length {
+                warn!("   Tunnel DATA packet too short (has {} bytes, header says {})", 
+                      tunnel_data.len(), header_length);
+                return Ok(());
+            }
+
+            let payload = &tunnel_data[header_length..];
+            debug!("   📦 Extracted {} bytes of DVC data from tunnel DATA packet", payload.len());
+            
+            // Send event with DVC data to be processed by main loop
+            let _ = self.event_tx.send(UdpTransportEvent::TunnelDvcData(payload.to_vec()));
         } else {
             debug!("   Unknown tunnel action: 0x{:04x}", action);
         }

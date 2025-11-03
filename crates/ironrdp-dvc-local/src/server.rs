@@ -195,6 +195,12 @@ impl SvcProcessor for DrdynvcServer {
                     );
                 }
             }
+            DrdynvcClientPdu::SoftSyncRequest(req_pdu) => {
+                debug!("Got DVC SoftSync Request PDU from client: {req_pdu:?}");
+                // Client is requesting to switch channels to UDP
+                // Server should respond with SoftSyncResponse
+                // For now, just log it - full implementation would handle channel switching
+            }
             DrdynvcClientPdu::SoftSyncResponse(resp_pdu) => {
                 debug!("Got DVC SoftSync Response PDU: {resp_pdu:?}");
             }

@@ -414,19 +414,27 @@ impl UdpConnection {
         }
 
         let mut retransmits = Vec::new();
+        let mut to_remove = Vec::new();
         let now = Instant::now();
         let timeout = Duration::from_millis(self.config.retransmit_timeout_ms as u64);
 
-        for pending in self.pending_packets.values_mut() {
+        for (key, pending) in self.pending_packets.iter_mut() {
             if now.duration_since(pending.last_sent) >= timeout {
                 if pending.retransmit_count < self.config.max_retransmits {
                     pending.retransmit_count += 1;
                     pending.last_sent = now;
                     retransmits.push(pending.data.clone());
                 } else {
-                    self.state = ConnectionState::Terminated;
+                    // Don't terminate connection - just stop retransmitting this packet
+                    // The higher layer (TLS/DTLS) will handle timeouts if needed
+                    to_remove.push(*key);
                 }
             }
+        }
+        
+        // Remove packets that hit max retransmits
+        for key in to_remove {
+            self.pending_packets.remove(&key);
         }
 
         retransmits

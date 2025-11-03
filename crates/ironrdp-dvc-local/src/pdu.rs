@@ -64,6 +64,7 @@ pub enum DrdynvcClientPdu {
     Create(CreateResponsePdu),
     Close(ClosePdu),
     Data(DrdynvcDataPdu),
+    SoftSyncRequest(SoftSyncRequestPdu),
     SoftSyncResponse(SoftSyncResponsePdu),
 }
 
@@ -74,6 +75,7 @@ impl Encode for DrdynvcClientPdu {
             DrdynvcClientPdu::Create(pdu) => pdu.encode(dst),
             DrdynvcClientPdu::Data(pdu) => pdu.encode(dst),
             DrdynvcClientPdu::Close(pdu) => pdu.encode(dst),
+            DrdynvcClientPdu::SoftSyncRequest(pdu) => pdu.encode(dst),
             DrdynvcClientPdu::SoftSyncResponse(pdu) => pdu.encode(dst),
         }
     }
@@ -84,6 +86,7 @@ impl Encode for DrdynvcClientPdu {
             DrdynvcClientPdu::Create(_) => CreateResponsePdu::name(),
             DrdynvcClientPdu::Data(pdu) => pdu.name(),
             DrdynvcClientPdu::Close(_) => ClosePdu::name(),
+            DrdynvcClientPdu::SoftSyncRequest(_) => SoftSyncRequestPdu::name(),
             DrdynvcClientPdu::SoftSyncResponse(_) => SoftSyncResponsePdu::name(),
         }
     }
@@ -94,6 +97,7 @@ impl Encode for DrdynvcClientPdu {
             DrdynvcClientPdu::Create(pdu) => pdu.size(),
             DrdynvcClientPdu::Data(pdu) => pdu.size(),
             DrdynvcClientPdu::Close(pdu) => pdu.size(),
+            DrdynvcClientPdu::SoftSyncRequest(pdu) => pdu.size(),
             DrdynvcClientPdu::SoftSyncResponse(pdu) => pdu.size(),
         }
     }
@@ -114,6 +118,8 @@ impl Decode<'_> for DrdynvcClientPdu {
             Cmd::Capability => Ok(Self::Capabilities(CapabilitiesResponsePdu::decode(
                 header, src,
             )?)),
+            Cmd::SoftSyncRequest => Ok(Self::SoftSyncRequest(SoftSyncRequestPdu::decode(header, src)?)),
+            Cmd::SoftSyncResponse => Ok(Self::SoftSyncResponse(SoftSyncResponsePdu::decode(header, src)?)),
             _ => Err(unsupported_value_err!("Cmd", header.cmd.into())),
         }
     }
@@ -127,6 +133,7 @@ pub enum DrdynvcServerPdu {
     Close(ClosePdu),
     Data(DrdynvcDataPdu),
     SoftSyncRequest(SoftSyncRequestPdu),
+    SoftSyncResponse(SoftSyncResponsePdu),
 }
 
 impl Encode for DrdynvcServerPdu {
@@ -137,6 +144,7 @@ impl Encode for DrdynvcServerPdu {
             DrdynvcServerPdu::Create(pdu) => pdu.encode(dst),
             DrdynvcServerPdu::Close(pdu) => pdu.encode(dst),
             DrdynvcServerPdu::SoftSyncRequest(pdu) => pdu.encode(dst),
+            DrdynvcServerPdu::SoftSyncResponse(pdu) => pdu.encode(dst),
         }
     }
 
@@ -147,6 +155,7 @@ impl Encode for DrdynvcServerPdu {
             DrdynvcServerPdu::Create(_) => CreateRequestPdu::name(),
             DrdynvcServerPdu::Close(_) => ClosePdu::name(),
             DrdynvcServerPdu::SoftSyncRequest(_) => SoftSyncRequestPdu::name(),
+            DrdynvcServerPdu::SoftSyncResponse(_) => SoftSyncResponsePdu::name(),
         }
     }
 
@@ -157,6 +166,7 @@ impl Encode for DrdynvcServerPdu {
             DrdynvcServerPdu::Create(pdu) => pdu.size(),
             DrdynvcServerPdu::Close(pdu) => pdu.size(),
             DrdynvcServerPdu::SoftSyncRequest(pdu) => pdu.size(),
+            DrdynvcServerPdu::SoftSyncResponse(pdu) => pdu.size(),
         }
     }
 }
@@ -177,6 +187,9 @@ impl Decode<'_> for DrdynvcServerPdu {
                 header, src,
             )?)),
             Cmd::SoftSyncRequest => Ok(Self::SoftSyncRequest(SoftSyncRequestPdu::decode(
+                header, src,
+            )?)),
+            Cmd::SoftSyncResponse => Ok(Self::SoftSyncResponse(SoftSyncResponsePdu::decode(
                 header, src,
             )?)),
             _ => Err(unsupported_value_err!("Cmd", header.cmd.into())),
@@ -842,7 +855,7 @@ pub struct SoftSyncRequestPdu {
 impl SoftSyncRequestPdu {
     const PAD_SIZE: usize = 1;
 
-    fn new(flags: u16, tunnels: Vec<SoftSyncChannelListEntry>) -> Self {
+    pub fn new(flags: u16, tunnels: Vec<SoftSyncChannelListEntry>) -> Self {
         let mut this = Self {
             header: Header::new(0, 0, Cmd::SoftSyncRequest),
             length: 0,
@@ -963,6 +976,23 @@ impl SoftSyncResponsePdu {
             }
         }
         Self::new(tunnels)
+    }
+
+    fn decode(header: Header, src: &mut ReadCursor<'_>) -> DecodeResult<Self> {
+        ensure_size!(in: src, size: 1 + 4);
+        let _pad = src.read_u8();
+        let tunnel_count = src.read_u32();
+        
+        let mut tunnels_to_switch = Vec::with_capacity(tunnel_count as usize);
+        for _ in 0..tunnel_count {
+            ensure_size!(in: src, size: 4);
+            tunnels_to_switch.push(src.read_u32());
+        }
+        
+        Ok(Self {
+            header,
+            tunnels_to_switch,
+        })
     }
 
     fn total_size(&self) -> usize {
