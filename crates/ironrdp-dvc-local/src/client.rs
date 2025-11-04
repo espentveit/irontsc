@@ -9,7 +9,7 @@ use ironrdp_svc::{
 };
 use pdu::gcc::ChannelName;
 use pdu::PduResult;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::pdu::{
     CapabilitiesResponsePdu, CapsVersion, ClosePdu, CreateResponsePdu, CreationStatus,
@@ -102,12 +102,39 @@ impl DrdynvcClient {
         self.dynamic_channels.get_by_channel_id(channel_id)
     }
 
-    fn create_capabilities_response(&mut self) -> SvcMessage {
+    fn create_capabilities_response(&mut self, server_version: CapsVersion) -> SvcMessage {
+        // Per MS-RDPEDYC §2.2.1.2, client MUST respond with the version level it supports
+        // We support up to V3, but must negotiate with server's requested version
+        const CLIENT_MAX_VERSION: CapsVersion = CapsVersion::V3;
+        
+        // Negotiate: use minimum of client max and server requested
+        let negotiated_version = match (CLIENT_MAX_VERSION, server_version) {
+            (CapsVersion::V3, CapsVersion::V3) => CapsVersion::V3,
+            (CapsVersion::V3, CapsVersion::V2) => CapsVersion::V2,
+            (CapsVersion::V3, CapsVersion::V1) => CapsVersion::V1,
+            (CapsVersion::V2, CapsVersion::V3) => CapsVersion::V2,
+            (CapsVersion::V2, CapsVersion::V2) => CapsVersion::V2,
+            (CapsVersion::V2, CapsVersion::V1) => CapsVersion::V1,
+            (CapsVersion::V1, _) => CapsVersion::V1,
+        };
+        
         let caps_response =
-            DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(CapsVersion::V3));
-        debug!("Send DVC Capabilities Response PDU: {caps_response:?}");
+            DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(negotiated_version));
+        debug!(
+            "Send DVC Capabilities Response PDU: {caps_response:?} (server requested {:?}, client max {:?}, negotiated {:?})",
+            server_version, CLIENT_MAX_VERSION, negotiated_version
+        );
         self.cap_handshake_done = true;
         SvcMessage::from(caps_response)
+    }
+    
+    /// Extract the version from a CapabilitiesRequestPdu
+    fn get_caps_version(caps_request: &crate::pdu::CapabilitiesRequestPdu) -> CapsVersion {
+        match caps_request {
+            crate::pdu::CapabilitiesRequestPdu::V1 { .. } => CapsVersion::V1,
+            crate::pdu::CapabilitiesRequestPdu::V2 { .. } => CapsVersion::V2,
+            crate::pdu::CapabilitiesRequestPdu::V3 { .. } => CapsVersion::V3,
+        }
     }
 
     fn handle_soft_sync_request(
@@ -115,10 +142,27 @@ impl DrdynvcClient {
         request: &SoftSyncRequestPdu,
         responses: &mut Vec<SvcMessage>,
     ) -> PduResult<()> {
-        debug!("📥 Received Soft-Sync Request from server: {} tunnel(s)", request.tunnels.len());
-        
+        debug!(
+            "📥 Received Soft-Sync Request from server: {} tunnel(s)",
+            request.tunnels.len()
+        );
+
+        // Per MS-RDPEDYC §2.2.5.1, validate SOFT_SYNC_TCP_FLUSHED flag
+        // "This flag MUST be set to indicate no more data will be sent over TCP for the specified DVCs"
+        if (request.flags & crate::pdu::SOFT_SYNC_TCP_FLUSHED) == 0 {
+            warn!(
+                "⚠️  Server Soft-Sync Request missing SOFT_SYNC_TCP_FLUSHED flag (flags=0x{:04X})",
+                request.flags
+            );
+            warn!("   Per MS-RDPEDYC §2.2.5.1, this flag MUST be set - continuing anyway");
+        }
+
         for tunnel in &request.tunnels {
-            debug!("   Tunnel type=0x{:08X}, {} channel(s)", tunnel.tunnel_type, tunnel.channel_ids.len());
+            debug!(
+                "   Tunnel type=0x{:08X}, {} channel(s)",
+                tunnel.tunnel_type,
+                tunnel.channel_ids.len()
+            );
             for &channel_id in &tunnel.channel_ids {
                 if let Some(channel) = self.dynamic_channels.get_by_channel_id_mut(channel_id) {
                     channel.on_soft_sync(tunnel.tunnel_type);
@@ -129,7 +173,7 @@ impl DrdynvcClient {
                     );
                 }
             }
-            
+
             // Store the first tunnel type for notification
             if self.soft_sync_completed_tunnel.is_none() {
                 self.soft_sync_completed_tunnel = Some(tunnel.tunnel_type);
@@ -150,8 +194,10 @@ impl DrdynvcClient {
     /// - 0x00000001 for TUNNELTYPE_UDPFECR (Reliable UDP)
     /// - 0x00000003 for TUNNELTYPE_UDPFECL (Lossy UDP)
     pub fn create_soft_sync_request(&self, tunnel_type: u32) -> PduResult<SvcMessage> {
-        use crate::pdu::{SoftSyncChannelListEntry, SOFT_SYNC_CHANNEL_LIST_PRESENT, SOFT_SYNC_TCP_FLUSHED};
-        
+        use crate::pdu::{
+            SoftSyncChannelListEntry, SOFT_SYNC_CHANNEL_LIST_PRESENT, SOFT_SYNC_TCP_FLUSHED,
+        };
+
         // Collect all active dynamic channel IDs
         let channel_ids: Vec<u32> = self
             .dynamic_channels
@@ -171,9 +217,13 @@ impl DrdynvcClient {
 
         let flags = SOFT_SYNC_TCP_FLUSHED | SOFT_SYNC_CHANNEL_LIST_PRESENT;
         let request = SoftSyncRequestPdu::new(flags, tunnels);
-        
-        debug!("Created Soft-Sync Request PDU: tunnel_type=0x{:08X}, {} channels", tunnel_type, request.tunnels[0].channel_ids.len());
-        
+
+        debug!(
+            "Created Soft-Sync Request PDU: tunnel_type=0x{:08X}, {} channels",
+            tunnel_type,
+            request.tunnels[0].channel_ids.len()
+        );
+
         Ok(SvcMessage::from(DrdynvcClientPdu::SoftSyncRequest(request)))
     }
 }
@@ -201,8 +251,11 @@ impl SvcProcessor for DrdynvcClient {
 
         match pdu {
             DrdynvcServerPdu::Capabilities(caps_request) => {
+                // Per MS-RDPEDYC §3.1.3: Some servers send Capabilities Request over UDP after switch
+                // This handler works for both TCP (initial handshake) and UDP (post-switch) paths
                 debug!("Got DVC Capabilities Request PDU: {caps_request:?}");
-                responses.push(self.create_capabilities_response());
+                let server_version = Self::get_caps_version(&caps_request);
+                responses.push(self.create_capabilities_response(server_version));
             }
             DrdynvcServerPdu::Create(create_request) => {
                 debug!("Got DVC Create Request PDU: {create_request:?}");
@@ -214,7 +267,8 @@ impl SvcProcessor for DrdynvcClient {
                         "Got DVC Create Request PDU before a Capabilities Request PDU. \
                         Sending Capabilities Response PDU before the Create Response PDU."
                     );
-                    responses.push(self.create_capabilities_response());
+                    // Server didn't send Caps Request, assume V1 for compatibility
+                    responses.push(self.create_capabilities_response(CapsVersion::V1));
                 }
 
                 let channel_exists = self
@@ -282,7 +336,10 @@ impl SvcProcessor for DrdynvcClient {
                 // Server confirmed that channels have been switched to UDP
                 // Store the first tunnel type for notification
                 if let Some(&tunnel_type) = response.tunnels_to_switch.first() {
-                    debug!("Server confirmed soft-sync for tunnel_type=0x{:08X}", tunnel_type);
+                    debug!(
+                        "Server confirmed soft-sync for tunnel_type=0x{:08X}",
+                        tunnel_type
+                    );
                     self.soft_sync_completed_tunnel = Some(tunnel_type);
                 }
             }

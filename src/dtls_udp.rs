@@ -63,11 +63,10 @@ impl DtlsUdpSocket {
             EncryptionProtocol::Tls => "TLS",
             EncryptionProtocol::Dtls => "DTLS",
         };
-        
+
         info!(
             "🔐 Initializing {} for MS-RDPEMT (server: {})",
-            protocol_name,
-            config.server_name
+            protocol_name, config.server_name
         );
 
         // Create TLS or DTLS context based on protocol
@@ -75,10 +74,9 @@ impl DtlsUdpSocket {
             EncryptionProtocol::Tls => SslMethod::tls(),
             EncryptionProtocol::Dtls => SslMethod::dtls(),
         };
-        
-        let mut ctx_builder =
-            SslContext::builder(ssl_method)
-                .with_context(|| format!("Failed to create {} context", protocol_name))?;
+
+        let mut ctx_builder = SslContext::builder(ssl_method)
+            .with_context(|| format!("Failed to create {} context", protocol_name))?;
 
         // Set version range to support TLS 1.0 through 1.3 (match FreeRDP)
         // The working capture shows: TLS 1.3, 1.2, 1.1, 1.0 support
@@ -96,7 +94,10 @@ impl DtlsUdpSocket {
                 .set_default_verify_paths()
                 .context("Failed to load system CA certificates")?;
         } else {
-            warn!("⚠️  {} certificate verification disabled (insecure, for testing only)", protocol_name);
+            warn!(
+                "⚠️  {} certificate verification disabled (insecure, for testing only)",
+                protocol_name
+            );
             ctx_builder.set_verify(SslVerifyMode::NONE);
         }
 
@@ -107,10 +108,10 @@ impl DtlsUdpSocket {
         ctx_builder
             .set_ciphersuites(
                 "TLS_AES_256_GCM_SHA384:\
-                 TLS_AES_128_GCM_SHA256"
+                 TLS_AES_128_GCM_SHA256",
             )
             .context("Failed to set TLS 1.3 ciphersuites")?;
-        
+
         // TLS 1.0-1.2 cipher list matching FreeRDP exactly
         // Note: OpenSSL naming differs from RFC naming (e.g., SHA384 vs CBC-SHA384)
         ctx_builder
@@ -132,10 +133,10 @@ impl DtlsUdpSocket {
                  AES256-SHA256:\
                  AES128-SHA256:\
                  AES256-SHA:\
-                 AES128-SHA"
+                 AES128-SHA",
             )
             .context("Failed to set cipher list")?;
-        
+
         // Disable ChaCha20 globally for both TLS 1.3 and TLS 1.2
         // This is a workaround for OpenSSL adding ChaCha20 by default
         ctx_builder.set_options(SslOptions::NO_TICKET | SslOptions::CIPHER_SERVER_PREFERENCE);
@@ -145,7 +146,7 @@ impl DtlsUdpSocket {
             // Ensure OpenSSL does not attempt to probe MTU on its own
             ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
         }
-        
+
         ctx_builder.set_mode(SslMode::AUTO_RETRY);
 
         let ssl_context = ctx_builder.build();
@@ -168,8 +169,11 @@ impl DtlsUdpSocket {
             EncryptionProtocol::Tls => "TLS",
             EncryptionProtocol::Dtls => "DTLS",
         };
-        
-        info!("🤝 Starting {} 1.2 handshake with {}", protocol_name, self.server_addr);
+
+        info!(
+            "🤝 Starting {} 1.2 handshake with {}",
+            protocol_name, self.server_addr
+        );
 
         // Create SSL connection instance
         let mut ssl = Ssl::new(&self.ssl_context).context("Failed to create SSL connection")?;
@@ -180,7 +184,7 @@ impl DtlsUdpSocket {
 
         // Configure protocol-specific options
         ssl.set_connect_state();
-        
+
         // Only set MTU for DTLS (not needed for TLS)
         if self.protocol == EncryptionProtocol::Dtls {
             unsafe {
@@ -231,47 +235,67 @@ impl DtlsUdpSocket {
             .as_mut()
             .context("DTLS handshake not started - call start_handshake() first")?;
 
-        debug!("🔍 Processing {} bytes of TLS/DTLS handshake data. First 32 bytes: {:02x?}", 
-               data.len(), 
-               &data[..data.len().min(32)]);
+        debug!(
+            "🔍 Processing {} bytes of TLS/DTLS handshake data. First 32 bytes: {:02x?}",
+            data.len(),
+            &data[..data.len().min(32)]
+        );
 
         // Parse TLS record header to see what we're receiving
         if data.len() >= 5 {
             let record_type = data[0];
             let version = u16::from_be_bytes([data[1], data[2]]);
             let record_length = u16::from_be_bytes([data[3], data[4]]);
-            debug!("🔍 TLS record: type={} version=0x{:04x} length={} (total_data={})", 
-                   record_type, version, record_length, data.len());
-            
+            debug!(
+                "🔍 TLS record: type={} version=0x{:04x} length={} (total_data={})",
+                record_type,
+                version,
+                record_length,
+                data.len()
+            );
+
             // Check if we have multiple records
             let expected_total = 5 + record_length as usize;
             if data.len() > expected_total {
-                debug!("🔍 Multiple TLS records detected: first={} bytes, total={} bytes", 
-                       expected_total, data.len());
+                debug!(
+                    "🔍 Multiple TLS records detected: first={} bytes, total={} bytes",
+                    expected_total,
+                    data.len()
+                );
                 // Check what the next record is
                 if expected_total + 5 <= data.len() {
                     let next_type = data[expected_total];
-                    let next_version = u16::from_be_bytes([data[expected_total+1], data[expected_total+2]]);
-                    let next_length = u16::from_be_bytes([data[expected_total+3], data[expected_total+4]]);
-                    debug!("🔍   Next record: type={} version=0x{:04x} length={}", 
-                           next_type, next_version, next_length);
+                    let next_version =
+                        u16::from_be_bytes([data[expected_total + 1], data[expected_total + 2]]);
+                    let next_length =
+                        u16::from_be_bytes([data[expected_total + 3], data[expected_total + 4]]);
+                    debug!(
+                        "🔍   Next record: type={} version=0x{:04x} length={}",
+                        next_type, next_version, next_length
+                    );
                 }
             } else if data.len() < expected_total {
-                warn!("🔍 Incomplete TLS record: have {} bytes, need {} bytes", 
-                      data.len(), expected_total);
+                warn!(
+                    "🔍 Incomplete TLS record: have {} bytes, need {} bytes",
+                    data.len(),
+                    expected_total
+                );
             }
         }
 
         // Feed data into read BIO
         Self::write_to_rbio(ssl, data)?;
 
-        debug!("🔍 Calling SSL_do_handshake after feeding {} bytes...", data.len());
+        debug!(
+            "🔍 Calling SSL_do_handshake after feeding {} bytes...",
+            data.len()
+        );
 
         // Continue handshake
         let ret = unsafe { ffi::SSL_do_handshake(Self::ssl_ptr(ssl)) };
 
         debug!("🔍 SSL_do_handshake returned: {}", ret);
-        
+
         // Check what protocol version was negotiated
         let ssl_version = unsafe { ffi::SSL_version(Self::ssl_ptr(ssl)) };
         let version_str = match ssl_version {
@@ -282,13 +306,19 @@ impl DtlsUdpSocket {
             0x0304 => "TLS 1.3",
             _ => "Unknown",
         };
-        debug!("🔍 Negotiated protocol version: 0x{:04x} ({})", ssl_version, version_str);
+        debug!(
+            "🔍 Negotiated protocol version: 0x{:04x} ({})",
+            ssl_version, version_str
+        );
 
         // IMPORTANT: Always check for outgoing data first, even if there was an error
         // OpenSSL might have prepared a response before encountering an error
         let outgoing_packets = Self::drain_wbio(ssl)?;
         if !outgoing_packets.is_empty() {
-            debug!("🔍 OpenSSL produced {} response packet(s) during handshake", outgoing_packets.len());
+            debug!(
+                "🔍 OpenSSL produced {} response packet(s) during handshake",
+                outgoing_packets.len()
+            );
         }
 
         if ret == 1 {
@@ -313,7 +343,10 @@ impl DtlsUdpSocket {
                     trace!("DTLS waiting for more server data");
                     Ok(None)
                 } else {
-                    trace!("DTLS handshake produced {} response packets", outgoing_packets.len());
+                    trace!(
+                        "DTLS handshake produced {} response packets",
+                        outgoing_packets.len()
+                    );
                     Ok(Some(outgoing_packets))
                 }
             }
@@ -330,7 +363,10 @@ impl DtlsUdpSocket {
                         // No error in queue - might be normal (e.g., need more data)
                         // Treat like WANT_READ if we have packets to send
                         if !outgoing_packets.is_empty() {
-                            debug!("🔍 SSL_do_handshake needs more data, but produced {} packets - sending them", outgoing_packets.len());
+                            debug!(
+                                "🔍 SSL_do_handshake needs more data, but produced {} packets - sending them",
+                                outgoing_packets.len()
+                            );
                             return Ok(Some(outgoing_packets));
                         }
                         format!("No OpenSSL error details (error code {:?})", other)
@@ -340,15 +376,21 @@ impl DtlsUdpSocket {
                         let err_str = std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8)
                             .to_string_lossy()
                             .to_string();
-                        format!("OpenSSL error: {} (code {:?}, raw: 0x{:x})", err_str, other, err)
+                        format!(
+                            "OpenSSL error: {} (code {:?}, raw: 0x{:x})",
+                            err_str, other, err
+                        )
                     }
                 };
                 warn!("🔍 TLS/DTLS handshake error details: {}", error_str);
-                
+
                 // Even though there's an error, we might have produced packets that need to be sent
                 // (e.g., a Finished message before encountering a decryption error on the next record)
                 if !outgoing_packets.is_empty() {
-                    warn!("⚠️  Returning {} packets despite error - they may need to be sent", outgoing_packets.len());
+                    warn!(
+                        "⚠️  Returning {} packets despite error - they may need to be sent",
+                        outgoing_packets.len()
+                    );
                     Ok(Some(outgoing_packets))
                 } else {
                     Err(anyhow!("DTLS handshake failed: {}", error_str))

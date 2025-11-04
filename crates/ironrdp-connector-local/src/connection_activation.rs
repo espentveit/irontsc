@@ -152,7 +152,8 @@ impl Sequence for ConnectionActivationSequence {
                     // Per MS-RDPEMT spec, the client MUST use these exact values when creating
                     // the Tunnel Create Request PDU over the UDP connection
                     self.multitransport_request_id = Some(multitransport_request.request_id);
-                    self.multitransport_security_cookie = Some(multitransport_request.security_cookie);
+                    self.multitransport_security_cookie =
+                        Some(multitransport_request.security_cookie);
                     self.multitransport_protocol = Some(multitransport_request.requested_protocol);
 
                     debug!(

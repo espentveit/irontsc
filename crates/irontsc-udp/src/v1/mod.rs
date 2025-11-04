@@ -574,7 +574,7 @@ impl Packet {
     fn validate(&self) -> Result<()> {
         self.header.validate()?;
         // ACK vector is only present when BOTH ACK and DATA flags are set
-        let should_have_ack = self.header.flags.contains(HeaderFlags::ACK) 
+        let should_have_ack = self.header.flags.contains(HeaderFlags::ACK)
             && self.header.flags.contains(HeaderFlags::DATA);
         if self.ack.is_some() != should_have_ack {
             return Err(UdpError::InvalidField("ack.flag_mismatch"));
@@ -655,11 +655,17 @@ impl Packet {
     /// Parses a packet from raw bytes.
     pub fn decode(input: &[u8]) -> Result<Self> {
         let (header, mut rest) = RdpUdpFecHeader::decode_from(input)?;
-        eprintln!("🔍 Packet decode: flags={:?}, rest_len={}", header.flags, rest.len());
-        
+        eprintln!(
+            "🔍 Packet decode: flags={:?}, rest_len={}",
+            header.flags,
+            rest.len()
+        );
+
         // Per MS-RDPEUDP, the ACK vector section is only present when ACK flag is set
         // AND the packet is a DATA packet (not just SYN+ACK which has ACK flag but no vector)
-        let ack = if header.flags.contains(HeaderFlags::ACK) && header.flags.contains(HeaderFlags::DATA) {
+        let ack = if header.flags.contains(HeaderFlags::ACK)
+            && header.flags.contains(HeaderFlags::DATA)
+        {
             eprintln!("   Parsing ACK vector...");
             let (ack, tail) = AckSection::decode(rest)?;
             rest = tail;

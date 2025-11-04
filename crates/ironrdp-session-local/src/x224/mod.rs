@@ -139,7 +139,11 @@ impl Processor {
             // Channel 1008 is used for multitransport/UDP protocol data during handshake
             // This is not a registered static or dynamic channel - it's a special protocol channel
             // Return the raw data so it can be processed by the multitransport handler
-            debug!("Received {} bytes on multitransport channel {}, forwarding for processing", data_ctx.user_data.len(), channel_id);
+            debug!(
+                "Received {} bytes on multitransport channel {}, forwarding for processing",
+                data_ctx.user_data.len(),
+                channel_id
+            );
             Ok(vec![ProcessorOutput::Tunnel(data_ctx.user_data.to_vec())])
         } else if self.get_dvc_by_channel_id(channel_id.into()).is_some() {
             // This is a dynamic virtual channel (DVC) managed by drdynvc

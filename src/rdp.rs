@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use ironrdp::cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
 use ironrdp::cliprdr::pdu::FileDescriptor;
 use ironrdp::cliprdr::pdu::{
@@ -17,7 +17,6 @@ use ironrdp::connector::{ConnectionResult, ConnectorResult};
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::graphics::pointer::DecodedPointer;
-use ironrdp::pdu::PduResult;
 use ironrdp::pdu::basic_output::orders::DrawingOrder;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
@@ -25,10 +24,11 @@ use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
+use ironrdp::pdu::PduResult;
 use ironrdp::session::desktop_composition::DesktopCompositionHandler;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
-    ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
+    fast_path, ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult,
 };
 use ironrdp::svc::{SvcMessage, SvcProcessor};
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
@@ -38,11 +38,11 @@ use ironrdp_core::{Encode, IntoOwned, WriteBuf, WriteCursor};
 use ironrdp_pdu::nego;
 use ironrdp_rdpsnd_native::cpal;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
-use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
+use ironrdp_tokio::{single_sequence_step_read, split_tokio_framed, FramedWrite};
 use rdpdr::NoopRdpdrBackend;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpStream, lookup_host};
+use tokio::net::{lookup_host, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
@@ -1252,6 +1252,8 @@ struct ActiveUdpTunnel {
     event_rx: mpsc::UnboundedReceiver<UdpTransportEvent>,
     connected: bool,
     tunnel_established: bool,
+    tunnel_established_time: Option<std::time::Instant>,
+    soft_sync_received: bool,
 }
 
 impl Drop for ActiveUdpTunnel {
@@ -1499,11 +1501,11 @@ async fn start_udp_tunnel(
     // - use_tls=true → Reliable mode (with retransmits, ordering, etc.)
     // - use_dtls=true → Lossy mode (best-effort delivery)
     // - Both false → Reliable mode (default for compatibility)
-    
+
     let use_enhanced_security = selected_protocol.contains(nego::SecurityProtocol::SSL)
         || selected_protocol.contains(nego::SecurityProtocol::HYBRID)
         || selected_protocol.contains(nego::SecurityProtocol::HYBRID_EX);
-    
+
     if use_enhanced_security {
         // For Enhanced RDP Security, use TLS with Reliable mode
         // (DTLS/Lossy would be used for scenarios requiring lower latency at cost of reliability)
@@ -1540,6 +1542,8 @@ async fn start_udp_tunnel(
         event_rx,
         connected: false,
         tunnel_established: false,
+        tunnel_established_time: None,
+        soft_sync_received: false,
     })
 }
 
@@ -1562,16 +1566,18 @@ async fn active_session<T: RdpEventSender + Clone>(
     let correlation_id = connection_result.correlation_id;
     let message_channel_id = connection_result.message_channel_id;
     let selected_protocol = connection_result.selected_protocol;
-    
+
     // Extract multitransport information received during connection
     let multitransport_request_id = connection_result.multitransport_request_id;
     let multitransport_security_cookie = connection_result.multitransport_security_cookie;
     let multitransport_protocol = connection_result.multitransport_protocol;
 
-    info!("🔍 Multitransport info: request_id={:?}, cookie={:?}, protocol={:?}", 
-        multitransport_request_id, 
+    info!(
+        "🔍 Multitransport info: request_id={:?}, cookie={:?}, protocol={:?}",
+        multitransport_request_id,
         multitransport_security_cookie.as_ref().map(|c| &c[..8]),
-        multitransport_protocol);
+        multitransport_protocol
+    );
 
     let mut active_stage = ActiveStage::new(connection_result);
 
@@ -1597,7 +1603,7 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut pending_initial_resize: Option<(u16, u16, u32, Option<(u32, u32)>)> = None;
 
     // Track active UDP transport tunnel (currently only one tunnel is supported)
-    let mut udp_tunnel: Option<ActiveUdpTunnel> = None;
+    let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> = std::collections::HashMap::new();
 
     // **CRITICAL**: Automatically create UDP tunnel if multitransport was negotiated during connection
     // Per MS-RDPEMT spec, the InitiateMultitransportRequest is sent during CapabilitiesExchange,
@@ -1612,7 +1618,7 @@ async fn active_session<T: RdpEventSender + Clone>(
             "🚀 Auto-starting UDP tunnel from stored multitransport info: request_id={}, protocol={:?}",
             request_id, protocol
         );
-        
+
         // Create a synthetic MultitransportRequestInfo from the stored data
         let protocol_bits = protocol.as_u16();
         let requested_reliable = (protocol_bits & MultitransportProtocol::RELIABLE_BIT) != 0;
@@ -1630,8 +1636,8 @@ async fn active_session<T: RdpEventSender + Clone>(
                 protocol,
                 security_cookie,
                 security_flags_hi: 0, // Not used for tunnel creation
-                initiator_id: 0, // Not used for tunnel creation
-                channel_id: 0, // Not used for tunnel creation
+                initiator_id: 0,      // Not used for tunnel creation
+                channel_id: 0,        // Not used for tunnel creation
             };
 
             match start_udp_tunnel(
@@ -1643,8 +1649,11 @@ async fn active_session<T: RdpEventSender + Clone>(
             .await
             {
                 Ok(handle) => {
-                    info!("✅ UDP transport auto-initialized successfully for request_id={}", request_id);
-                    udp_tunnel = Some(handle);
+                    info!(
+                        "✅ UDP transport auto-initialized successfully for request_id={}",
+                        request_id
+                    );
+                    udp_tunnels.insert(request_id, handle);
                 }
                 Err(err) => {
                     error!(
@@ -1654,7 +1663,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                 }
             }
         }
-    } else if multitransport_request_id.is_some() || multitransport_security_cookie.is_some() || multitransport_protocol.is_some() {
+    } else if multitransport_request_id.is_some()
+        || multitransport_security_cookie.is_some()
+        || multitransport_protocol.is_some()
+    {
         warn!(
             "⚠️  Incomplete multitransport info stored (request_id={:?}, cookie={:?}, protocol={:?})",
             multitransport_request_id.is_some(),
@@ -1753,10 +1765,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                     );
                 }
 
-                // Start UDP transport if supported and not already running
-                if udp_tunnel.is_some() {
+                // Start UDP transport if supported
+                if udp_tunnels.contains_key(&request_id) {
                     warn!(
-                        "⚠️  Additional multitransport request (id={}) received while a UDP tunnel is already active; ignoring",
+                        "⚠️  Duplicate multitransport request (id={}) received; ignoring",
                         request_id
                     );
                 } else if requested_lossy || requested_reliable || fallback_reliable {
@@ -1770,7 +1782,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                     {
                         Ok(handle) => {
                             info!("🚀 UDP transport initialization started for request_id={}", request_id);
-                            udp_tunnel = Some(handle);
+                            udp_tunnels.insert(request_id, handle);
                         }
                         Err(err) => {
                             error!(
@@ -1826,44 +1838,48 @@ async fn active_session<T: RdpEventSender + Clone>(
                 }
             }
             udp_event = async {
-                if let Some(tunnel) = udp_tunnel.as_mut() {
-                    tunnel.event_rx.recv().await
-                } else {
+                // Poll all active tunnels for events
+                use futures_util::future::select_all;
+                if udp_tunnels.is_empty() {
                     pending::<Option<UdpTransportEvent>>().await
+                } else {
+                    // Create futures for all tunnel receivers
+                    let futures: Vec<_> = udp_tunnels
+                        .values_mut()
+                        .map(|tunnel| Box::pin(tunnel.event_rx.recv()))
+                        .collect();
+                    
+                    if futures.is_empty() {
+                        pending::<Option<UdpTransportEvent>>().await
+                    } else {
+                        // select_all returns (result, index, remaining_futures)
+                        let (result, _index, _remaining) = select_all(futures).await;
+                        result
+                    }
                 }
             } => {
                 let mut outputs = Vec::new();
                 match udp_event {
-                    Some(UdpTransportEvent::Connected) => {
-                        if let Some(tunnel) = udp_tunnel.as_mut() {
+                    Some(UdpTransportEvent::Connected { request_id }) => {
+                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
                             tunnel.connected = true;
                         }
-                        info!("✅ UDP transport connected (SYN/SYN+ACK complete)");
+                        info!("✅ UDP transport connected (request_id={}, SYN/SYN+ACK complete)", request_id);
                     }
-                    Some(UdpTransportEvent::TunnelEstablished) => {
-                        if let Some(tunnel) = udp_tunnel.as_mut() {
+                    Some(UdpTransportEvent::TunnelEstablished { request_id }) => {
+                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
                             tunnel.tunnel_established = true;
+                            tunnel.tunnel_established_time = Some(std::time::Instant::now());
                         }
-                        info!("🔐 UDP tunnel established (MS-RDPEMT)");
-                        
-                        // Enable UDP mode for graphics immediately when tunnel is ready
-                        // Note: Soft-Sync is optional per MS-RDPEUDP2. If server doesn't send it,
-                        // we should still enable UDP mode once the tunnel is established.
-                        use crate::gfx_channel::GfxDvcProcessor;
-                        if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
-                            if let Some(gfx) = channel.channel_processor_downcast_mut::<GfxDvcProcessor>() {
-                                gfx.enable_udp_mode();
-                                info!("✅ UDP mode enabled for graphics channel (tunnel ready)");
-                            }
-                        }
-                        
-                        info!("ℹ️  Note: Soft-Sync is optional. Graphics will use UDP tunnel now.");
+                        info!("🔐 UDP tunnel established (request_id={}, MS-RDPEMT)", request_id);
+                        info!("⏳ Awaiting Soft-Sync negotiation before switching graphics to UDP");
+                        info!("   Note: Server has 10 seconds to send Soft-Sync request, otherwise traffic stays on TCP");
                     }
-                    Some(UdpTransportEvent::TunnelDvcData(dvc_data)) => {
+                    Some(UdpTransportEvent::TunnelDvcData { request_id, data: dvc_data }) => {
                         // DVC data extracted from tunnel DATA packet - process it as DRDYNVC data
-                        debug!("📨 Processing {} bytes of DVC data from tunnel", dvc_data.len());
-                        
-                        // Feed the DVC data to the DRDYNVC processor  
+                        debug!("📨 Processing {} bytes of DVC data from tunnel (request_id={})", dvc_data.len(), request_id);
+
+                        // Feed the DVC data to the DRDYNVC processor
                         if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
                             match drdynvc.process(&dvc_data) {
                                 Ok(response_messages) => {
@@ -1888,8 +1904,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                             warn!("Tunnel DVC data received but DRDYNVC processor not available");
                         }
                     }
-                    Some(UdpTransportEvent::SoftSyncCompleted { tunnel_type }) => {
-                        info!("🔄 Received SoftSyncCompleted event for tunnel_type=0x{:08X}", tunnel_type);
+                    Some(UdpTransportEvent::SoftSyncCompleted { request_id, tunnel_type }) => {
+                        info!("🔄 Received SoftSyncCompleted event for request_id={}, tunnel_type=0x{:08X}", request_id, tunnel_type);
+                        
+                        // Mark that Soft-Sync was received
+                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
+                            tunnel.soft_sync_received = true;
+                        }
+                        
                         // Enable UDP mode for the GFX channel
                         use crate::gfx_channel::GfxDvcProcessor;
                         if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
@@ -1903,7 +1925,8 @@ async fn active_session<T: RdpEventSender + Clone>(
                             warn!("SoftSyncCompleted received but GFX processor is unavailable");
                         }
                     }
-                    Some(UdpTransportEvent::DataReceived(data)) => {
+                    Some(UdpTransportEvent::DataReceived { request_id, data }) => {
+                        debug!("📦 Received UDP data from tunnel request_id={} ({} bytes)", request_id, data.len());
                         use crate::gfx_channel::GfxDvcProcessor;
                         if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
                             if let Some(gfx) = channel.channel_processor_downcast_mut::<GfxDvcProcessor>() {
@@ -1935,13 +1958,14 @@ async fn active_session<T: RdpEventSender + Clone>(
                             warn!("UDP data received but GFX processor is unavailable");
                         }
                     }
-                    Some(UdpTransportEvent::Disconnected(reason)) => {
-                        warn!("⚠️  UDP transport disconnected: {}", reason);
-                        udp_tunnel = None;
+                    Some(UdpTransportEvent::Disconnected { request_id, reason }) => {
+                        warn!("⚠️  UDP transport disconnected (request_id={}): {}", request_id, reason);
+                        udp_tunnels.remove(&request_id);
                     }
                     None => {
-                        warn!("⚠️  UDP transport event stream closed");
-                        udp_tunnel = None;
+                        warn!("⚠️  UDP transport event stream closed (one tunnel died)");
+                        // Note: We can't easily determine which tunnel closed here
+                        // The receiver returning None means that specific tunnel's sender was dropped
                     }
                 }
 
@@ -2236,15 +2260,26 @@ async fn active_session<T: RdpEventSender + Clone>(
                 }
                 ActiveStageOutput::Tunnel(data) => {
                     // Data received on the multitransport/tunnel channel (1008)
-                    // This needs to be forwarded to the UDP transport layer
-                    debug!("📦 Received {} bytes on tunnel channel, forwarding to UDP transport", data.len());
-                    
-                    if let Some(tunnel) = &udp_tunnel {
-                        if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::TunnelData(data)) {
-                            warn!("Failed to forward tunnel data to UDP transport: {}", e);
+                    // This needs to be forwarded to the UDP transport layer(s)
+                    debug!(
+                        "📦 Received {} bytes on tunnel channel, forwarding to {} UDP tunnel(s)",
+                        data.len(),
+                        udp_tunnels.len()
+                    );
+
+                    // Forward to all active tunnels (each will process what's relevant)
+                    // Per MS-RDPEMT, tunnel control messages come via TCP channel 1008
+                    for (request_id, tunnel) in &udp_tunnels {
+                        if let Err(e) = tunnel
+                            .command_tx
+                            .send(UdpTransportCommand::TunnelData(data.clone()))
+                        {
+                            warn!("Failed to forward tunnel data to UDP tunnel {}: {}", request_id, e);
                         }
-                    } else {
-                        warn!("Received tunnel data but UDP tunnel not initialized");
+                    }
+                    
+                    if udp_tunnels.is_empty() {
+                        warn!("Received tunnel data but no UDP tunnels active");
                     }
                 }
                 ActiveStageOutput::Terminate(reason) => break 'outer reason,
@@ -2252,18 +2287,59 @@ async fn active_session<T: RdpEventSender + Clone>(
         }
 
         // Check if Soft-Sync was completed by DRDYNVC processor
-        if let Some(drdynvc_client) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
+        if let Some(drdynvc_client) =
+            active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>()
+        {
             if let Some(tunnel_type) = drdynvc_client.soft_sync_completed() {
-                info!("✅ Soft-Sync completed for tunnel_type=0x{:08X}, signaling UDP transport", tunnel_type);
+                info!(
+                    "✅ Soft-Sync completed for tunnel_type=0x{:08X}, signaling UDP transport(s)",
+                    tunnel_type
+                );
                 // Clear the completion flag
                 drdynvc_client.clear_soft_sync_completed();
-                // Signal the UDP transport that soft-sync is complete
-                if let Some(tunnel) = &udp_tunnel {
-                    if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SoftSyncComplete { tunnel_type }) {
-                        warn!("Failed to send SoftSyncComplete event to UDP transport: {}", e);
+                // Signal all active UDP transports that soft-sync is complete
+                for (request_id, tunnel) in &udp_tunnels {
+                    if let Err(e) = tunnel
+                        .command_tx
+                        .send(UdpTransportCommand::SoftSyncComplete { tunnel_type })
+                    {
+                        warn!(
+                            "Failed to send SoftSyncComplete to UDP tunnel {}: {}",
+                            request_id, e
+                        );
                     }
-                } else {
-                    warn!("Soft-Sync completed but UDP tunnel not initialized");
+                }
+                
+                if udp_tunnels.is_empty() {
+                    warn!("Soft-Sync completed but no UDP tunnels active");
+                }
+            }
+        }
+
+        // Check for Soft-Sync timeout (per MS-RDPEDYC §3.1.5.3, servers MAY skip Soft-Sync)
+        const SOFT_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        for (request_id, tunnel) in udp_tunnels.iter_mut() {
+            if tunnel.tunnel_established 
+               && !tunnel.soft_sync_received 
+               && tunnel.tunnel_established_time.is_some() 
+            {
+                let elapsed = tunnel.tunnel_established_time.unwrap().elapsed();
+                if elapsed > SOFT_SYNC_TIMEOUT {
+                    warn!(
+                        "⏱️  Soft-Sync timeout for tunnel {}: Server did not send Soft-Sync request within {:?}",
+                        request_id,
+                        SOFT_SYNC_TIMEOUT
+                    );
+                    info!(
+                        "ℹ️  Per MS-RDPEDYC spec, this is allowed. Graphics traffic will remain on TCP."
+                    );
+                    info!(
+                        "   This may indicate: (1) Server doesn't support Soft-Sync, (2) Network issues, or (3) Server policy"
+                    );
+                    // Mark as received to stop checking (use TCP fallback)
+                    tunnel.soft_sync_received = true;
+                    // Clear the timestamp to avoid repeated warnings
+                    tunnel.tunnel_established_time = None;
                 }
             }
         }

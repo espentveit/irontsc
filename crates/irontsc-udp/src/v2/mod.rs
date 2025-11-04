@@ -105,7 +105,7 @@ impl PacketPrefixByte {
     pub fn encode(self) -> u8 {
         // Bit layout: [Short_Length:3][Packet_Type_Index:4][Reserved:1]
         // Bits 7-5: Short_Packet_Length (3 bits)
-        // Bits 4-1: Packet_Type_Index (4 bits)  
+        // Bits 4-1: Packet_Type_Index (4 bits)
         // Bit 0: Reserved (must be 0)
         ((self.short_length & 0x07) << 5) | ((self.packet_type_index & 0x0f) << 1)
     }
@@ -601,7 +601,12 @@ impl Packet {
                 let sequence = u16::from_le_bytes([rest[0], rest[1]]);
                 rest = &rest[2..];
                 // Create data_header with the sequence, but no data_body (dummy packets carry no data)
-                (Some(DataHeaderPayload { data_sequence_number: sequence }), None)
+                (
+                    Some(DataHeaderPayload {
+                        data_sequence_number: sequence,
+                    }),
+                    None,
+                )
             } else {
                 // Standard packet: read full header + body
                 let (dh, tail) = DataHeaderPayload::decode_from(rest)?;

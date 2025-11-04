@@ -14,9 +14,9 @@
 
 pub mod connection;
 pub mod error;
+mod macros;
 pub mod v1;
 pub mod v2;
-mod macros;
 
 pub use connection::{
     ConnectionState, CorrelationId, UdpConfig, UdpConnection, UdpProtocolVersion,
