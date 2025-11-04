@@ -45,27 +45,27 @@ impl UdpGfxChannel {
 
         while let Some(event) = self.transport_rx.recv().await {
             match event {
-                UdpTransportEvent::Connected => {
-                    info!("✅ UDP connection established");
+                UdpTransportEvent::Connected { request_id } => {
+                    info!("✅ UDP connection established (request_id={})", request_id);
                     self.connected = true;
                     return Ok(());
                 }
-                UdpTransportEvent::TunnelEstablished => {
-                    info!("🔐 MS-RDPEMT tunnel established");
+                UdpTransportEvent::TunnelEstablished { request_id } => {
+                    info!("🔐 MS-RDPEMT tunnel established (request_id={})", request_id);
                     // Tunnel establishment is good, but wait for Connected event
                 }
                 UdpTransportEvent::SoftSyncCompleted { .. } => {
                     info!("✅ Soft-Sync completed");
                     // Soft-sync is good, but wait for Connected event
                 }
-                UdpTransportEvent::TunnelDvcData(_) => {
+                UdpTransportEvent::TunnelDvcData { .. } => {
                     // DVC data from tunnel - not relevant here, handled in main RDP loop
                 }
-                UdpTransportEvent::Disconnected(reason) => {
-                    warn!("UDP connection failed: {}", reason);
+                UdpTransportEvent::Disconnected { request_id, reason } => {
+                    warn!("UDP connection failed (request_id={}): {}", request_id, reason);
                     anyhow::bail!("UDP connection failed: {}", reason);
                 }
-                UdpTransportEvent::DataReceived(_) => {
+                UdpTransportEvent::DataReceived { .. } => {
                     // Ignore data before connection confirmed
                 }
             }
@@ -92,17 +92,17 @@ impl UdpGfxChannel {
     /// Receive data from UDP transport (non-blocking)
     pub fn try_recv_data(&mut self) -> Option<Vec<u8>> {
         match self.transport_rx.try_recv() {
-            Ok(UdpTransportEvent::DataReceived(data)) => Some(data),
-            Ok(UdpTransportEvent::Disconnected(reason)) => {
+            Ok(UdpTransportEvent::DataReceived { data, .. }) => Some(data),
+            Ok(UdpTransportEvent::Disconnected { reason, .. }) => {
                 warn!("UDP disconnected: {}", reason);
                 self.connected = false;
                 None
             }
-            Ok(UdpTransportEvent::Connected) => {
+            Ok(UdpTransportEvent::Connected { .. }) => {
                 // Already connected
                 None
             }
-            Ok(UdpTransportEvent::TunnelEstablished) => {
+            Ok(UdpTransportEvent::TunnelEstablished { .. }) => {
                 // Tunnel established - good for data flow
                 None
             }
@@ -110,7 +110,7 @@ impl UdpGfxChannel {
                 // Soft-sync completed - good for data flow
                 None
             }
-            Ok(UdpTransportEvent::TunnelDvcData(_)) => {
+            Ok(UdpTransportEvent::TunnelDvcData { .. }) => {
                 // DVC data from tunnel - not relevant here, handled in main RDP loop
                 None
             }

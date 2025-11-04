@@ -724,9 +724,12 @@ impl Sequence for ClientConnector {
                             pointer_software_rendering,
                         } => {
                             // Extract multitransport information from connection_activation before moving it
-                            let multitransport_request_id = connection_activation.multitransport_request_id;
-                            let multitransport_security_cookie = connection_activation.multitransport_security_cookie;
-                            let multitransport_protocol = connection_activation.multitransport_protocol;
+                            let multitransport_request_id =
+                                connection_activation.multitransport_request_id;
+                            let multitransport_security_cookie =
+                                connection_activation.multitransport_security_cookie;
+                            let multitransport_protocol =
+                                connection_activation.multitransport_protocol;
 
                             ClientConnectorState::Connected {
                                 result: ConnectionResult {

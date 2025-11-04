@@ -104,7 +104,7 @@ impl Default for UdpConfig {
             enable_fec: true,
             fec_block_size: 8,
             retransmit_timeout_ms: 300,
-            max_retransmits: 60,  // Increased to handle slow server responses (can take 3-4 seconds)
+            max_retransmits: 60, // Increased to handle slow server responses (can take 3-4 seconds)
             keepalive_interval_ms: 5_000,
         }
     }
@@ -243,7 +243,9 @@ impl UdpConnection {
             let version_flags = self.negotiated_version.to_synex_version();
             let syn_ex = if self.negotiated_version == UdpProtocolVersion::V3 {
                 match self.cookie_hash {
-                    Some(cookie) => rdpudp_v1_syn_ex!(udp_version = version_flags, cookie_hash = cookie),
+                    Some(cookie) => {
+                        rdpudp_v1_syn_ex!(udp_version = version_flags, cookie_hash = cookie)
+                    }
                     None => rdpudp_v1_syn_ex!(udp_version = version_flags),
                 }
             } else {
@@ -286,8 +288,12 @@ impl UdpConnection {
         match self.negotiated_version {
             UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => {
                 self.pending_ack = Some(PendingAck::V1 { run_length: 1 });
-                debug!("📊 V1/V2: expected_remote={}, next_source={}, next_coded={}", 
-                    self.expected_remote_sequence, self.next_source_sequence, self.next_coded_sequence);
+                debug!(
+                    "📊 V1/V2: expected_remote={}, next_source={}, next_coded={}",
+                    self.expected_remote_sequence,
+                    self.next_source_sequence,
+                    self.next_coded_sequence
+                );
             }
             UdpProtocolVersion::V3 => {
                 // For V3, the 32-bit Initial SequenceNumber in SYN/SYN+ACK appears to be
@@ -295,20 +301,27 @@ impl UdpConnection {
                 // starts from a different value that we learn from the first DATA packet.
                 // Initialize to 0 and let the first packet set the expected sequence.
                 self.v3_expected_sequence = 0;
-                
+
                 // Our initial sequence (what we send to server) - lower 16 bits of our config
                 let our_seq16 = self.config.initial_sequence_number as u16;
                 self.v3_next_data_sequence = our_seq16.wrapping_add(1);
-                
+
                 // Channel sequence is independent and starts from 1 (matches FreeRDP behavior)
                 self.v3_next_channel_sequence = 1;
                 // V3 does not send ACK payload in first DATA packet (only AckOfAcks)
                 self.pending_ack = None;
-                debug!("📊 V3: Server initial_seq={} (0x{:08X}) [for V1/V2 compat only]", 
-                    syn.initial_sequence_number, syn.initial_sequence_number);
+                debug!(
+                    "📊 V3: Server initial_seq={} (0x{:08X}) [for V1/V2 compat only]",
+                    syn.initial_sequence_number, syn.initial_sequence_number
+                );
                 debug!("📊 V3: Will learn server's DATA sequence from first packet");
-                debug!("📊 V3: Our initial_seq={} (0x{:08X}), lower 16-bit={} (0x{:04X})", 
-                    self.config.initial_sequence_number, self.config.initial_sequence_number, our_seq16, our_seq16);
+                debug!(
+                    "📊 V3: Our initial_seq={} (0x{:08X}), lower 16-bit={} (0x{:04X})",
+                    self.config.initial_sequence_number,
+                    self.config.initial_sequence_number,
+                    our_seq16,
+                    our_seq16
+                );
                 debug!("📊 V3: We send to server: next_data_seq={} (0x{:04X}), next_channel_seq={} (0x{:04X})", 
                     self.v3_next_data_sequence, self.v3_next_data_sequence, 
                     self.v3_next_channel_sequence, self.v3_next_channel_sequence);
@@ -431,7 +444,7 @@ impl UdpConnection {
                 }
             }
         }
-        
+
         // Remove packets that hit max retransmits
         for key in to_remove {
             self.pending_packets.remove(&key);
@@ -562,8 +575,14 @@ impl UdpConnection {
         self.v3_next_data_sequence = self.v3_next_data_sequence.wrapping_add(1);
         self.v3_next_channel_sequence = self.v3_next_channel_sequence.wrapping_add(1);
 
-        debug!("📤 V3 DATA: data_seq={} (0x{:04X}), channel_seq={} (0x{:04X}), payload_len={}", 
-            data_sequence, data_sequence, channel_sequence, channel_sequence, data.len());
+        debug!(
+            "📤 V3 DATA: data_seq={} (0x{:04X}), channel_seq={} (0x{:04X}), payload_len={}",
+            data_sequence,
+            data_sequence,
+            channel_sequence,
+            channel_sequence,
+            data.len()
+        );
 
         let mut flags = rdpudp_v2_flags!(DATA);
         let mut ack_payload = None;
@@ -577,7 +596,10 @@ impl UdpConnection {
                 delay_ack_time_scale: 0,
                 delay_ack_time_additions: Vec::new(),
             });
-            debug!("📤 V3 DATA: Including ACK payload for seq={} (0x{:04X})", sequence, sequence);
+            debug!(
+                "📤 V3 DATA: Including ACK payload for seq={} (0x{:04X})",
+                sequence, sequence
+            );
         }
 
         // Per MS-RDPEUDP2, include DelayAckInfo for reliable mode
@@ -597,7 +619,7 @@ impl UdpConnection {
         // Maximum value is 15, which gives a window of 2^15 = 32,768 packets
         let log_window = (self.config.receive_window_size as f32).log2().ceil() as u8;
         let log_window = log_window.min(15); // Clamp to maximum allowed value
-        
+
         let header = V2PacketHeader::new(flags, log_window)?;
         let encoded = rdpudp_v2_packet_bytes!(
             header = header,
@@ -644,30 +666,43 @@ impl UdpConnection {
         // Check if this packet has data (could be Dummy packet with just sequence, or Standard with data)
         if let Some(data_header) = packet.data_header {
             let sequence = data_header.data_sequence_number;
-            
+
             if let Some(body) = packet.data_body {
                 // Standard packet with actual data
-                debug!("📥 V3 DATA packet: seq={} (expected={}), data_len={}", 
-                    sequence, self.v3_expected_sequence, body.data.len());
-                
+                debug!(
+                    "📥 V3 DATA packet: seq={} (expected={}), data_len={}",
+                    sequence,
+                    self.v3_expected_sequence,
+                    body.data.len()
+                );
+
                 // If this is the first DATA packet (expected==0), initialize from it
                 if self.v3_expected_sequence == 0 {
-                    debug!("📥 V3: First DATA packet! Initializing expected_seq from {}", sequence);
+                    debug!(
+                        "📥 V3: First DATA packet! Initializing expected_seq from {}",
+                        sequence
+                    );
                     self.v3_expected_sequence = sequence;
                 }
-                
+
                 self.v3_receive_buffer.insert(sequence, body.data);
                 return Ok(self.collect_ready_packets_v3());
             } else {
                 // Dummy packet - has sequence but no data, just acknowledge it
-                debug!("📥 V3 DUMMY packet: seq={} (expected={})", sequence, self.v3_expected_sequence);
-                
+                debug!(
+                    "📥 V3 DUMMY packet: seq={} (expected={})",
+                    sequence, self.v3_expected_sequence
+                );
+
                 // If this is the first packet (expected==0), initialize from it
                 if self.v3_expected_sequence == 0 {
-                    debug!("📥 V3: First DUMMY packet! Initializing expected_seq from {}", sequence);
+                    debug!(
+                        "📥 V3: First DUMMY packet! Initializing expected_seq from {}",
+                        sequence
+                    );
                     self.v3_expected_sequence = sequence;
                 }
-                
+
                 // Update expected sequence if this is the next one we're waiting for
                 if sequence == self.v3_expected_sequence {
                     self.v3_expected_sequence = sequence.wrapping_add(1);

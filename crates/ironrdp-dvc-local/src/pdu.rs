@@ -118,8 +118,12 @@ impl Decode<'_> for DrdynvcClientPdu {
             Cmd::Capability => Ok(Self::Capabilities(CapabilitiesResponsePdu::decode(
                 header, src,
             )?)),
-            Cmd::SoftSyncRequest => Ok(Self::SoftSyncRequest(SoftSyncRequestPdu::decode(header, src)?)),
-            Cmd::SoftSyncResponse => Ok(Self::SoftSyncResponse(SoftSyncResponsePdu::decode(header, src)?)),
+            Cmd::SoftSyncRequest => Ok(Self::SoftSyncRequest(SoftSyncRequestPdu::decode(
+                header, src,
+            )?)),
+            Cmd::SoftSyncResponse => Ok(Self::SoftSyncResponse(SoftSyncResponsePdu::decode(
+                header, src,
+            )?)),
             _ => Err(unsupported_value_err!("Cmd", header.cmd.into())),
         }
     }
@@ -982,13 +986,13 @@ impl SoftSyncResponsePdu {
         ensure_size!(in: src, size: 1 + 4);
         let _pad = src.read_u8();
         let tunnel_count = src.read_u32();
-        
+
         let mut tunnels_to_switch = Vec::with_capacity(tunnel_count as usize);
         for _ in 0..tunnel_count {
             ensure_size!(in: src, size: 4);
             tunnels_to_switch.push(src.read_u32());
         }
-        
+
         Ok(Self {
             header,
             tunnels_to_switch,
