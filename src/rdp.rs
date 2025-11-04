@@ -1845,9 +1845,19 @@ async fn active_session<T: RdpEventSender + Clone>(
                             tunnel.tunnel_established = true;
                         }
                         info!("🔐 UDP tunnel established (MS-RDPEMT)");
-                        info!("⏳ Waiting for server to send Soft-Sync Request...");
-                        // Note: Server will initiate Soft-Sync by sending SOFT_SYNC_REQUEST_PDU
-                        // We will respond with SOFT_SYNC_RESPONSE_PDU in the DRDYNVC handler
+                        
+                        // Enable UDP mode for graphics immediately when tunnel is ready
+                        // Note: Soft-Sync is optional per MS-RDPEUDP2. If server doesn't send it,
+                        // we should still enable UDP mode once the tunnel is established.
+                        use crate::gfx_channel::GfxDvcProcessor;
+                        if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
+                            if let Some(gfx) = channel.channel_processor_downcast_mut::<GfxDvcProcessor>() {
+                                gfx.enable_udp_mode();
+                                info!("✅ UDP mode enabled for graphics channel (tunnel ready)");
+                            }
+                        }
+                        
+                        info!("ℹ️  Note: Soft-Sync is optional. Graphics will use UDP tunnel now.");
                     }
                     Some(UdpTransportEvent::TunnelDvcData(dvc_data)) => {
                         // DVC data extracted from tunnel DATA packet - process it as DRDYNVC data
