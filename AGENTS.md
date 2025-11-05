@@ -12,8 +12,11 @@
 - `./test.sh` orchestrates end-to-end testing. Needed for each run, because it resets the rdp server to a known state. It should be run for at least 30 seconds.
 
 ## Testing Guidelines
-- Use samples/irontsc-w11.pcap (with key irontsc-w11.key) and samples/irontsc-w11.log) for checking output of test.sh
+- Use samples/irontsc-w11.pcap (with key irontsc-w11.key) and samples/irontsc-w11.log) for checking 
+output of test.sh
+- Don't redirect to another log. There will be a log file created with trace level details.
 - There is a reference capture called samples/working-rdp.pcap with key from a working Windows RDP mstsc -> Windows 11 in UDP mode
+- Don't put a sleep in when running test.sh. Let it run until completion.
 
 # UDP mode
 - When in UDP mode there is a reliable mode that uses TLS and another one that uses DTLS. On local networks it defaults to reliable mode,
