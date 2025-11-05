@@ -1422,8 +1422,9 @@ fn encode_multitransport_response_frame(
     }
 
     let response = InitiateMultitransportResponse::success(request.request_id);
-    let security_flags =
-        BasicSecurityHeaderFlags::TRANSPORT_RSP | BasicSecurityHeaderFlags::FLAGSHI_VALID;
+    // Note: Working Windows mstsc client does NOT set FLAGSHI_VALID for MultitransportResponse
+    // even though flagsHi is present. Match that behavior for compatibility.
+    let security_flags = BasicSecurityHeaderFlags::TRANSPORT_RSP;
 
     let response_pdu = MultitransportResponsePdu {
         security_flags,
@@ -1878,10 +1879,20 @@ async fn active_session<T: RdpEventSender + Clone>(
                         info!("✅ UDP transport connected (request_id={}, SYN/SYN+ACK complete)", request_id);
                     }
                     Some(UdpTransportEvent::HandshakeComplete { request_id }) => {
-                        info!("🔐 TLS/DTLS handshake complete for request_id={}, sending MultitransportResponse", request_id);
+                        info!("🔐 TLS/DTLS handshake complete for request_id={}, awaiting TunnelCreateResponse", request_id);
+                        // Note: MultitransportResponse will be sent after TunnelEstablished event
+                        // This is critical - we must wait for TunnelCreateResponse before sending MultitransportResponse
+                    }
+                    Some(UdpTransportEvent::TunnelEstablished { request_id }) => {
+                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
+                            tunnel.tunnel_established = true;
+                            tunnel.tunnel_established_time = Some(std::time::Instant::now());
+                        }
+                        info!("🔐 UDP tunnel established (request_id={}, MS-RDPEMT)", request_id);
                         
-                        // Send MultitransportResponse on TCP channel (per MS-RDPBCGR spec)
-                        // This must be sent AFTER the TLS/DTLS handshake completes
+                        // NOW send MultitransportResponse on TCP channel (per MS-RDPBCGR spec)
+                        // This must be sent AFTER the tunnel is fully established (TunnelCreateResponse received)
+                        // Sending it too early (e.g., after TLS handshake) causes server-side RDP_SEC error 0x8007139F
                         if let Some(tunnel) = udp_tunnels.get(&request_id) {
                             let request_info = MultitransportRequestInfo {
                                 request_id,
@@ -1895,7 +1906,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                             match encode_multitransport_response_frame(request_info, message_channel_id) {
                                 Ok(frame) => {
                                     info!(
-                                        "📨 Sending MultitransportResponse (S_OK) on TCP for request_id={}",
+                                        "📨 Sending MultitransportResponse (S_OK) on TCP for request_id={} (AFTER tunnel established)",
                                         request_id
                                     );
                                     outputs.push(ActiveStageOutput::ResponseFrame(frame));
@@ -1908,15 +1919,9 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 }
                             }
                         } else {
-                            warn!("⚠️  HandshakeComplete received but tunnel info not found for request_id={}", request_id);
+                            warn!("⚠️  TunnelEstablished received but tunnel info not found for request_id={}", request_id);
                         }
-                    }
-                    Some(UdpTransportEvent::TunnelEstablished { request_id }) => {
-                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
-                            tunnel.tunnel_established = true;
-                            tunnel.tunnel_established_time = Some(std::time::Instant::now());
-                        }
-                        info!("🔐 UDP tunnel established (request_id={}, MS-RDPEMT)", request_id);
+                        
                         info!("⏳ Awaiting Soft-Sync negotiation before switching graphics to UDP");
                         info!("   Note: Server has 10 seconds to send Soft-Sync request, otherwise traffic stays on TCP");
                     }
