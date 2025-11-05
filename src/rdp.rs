@@ -1929,6 +1929,12 @@ async fn active_session<T: RdpEventSender + Clone>(
                         // DVC data extracted from tunnel DATA packet - process it as DRDYNVC data
                         debug!("📨 Processing {} bytes of DVC data from tunnel (request_id={})", dvc_data.len(), request_id);
 
+                        // Skip empty payloads (keep-alive/framing packets)
+                        if dvc_data.is_empty() {
+                            debug!("   Skipping empty TunnelData payload (keep-alive)");
+                            continue;
+                        }
+
                         // Feed the DVC data to the DRDYNVC processor
                         if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
                             match drdynvc.process(&dvc_data) {
