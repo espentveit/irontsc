@@ -9,7 +9,7 @@
 
 ## Build, Test, and Development Commands
 - `cargo build --release` produces the optimized client at `target/release/irontsc`.
-- `./test.sh` orchestrates end-to-end testing. Needed for each run, because it resets the rdp server to a known state.
+- `./test.sh` orchestrates end-to-end testing. Needed for each run, because it resets the rdp server to a known state. It should be run for at least 30 seconds.
 
 ## Testing Guidelines
 - Use samples/irontsc-w11.pcap (with key irontsc-w11.key) and samples/irontsc-w11.log) for checking output of test.sh
