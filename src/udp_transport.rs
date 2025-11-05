@@ -121,6 +121,8 @@ pub struct UdpTransportManager {
     tunnel_established: bool,
     /// Pending tunnel response received before TLS handshake completed
     pending_tunnel_response: Option<Vec<u8>>,
+    /// Buffer for reassembling fragmented tunnel PDUs from TCP stream
+    tunnel_data_buffer: Vec<u8>,
     /// Server name for TLS/DTLS
     server_name: String,
     /// TLS socket wrapper for reliable mode (if TLS is required per MS-RDPEMT)
@@ -255,6 +257,7 @@ impl UdpTransportManager {
             security_cookie: None,
             tunnel_established: false,
             pending_tunnel_response: None,
+            tunnel_data_buffer: Vec::new(),
             server_name,
             tls_socket: None,
             dtls_socket: None,
@@ -1251,6 +1254,12 @@ impl UdpTransportManager {
     }
 
     /// Process tunnel data received on TCP channel 1008 (e.g., TunnelCreateResponse)
+    /// 
+    /// Per MS-RDPEMT §2.2.1.1, tunnel PDUs arrive over TCP which is a byte stream.
+    /// PDUs may be fragmented across multiple TCP segments, so we buffer and reassemble.
+    /// 
+    /// Note: Channel 1008 also receives heartbeat PDUs (MS-RDPBCGR §2.2.16.1) which
+    /// have SEC_HEARTBEAT (0x4000) flag. These must be filtered out.
     async fn process_tunnel_data(&mut self, data: &[u8]) -> Result<()> {
         info!(
             "📥 Received tunnel data from TCP channel ({} bytes)",
@@ -1258,50 +1267,118 @@ impl UdpTransportManager {
         );
         debug!("   First 32 bytes: {:02x?}", &data[..data.len().min(32)]);
 
-        // Per MS-RDPEMT §2.2.1.1, there may be a wrapper before the tunnel header.
-        // Try to find the tunnel header by looking for valid HeaderLength values.
-        // The tunnel header starts with: HeaderLength (2), HeaderVersion (2), Action (2)...
-        
-        // First, check if data starts directly with a tunnel header (no wrapper)
-        if data.len() >= MIN_TUNNEL_HEADER_SIZE {
-            let possible_header_length = u16::from_le_bytes([data[0], data[1]]) as usize;
-            
-            // Valid tunnel headers have HeaderLength between MIN and MAX
-            // (base header + optional subheaders per MS-RDPEMT §2.2.1.1)
-            if possible_header_length >= MIN_TUNNEL_HEADER_SIZE 
-               && possible_header_length <= MAX_TUNNEL_HEADER_SIZE 
-               && data.len() >= possible_header_length {
-                // This looks like a direct tunnel header, no wrapper
-                debug!("   Tunnel PDU appears to have no wrapper (direct header)");
-                return self.process_tunnel_pdu(data).await;
+        // Filter out heartbeat PDUs (MS-RDPBCGR §2.2.16.1)
+        // Heartbeats have Basic Security Header with SEC_HEARTBEAT flag (0x4000)
+        // Format: flags (2 bytes LE), flagsHi (2 bytes LE), period, count1, count2, reserved
+        if data.len() == 8 {
+            let flags = u16::from_le_bytes([data[0], data[1]]);
+            const SEC_HEARTBEAT: u16 = 0x4000;
+            if flags == SEC_HEARTBEAT {
+                debug!("   ❤️ Heartbeat PDU (period={}s, count1={}, count2={}) - ignoring",
+                       data[4], data[5], data[6]);
+                return Ok(());
             }
         }
-        
-        // If not a direct header, try skipping a wrapper.
-        // Observed wrapper sizes: 11 bytes (common), but should be detected dynamically
-        for wrapper_size in [11, 10, 12, 0] {
-            if data.len() < wrapper_size + MIN_TUNNEL_HEADER_SIZE {
-                continue;
+
+        // Append new data to buffer (TCP stream reassembly)
+        self.tunnel_data_buffer.extend_from_slice(data);
+        debug!("   Buffer now contains {} bytes total", self.tunnel_data_buffer.len());
+
+        // Try to parse complete tunnel PDUs from the buffer
+        loop {
+            if self.tunnel_data_buffer.len() < 2 {
+                // Not enough data even for HeaderLength field
+                break;
+            }
+
+            // Try to find a valid tunnel header
+            // Per MS-RDPEMT §2.2.1.1, there may be a wrapper before the tunnel header
+            let mut found_pdu = false;
+            let mut pdu_start_offset = 0;
+            
+            // Try different wrapper sizes (including 0 for no wrapper)
+            for wrapper_size in [0, 11, 10, 12] {
+                if self.tunnel_data_buffer.len() < wrapper_size + MIN_TUNNEL_HEADER_SIZE {
+                    continue;
+                }
+                
+                let offset = wrapper_size;
+                let possible_header_length = u16::from_le_bytes([
+                    self.tunnel_data_buffer[offset],
+                    self.tunnel_data_buffer[offset + 1]
+                ]) as usize;
+                
+                // Validate HeaderLength is in valid range
+                if possible_header_length < MIN_TUNNEL_HEADER_SIZE 
+                   || possible_header_length > MAX_TUNNEL_HEADER_SIZE {
+                    continue;
+                }
+                
+                // Check if we have the complete header
+                if self.tunnel_data_buffer.len() < wrapper_size + possible_header_length {
+                    // Header is incomplete - wait for more data
+                    debug!("   Found potential header (len={}) at offset {} but need {} more bytes",
+                           possible_header_length, offset, 
+                           wrapper_size + possible_header_length - self.tunnel_data_buffer.len());
+                    break;
+                }
+                
+                // Read PayloadLength from header (at offset 8-9 within the header)
+                let payload_len = if possible_header_length >= 10 {
+                    u16::from_le_bytes([
+                        self.tunnel_data_buffer[offset + 8],
+                        self.tunnel_data_buffer[offset + 9]
+                    ]) as usize
+                } else {
+                    0
+                };
+                
+                let total_pdu_len = possible_header_length + payload_len;
+                
+                // Check if we have the complete PDU
+                if self.tunnel_data_buffer.len() < wrapper_size + total_pdu_len {
+                    // PDU is incomplete - wait for more data
+                    debug!("   Found header at offset {} (header={}, payload={}) but need {} more bytes for complete PDU",
+                           offset, possible_header_length, payload_len,
+                           wrapper_size + total_pdu_len - self.tunnel_data_buffer.len());
+                    break;
+                }
+                
+                // We have a complete PDU!
+                pdu_start_offset = wrapper_size;
+                found_pdu = true;
+                debug!("   ✅ Found complete tunnel PDU: wrapper={}, header={}, payload={}, total={}",
+                       wrapper_size, possible_header_length, payload_len, total_pdu_len);
+                
+                // Extract PDU data to process (copy to avoid borrow checker issues)
+                let pdu_data: Vec<u8> = self.tunnel_data_buffer[pdu_start_offset..pdu_start_offset + total_pdu_len].to_vec();
+                
+                // Remove processed data from buffer (including wrapper) BEFORE processing
+                self.tunnel_data_buffer.drain(0..pdu_start_offset + total_pdu_len);
+                debug!("   Buffer after drain: {} bytes remain", self.tunnel_data_buffer.len());
+                
+                // Now process the PDU (self is no longer borrowed)
+                if let Err(e) = self.process_tunnel_pdu(&pdu_data).await {
+                    warn!("Failed to process tunnel PDU: {}", e);
+                }
+                
+                break;
             }
             
-            let tunnel_data = &data[wrapper_size..];
-            let possible_header_length = u16::from_le_bytes([tunnel_data[0], tunnel_data[1]]) as usize;
-            
-            if possible_header_length >= MIN_TUNNEL_HEADER_SIZE 
-               && possible_header_length <= MAX_TUNNEL_HEADER_SIZE 
-               && tunnel_data.len() >= possible_header_length {
-                debug!(
-                    "   Found tunnel header after {}-byte wrapper (HeaderLength={})",
-                    wrapper_size, possible_header_length
-                );
-                return self.process_tunnel_pdu(tunnel_data).await;
+            if !found_pdu {
+                // No valid PDU found - either incomplete or junk data
+                if self.tunnel_data_buffer.len() > 1024 {
+                    // Buffer is getting too large - might have junk data at start
+                    warn!("   Tunnel buffer exceeded 1KB with no valid PDU - dropping first byte");
+                    self.tunnel_data_buffer.drain(0..1);
+                } else {
+                    // Wait for more data
+                    debug!("   No complete PDU found yet - waiting for more data");
+                    break;
+                }
             }
         }
-        
-        // Could not find valid tunnel header
-        debug!(
-            "   Data does not appear to contain a valid MS-RDPEMT tunnel header (might be heartbeat or other message)"
-        );
+
         Ok(())
     }
     
