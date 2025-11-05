@@ -986,6 +986,13 @@ impl UdpTransportManager {
                     // If we get here, handshake is complete or not needed
                     // Try to decrypt if we have TLS/DTLS
                     if let Some(tls) = self.tls_socket.as_mut() {
+                        // Check if this is a duplicate/retransmitted TLS handshake record
+                        // TLS record type 22 = Handshake (ServerHello, etc.)
+                        if payload.len() > 0 && payload[0] == 22 {
+                            debug!("📥 Ignoring duplicate TLS handshake record (type 22) after handshake complete");
+                            continue;
+                        }
+                        
                         match tls.decrypt(&payload) {
                             Ok(decrypted_payloads) => {
                                 for decrypted in decrypted_payloads {
@@ -999,6 +1006,13 @@ impl UdpTransportManager {
                             }
                         }
                     } else if let Some(dtls) = self.dtls_socket.as_mut() {
+                        // Check if this is a duplicate/retransmitted DTLS handshake record  
+                        // DTLS record type 22 = Handshake (ServerHello, etc.)
+                        if payload.len() > 13 && payload[13] == 22 {
+                            debug!("📥 Ignoring duplicate DTLS handshake record (type 22) after handshake complete");
+                            continue;
+                        }
+                        
                         match dtls.decrypt(&payload) {
                             Ok(decrypted_payloads) => {
                                 for decrypted in decrypted_payloads {
@@ -1142,8 +1156,9 @@ impl UdpTransportManager {
                 }
 
                 let request_id = self.request_id.unwrap_or(0);
-                // Forward the DVC payload to the application
-                let _ = self.event_tx.send(UdpTransportEvent::DataReceived { 
+                // Forward the DVC payload to the DRDYNVC processor
+                // The payload contains DVC protocol messages (Create, Data, etc.), not raw RDPEGFX
+                let _ = self.event_tx.send(UdpTransportEvent::TunnelDvcData { 
                     request_id,
                     data: payload 
                 });
