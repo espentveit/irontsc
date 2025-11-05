@@ -2,7 +2,6 @@
 members = [
     ".",
     "crates/clearcodec",
-    "crates/drdynvc",
     "crates/irontsc-udp",
     "crates/zgfx",
     "crates/ironrdp-gfx",
@@ -216,7 +215,6 @@ arboard = "3.6.1"
 
 # RDPEGFX + H.264 support
 clearcodec = { path = "crates/clearcodec" }
-drdynvc = { path = "crates/drdynvc" }
 zgfx = { path = "crates/zgfx" }
 ironrdp-gfx = { path = "crates/ironrdp-gfx" }
 ironrdp-graphics = { path = "crates/ironrdp-graphics-local" }
