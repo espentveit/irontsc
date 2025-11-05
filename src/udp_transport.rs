@@ -89,6 +89,8 @@ pub enum UdpTransportCommand {
 pub enum UdpTransportEvent {
     /// Connection established (includes request_id to identify which tunnel)
     Connected { request_id: u32 },
+    /// TLS/DTLS handshake complete - RDP layer should send MultitransportResponse now
+    HandshakeComplete { request_id: u32 },
     /// MS-RDPEMT tunnel established (includes request_id to identify which tunnel)
     TunnelEstablished { request_id: u32 },
     /// Soft-Sync completed for switching channels to UDP
@@ -585,46 +587,14 @@ impl UdpTransportManager {
     }
 
     async fn send_over_udp(&mut self, payload: &[u8]) -> Result<()> {
-        // Check if TLS/DTLS is required and handshake is complete
-        if let Some(tls) = self.tls_socket.as_mut() {
-            if tls.is_handshake_complete() {
-                // TLS/DTLS handshake complete - encrypt the payload
-                let packets = tls.encrypt(payload)?;
-                if packets.is_empty() {
-                    trace!(
-                        "TLS/DTLS produced no ciphertext for payload ({} bytes), skipping transmit",
-                        payload.len()
-                    );
-                    return Ok(());
-                }
-
-                for packet in packets {
-                    self.socket
-                        .send(&packet)
-                        .await
-                        .context("Failed to send TLS/DTLS packet")?;
-                    trace!("Sent TLS/DTLS packet ({} bytes)", packet.len());
-                }
-            } else {
-                // DTLS handshake not complete - send payload unencrypted
-                // (This is for DTLS handshake messages wrapped in RDP UDP DATA packets)
-                trace!(
-                    "Sending unencrypted packet ({} bytes) - DTLS handshake in progress",
-                    payload.len()
-                );
-                self.socket
-                    .send(payload)
-                    .await
-                    .context("Failed to send UDP packet")?;
-            }
-        } else {
-            // No DTLS - send payload unencrypted
-            self.socket
-                .send(payload)
-                .await
-                .context("Failed to send UDP packet")?;
-        }
-
+        // RDP UDP protocol packets (SYN, ACK, DATA with headers) are NEVER encrypted
+        // Only the payload INSIDE DATA packets gets encrypted via send_data() -> send_tunnel_pdu()
+        // This function sends complete RDP UDP packets directly to the socket
+        trace!("Sending RDP UDP packet ({} bytes) unencrypted", payload.len());
+        self.socket
+            .send(payload)
+            .await
+            .context("Failed to send UDP packet")?;
         Ok(())
     }
 
@@ -755,21 +725,33 @@ impl UdpTransportManager {
 
                         // Process handshake and collect response packets
                         let handshake_result = socket.process_handshake_data(&payload);
-                        let handshake_complete = socket.is_handshake_complete();
-
+                        
                         // Drop the socket borrow before we potentially call create_tunnel
                         drop(socket);
+
+                        // Track handshake completion - will be set to true after we send
+                        // final handshake messages and mark it complete
+                        let mut handshake_complete = false;
 
                         match handshake_result {
                             Ok(Some(response_packets)) => {
                                 // TLS/DTLS wants to send response packets
+                                // These are already complete TLS records (ClientHello, ChangeCipherSpec, Finished, etc.)
+                                // and must be sent RAW without encryption - handshake messages are not encrypted
                                 for response in response_packets {
                                     info!(
-                                        "📤 Sending {} response ({} bytes) in RDP UDP DATA",
+                                        "📤 Sending {} handshake response ({} bytes) in RDP UDP DATA",
                                         protocol_name,
                                         response.len()
                                     );
-                                    self.send_data(response).await?;
+                                    // Send raw TLS record (no encryption - handshake messages are plaintext)
+                                    self.send_raw_tls_record(response).await?;
+                                }
+                                
+                                // Now mark handshake as complete so future packets get encrypted
+                                // This must be done AFTER sending the final handshake messages
+                                if let Some(tls) = self.tls_socket.as_mut() {
+                                    tls.mark_handshake_complete();
                                 }
 
                                 // Send ACK for the received data to prevent retransmissions
@@ -788,12 +770,33 @@ impl UdpTransportManager {
                                     drop(conn);
                                 }
 
-                                // Check if handshake completed (may have completed while producing response)
+                                // NOW check if handshake is complete (after we marked it)
+                                handshake_complete = if let Some(tls) = self.tls_socket.as_ref() {
+                                    tls.is_handshake_complete()
+                                } else {
+                                    false
+                                };
+                                
+                                // Check if handshake completed
                                 if handshake_complete {
                                     info!(
                                         "✅ {} handshake complete, tunnel PDUs will be encrypted",
                                         protocol_name
                                     );
+
+                                    // Notify RDP layer to send MultitransportResponse on TCP channel
+                                    debug!("🔍 Checking if should send HandshakeComplete event: request_id={:?}", self.request_id);
+                                    if let Some(request_id) = self.request_id {
+                                        info!(
+                                            "📤 Notifying RDP layer to send MultitransportResponse for request_id={}",
+                                            request_id
+                                        );
+                                        let _ = self.event_tx.send(UdpTransportEvent::HandshakeComplete {
+                                            request_id,
+                                        });
+                                    } else {
+                                        warn!("⚠️  Cannot send HandshakeComplete event: request_id is None");
+                                    }
 
                                     // Check if there's a queued TunnelCreateResponse to process
                                     if let Some(pending_response) =
@@ -1038,6 +1041,24 @@ impl UdpTransportManager {
             }
         }
 
+        // After processing any received packet, check if we have pending ACKs
+        // This ensures DUMMY packets and other received data get acknowledged promptly
+        let mut conn = self.connection.lock().await;
+        if conn.has_pending_ack() {
+            if let Ok(ack_packet) = conn.create_ack() {
+                drop(conn);
+                if let Err(e) = self.send_over_udp(&ack_packet).await {
+                    warn!("Failed to send pending ACK: {}", e);
+                } else {
+                    trace!("✓ Sent immediate ACK for received packet");
+                }
+            } else {
+                drop(conn);
+            }
+        } else {
+            drop(conn);
+        }
+
         Ok(())
     }
 
@@ -1166,6 +1187,17 @@ impl UdpTransportManager {
         }
 
         Ok(())
+    }
+
+    /// Send raw TLS/DTLS record during handshake (no encryption - handshake messages are plaintext)
+    /// TLS handshake records (ClientHello, ServerHello, ChangeCipherSpec, Finished) are complete
+    /// TLS records that must be sent as-is, wrapped only in RDP UDP DATA packets
+    async fn send_raw_tls_record(&mut self, tls_record: Vec<u8>) -> Result<()> {
+        debug!("📤 Sending raw TLS record ({} bytes)", tls_record.len());
+        
+        // Send the TLS record directly - it's already a complete TLS/DTLS record
+        // Just wrap it in RDP UDP DATA packet
+        self.send_data(tls_record).await
     }
 
     /// Send tunnel PDU (encrypts if TLS/DTLS is active, per MS-RDPEMT spec)

@@ -139,7 +139,14 @@ impl DtlsUdpSocket {
 
         // Disable ChaCha20 globally for both TLS 1.3 and TLS 1.2
         // This is a workaround for OpenSSL adding ChaCha20 by default
-        ctx_builder.set_options(SslOptions::NO_TICKET | SslOptions::CIPHER_SERVER_PREFERENCE);
+        let mut options = SslOptions::NO_TICKET | SslOptions::CIPHER_SERVER_PREFERENCE;
+        
+        // Enable middlebox compatibility mode to send ChangeCipherSpec
+        // This makes TLS 1.3 handshakes look like TLS 1.2 for compatibility
+        // The Windows RDP server expects to receive ChangeCipherSpec
+        options |= SslOptions::ENABLE_MIDDLEBOX_COMPAT;
+        
+        ctx_builder.set_options(options);
 
         // DTLS-specific options
         if config.protocol == EncryptionProtocol::Dtls {
@@ -323,11 +330,21 @@ impl DtlsUdpSocket {
 
         if ret == 1 {
             // Handshake complete
-            info!("✅ DTLS handshake complete");
-            self.handshake_complete = true;
+            let protocol_name = match self.protocol {
+                EncryptionProtocol::Tls => "TLS",
+                EncryptionProtocol::Dtls => "DTLS",
+            };
+            info!("✅ {} handshake complete", protocol_name);
+            // Note: Don't set handshake_complete = true yet!
+            // The caller needs to send the final handshake messages (ChangeCipherSpec, Finished)
+            // BEFORE encryption kicks in. The caller will mark it complete after sending.
             if outgoing_packets.is_empty() {
+                // No final messages to send, mark complete now
+                self.handshake_complete = true;
                 return Ok(None);
             } else {
+                // Return final messages but DON'T mark complete yet
+                // Caller must call mark_handshake_complete() after sending these
                 return Ok(Some(outgoing_packets));
             }
         }
@@ -412,21 +429,25 @@ impl DtlsUdpSocket {
     /// Encrypt plaintext payload(s) into DTLS records.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<Vec<u8>>> {
         if !self.handshake_complete {
-            return Err(anyhow!("Cannot encrypt: DTLS handshake not complete"));
+            return Err(anyhow!("Cannot encrypt: handshake not complete"));
         }
 
         if plaintext.len() > c_int::MAX as usize {
-            return Err(anyhow!("Plaintext payload too large for DTLS write"));
+            return Err(anyhow!("Plaintext payload too large for write"));
         }
 
         let ssl = self
             .ssl_conn
             .as_mut()
-            .context("DTLS session not initialized")?;
+            .context("SSL session not initialized")?;
 
         Self::ssl_write_datagram(ssl, plaintext)
-            .with_context(|| format!("DTLS encrypt failed for {} bytes", plaintext.len()))?;
-        trace!("📤 DTLS encrypt {} bytes", plaintext.len());
+            .with_context(|| format!("Encrypt failed for {} bytes", plaintext.len()))?;
+        let protocol_name = match self.protocol {
+            EncryptionProtocol::Tls => "TLS",
+            EncryptionProtocol::Dtls => "DTLS",
+        };
+        trace!("📤 {} encrypt {} bytes", protocol_name, plaintext.len());
 
         Self::drain_wbio(ssl)
     }
@@ -434,17 +455,17 @@ impl DtlsUdpSocket {
     /// Decrypt incoming DTLS record into plaintext payload(s).
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<Vec<u8>>> {
         if !self.handshake_complete {
-            return Err(anyhow!("Cannot decrypt: DTLS handshake not complete"));
+            return Err(anyhow!("Cannot decrypt: handshake not complete"));
         }
 
         if ciphertext.len() > c_int::MAX as usize {
-            return Err(anyhow!("Ciphertext payload too large for DTLS read"));
+            return Err(anyhow!("Ciphertext payload too large for read"));
         }
 
         let ssl = self
             .ssl_conn
             .as_mut()
-            .context("DTLS session not initialized")?;
+            .context("SSL session not initialized")?;
 
         Self::write_to_rbio(ssl, ciphertext)?;
         Self::drain_plaintext(ssl)
@@ -536,6 +557,21 @@ impl DtlsUdpSocket {
                 }
 
                 buf.truncate(read as usize);
+                
+                // Log TLS record type for debugging
+                if buf.len() >= 1 {
+                    let record_type = buf[0];
+                    let type_name = match record_type {
+                        20 => "ChangeCipherSpec",
+                        21 => "Alert",
+                        22 => "Handshake",
+                        23 => "Application Data",
+                        _ => "Unknown",
+                    };
+                    debug!("🔍 OpenSSL produced {} byte TLS record, type={} ({})", 
+                           buf.len(), record_type, type_name);
+                }
+                
                 packets.push(buf);
             }
 

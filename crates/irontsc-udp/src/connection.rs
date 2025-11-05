@@ -511,6 +511,11 @@ impl UdpConnection {
             >= Duration::from_millis(self.config.keepalive_interval_ms as u64)
     }
 
+    /// Returns true if there's a pending acknowledgement that should be sent
+    pub fn has_pending_ack(&self) -> bool {
+        self.pending_ack.is_some()
+    }
+
     pub fn create_ack(&mut self) -> Result<Vec<u8>> {
         self.last_keepalive = Instant::now();
         match self.negotiated_version {
@@ -522,7 +527,14 @@ impl UdpConnection {
                 )
             }
             UdpProtocolVersion::V3 => {
-                let header = V2PacketHeader::new(V2HeaderFlags::ACK, 0)?;
+                use crate::rdpudp_v2_overhead;
+                let mut flags = V2HeaderFlags::ACK;
+                
+                // Add OVERHEADSIZE flag per MS-RDPEUDP2 spec
+                // OverheadSize is sent by Receiver to inform overhead bytes at RDP-UDP2 layer
+                flags |= rdpudp_v2_flags!(OVERHEADSIZE);
+                
+                let header = V2PacketHeader::new(flags, 0)?;
                 let ack_payload = V2AckPayload {
                     sequence_number: self.v3_expected_sequence.wrapping_sub(1),
                     received_timestamp: 0,
@@ -531,7 +543,16 @@ impl UdpConnection {
                     delay_ack_time_scale: 0,
                     delay_ack_time_additions: Vec::new(),
                 };
-                rdpudp_v2_packet_bytes!(header = header, ack = Some(ack_payload))
+                
+                // OverheadSize: typical RDP UDP v3 overhead is around 8-12 bytes
+                // (header + prefix + various payloads)
+                let overhead_size = Some(rdpudp_v2_overhead!(10));
+                
+                rdpudp_v2_packet_bytes!(
+                    header = header, 
+                    ack = Some(ack_payload),
+                    overhead_size = overhead_size
+                )
             }
         }
     }

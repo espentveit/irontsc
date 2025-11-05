@@ -1248,6 +1248,9 @@ struct MultitransportRequestInfo {
 struct ActiveUdpTunnel {
     request_id: u32,
     protocol: MultitransportProtocol,
+    security_cookie: [u8; 16],
+    initiator_id: u16,
+    channel_id: u16,
     command_tx: mpsc::UnboundedSender<UdpTransportCommand>,
     event_rx: mpsc::UnboundedReceiver<UdpTransportEvent>,
     connected: bool,
@@ -1538,6 +1541,9 @@ async fn start_udp_tunnel(
     Ok(ActiveUdpTunnel {
         request_id: request.request_id,
         protocol: request.protocol,
+        security_cookie: request.security_cookie,
+        initiator_id: request.initiator_id,
+        channel_id: request.channel_id,
         command_tx,
         event_rx,
         connected: false,
@@ -1563,6 +1569,8 @@ async fn active_session<T: RdpEventSender + Clone>(
     );
 
     // Extract needed values before connection_result is consumed
+    let io_channel_id = connection_result.io_channel_id;
+    let user_channel_id = connection_result.user_channel_id;
     let correlation_id = connection_result.correlation_id;
     let message_channel_id = connection_result.message_channel_id;
     let selected_protocol = connection_result.selected_protocol;
@@ -1631,13 +1639,16 @@ async fn active_session<T: RdpEventSender + Clone>(
             );
         } else {
             // Create synthetic request info for start_udp_tunnel
+            // Use actual MCS channel IDs from the connection instead of 0
+            // initiator_id = user_channel_id (the client's MCS user ID)
+            // channel_id = message_channel_id or io_channel_id as fallback
             let request_info = MultitransportRequestInfo {
                 request_id,
                 protocol,
                 security_cookie,
-                security_flags_hi: 0, // Not used for tunnel creation
-                initiator_id: 0,      // Not used for tunnel creation
-                channel_id: 0,        // Not used for tunnel creation
+                security_flags_hi: 0x0fd0, // Standard flags
+                initiator_id: user_channel_id,
+                channel_id: message_channel_id.unwrap_or(io_channel_id),
             };
 
             match start_udp_tunnel(
@@ -1865,6 +1876,40 @@ async fn active_session<T: RdpEventSender + Clone>(
                             tunnel.connected = true;
                         }
                         info!("✅ UDP transport connected (request_id={}, SYN/SYN+ACK complete)", request_id);
+                    }
+                    Some(UdpTransportEvent::HandshakeComplete { request_id }) => {
+                        info!("🔐 TLS/DTLS handshake complete for request_id={}, sending MultitransportResponse", request_id);
+                        
+                        // Send MultitransportResponse on TCP channel (per MS-RDPBCGR spec)
+                        // This must be sent AFTER the TLS/DTLS handshake completes
+                        if let Some(tunnel) = udp_tunnels.get(&request_id) {
+                            let request_info = MultitransportRequestInfo {
+                                request_id,
+                                protocol: tunnel.protocol,
+                                security_cookie: tunnel.security_cookie,
+                                security_flags_hi: 0x0fd0, // Standard flags
+                                initiator_id: tunnel.initiator_id,
+                                channel_id: tunnel.channel_id,
+                            };
+                            
+                            match encode_multitransport_response_frame(request_info, message_channel_id) {
+                                Ok(frame) => {
+                                    info!(
+                                        "📨 Sending MultitransportResponse (S_OK) on TCP for request_id={}",
+                                        request_id
+                                    );
+                                    outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                }
+                                Err(err) => {
+                                    error!(
+                                        "❌ Failed to encode MultitransportResponse for request_id={}: {:?}",
+                                        request_id, err
+                                    );
+                                }
+                            }
+                        } else {
+                            warn!("⚠️  HandshakeComplete received but tunnel info not found for request_id={}", request_id);
+                        }
                     }
                     Some(UdpTransportEvent::TunnelEstablished { request_id }) => {
                         if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {

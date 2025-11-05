@@ -50,6 +50,10 @@ impl UdpGfxChannel {
                     self.connected = true;
                     return Ok(());
                 }
+                UdpTransportEvent::HandshakeComplete { .. } => {
+                    info!("🔐 TLS/DTLS handshake complete");
+                    // Handshake complete is good, but wait for Connected event
+                }
                 UdpTransportEvent::TunnelEstablished { request_id } => {
                     info!("🔐 MS-RDPEMT tunnel established (request_id={})", request_id);
                     // Tunnel establishment is good, but wait for Connected event
@@ -100,6 +104,10 @@ impl UdpGfxChannel {
             }
             Ok(UdpTransportEvent::Connected { .. }) => {
                 // Already connected
+                None
+            }
+            Ok(UdpTransportEvent::HandshakeComplete { .. }) => {
+                // Handshake complete - good for data flow
                 None
             }
             Ok(UdpTransportEvent::TunnelEstablished { .. }) => {
