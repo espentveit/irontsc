@@ -441,7 +441,7 @@ impl DtlsUdpSocket {
             .as_mut()
             .context("SSL session not initialized")?;
 
-        Self::ssl_write_datagram(ssl, plaintext)
+        Self::ssl_write_datagram(ssl, plaintext, self.protocol)
             .with_context(|| format!("Encrypt failed for {} bytes", plaintext.len()))?;
         let protocol_name = match self.protocol {
             EncryptionProtocol::Tls => "TLS",
@@ -468,7 +468,7 @@ impl DtlsUdpSocket {
             .context("SSL session not initialized")?;
 
         Self::write_to_rbio(ssl, ciphertext)?;
-        Self::drain_plaintext(ssl)
+        Self::drain_plaintext(ssl, self.protocol)
     }
 
     #[inline]
@@ -493,7 +493,7 @@ impl DtlsUdpSocket {
         }
     }
 
-    fn ssl_write_datagram(ssl: &mut Ssl, buf: &[u8]) -> Result<usize> {
+    fn ssl_write_datagram(ssl: &mut Ssl, buf: &[u8], protocol: EncryptionProtocol) -> Result<usize> {
         unsafe {
             let ssl_ptr = Self::ssl_ptr(ssl);
             if buf.is_empty() {
@@ -507,12 +507,16 @@ impl DtlsUdpSocket {
                 Ok(ret as usize)
             } else {
                 let code = ErrorCode::from_raw(ffi::SSL_get_error(ssl_ptr, ret));
-                Err(anyhow!("DTLS SSL_write failed ({:?})", code))
+                let protocol_name = match protocol {
+                    EncryptionProtocol::Tls => "TLS",
+                    EncryptionProtocol::Dtls => "DTLS",
+                };
+                Err(anyhow!("{} SSL_write failed ({:?})", protocol_name, code))
             }
         }
     }
 
-    fn ssl_read_datagram(ssl: &mut Ssl, buf: &mut [u8]) -> Result<Option<usize>> {
+    fn ssl_read_datagram(ssl: &mut Ssl, buf: &mut [u8], protocol: EncryptionProtocol) -> Result<Option<usize>> {
         unsafe {
             let ssl_ptr = Self::ssl_ptr(ssl);
             if buf.is_empty() {
@@ -528,7 +532,13 @@ impl DtlsUdpSocket {
                 let code = ErrorCode::from_raw(ffi::SSL_get_error(ssl_ptr, ret));
                 match code {
                     ErrorCode::WANT_READ | ErrorCode::ZERO_RETURN => Ok(None),
-                    _ => Err(anyhow!("DTLS SSL_read failed ({:?})", code)),
+                    _ => {
+                        let protocol_name = match protocol {
+                            EncryptionProtocol::Tls => "TLS",
+                            EncryptionProtocol::Dtls => "DTLS",
+                        };
+                        Err(anyhow!("{} SSL_read failed ({:?})", protocol_name, code))
+                    }
                 }
             }
         }
@@ -579,12 +589,16 @@ impl DtlsUdpSocket {
         }
     }
 
-    fn drain_plaintext(ssl: &mut Ssl) -> Result<Vec<Vec<u8>>> {
+    fn drain_plaintext(ssl: &mut Ssl, protocol: EncryptionProtocol) -> Result<Vec<Vec<u8>>> {
         let mut results = Vec::new();
         let mut buffer = vec![0u8; MAX_DTLS_RECORD_SIZE];
 
-        while let Some(len) = Self::ssl_read_datagram(ssl, &mut buffer)? {
-            trace!("📦 Decrypted DTLS payload ({} bytes)", len);
+        while let Some(len) = Self::ssl_read_datagram(ssl, &mut buffer, protocol)? {
+            let protocol_name = match protocol {
+                EncryptionProtocol::Tls => "TLS",
+                EncryptionProtocol::Dtls => "DTLS",
+            };
+            trace!("📦 Decrypted {} payload ({} bytes)", protocol_name, len);
             results.push(buffer[..len].to_vec());
         }
 
@@ -625,6 +639,7 @@ mod tests {
         let config = DtlsConfig {
             server_name: "test.example.com".to_string(),
             verify_certificate: false,
+            protocol: EncryptionProtocol::Dtls,
         };
 
         let dtls = DtlsUdpSocket::new(server_addr, config);
