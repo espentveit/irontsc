@@ -316,23 +316,9 @@ impl DtlsUdpSocket {
 
         debug!("🔍 SSL_do_handshake returned: {}", ret);
 
-        // Check what protocol version was negotiated
-        let ssl_version = unsafe { ffi::SSL_version(Self::ssl_ptr(ssl)) };
-        let version_str = match ssl_version {
-            0x0300 => "SSL 3.0",
-            0x0301 => "TLS 1.0",
-            0x0302 => "TLS 1.1",
-            0x0303 => "TLS 1.2",
-            0x0304 => "TLS 1.3",
-            _ => "Unknown",
-        };
-        debug!(
-            "🔍 Negotiated protocol version: 0x{:04x} ({})",
-            ssl_version, version_str
-        );
-
         // IMPORTANT: Always check for outgoing data first, even if there was an error
         // OpenSSL might have prepared a response before encountering an error
+        // DO THIS BEFORE calling any other SSL functions that might crash on error state
         let outgoing_packets = Self::drain_wbio(ssl)?;
         if !outgoing_packets.is_empty() {
             debug!(

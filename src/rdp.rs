@@ -1939,6 +1939,11 @@ async fn active_session<T: RdpEventSender + Clone>(
                         }
 
                         // Feed the DVC data to the DRDYNVC processor
+                        // This will:
+                        // 1. Decode the DVC PDU (Create/Close/Data/SoftSync)
+                        // 2. Route Data PDUs to channel processors (e.g., GfxDvcProcessor)
+                        // 3. Channel processors process the data and update state (graphics, etc.)
+                        // 4. Return any response messages (Create/Close responses, acknowledgements)
                         if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
                             match drdynvc.process(&dvc_data) {
                                 Ok(response_messages) => {
