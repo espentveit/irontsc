@@ -1947,30 +1947,57 @@ async fn active_session<T: RdpEventSender + Clone>(
                         if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
                             match drdynvc.process(&dvc_data) {
                                 Ok(response_messages) => {
+                                    debug!("📦 DRDYNVC returned {} response messages", response_messages.len());
                                     if !response_messages.is_empty() {
-                                        info!("📦 Generated {} response messages from tunnel DVC data", response_messages.len());
+                                        // Separate Create/Close responses from Data responses (GFX ACKs)
+                                        // Per MS-RDPEDYC: Create/Close Response PDUs MUST use TCP to avoid race condition
+                                        // But Data responses (GFX frame ACKs) MUST use UDP per MS-RDPEGFX spec
                                         
-                                        // Per MS-RDPEDYC §3.1.5.3: After Soft-Sync, Data PDUs use tunnel
-                                        // However, Create/Close Response PDUs MUST use TCP until channel is fully established
-                                        // to avoid Windows ERROR_NOT_READY (0x8007139F) race condition.
-                                        // 
-                                        // The issue: Server sends SoftSync + Create requests in same DATA packet.
-                                        // If we respond to Create via UDP, server's channel state machine isn't ready yet.
-                                        //
-                                        // Solution: Send ALL DVC responses via TCP during tunnel establishment phase.
-                                        // This matches Windows RDP client behavior.
-                                        match active_stage.encode_dvc_messages(response_messages) {
-                                            Ok(frame) => {
-                                                // Send DVC control responses (Create/Close) via TCP to avoid state machine race
-                                                debug!("   📤 Routing {} bytes DVC control response via TCP (avoiding Windows race condition)", frame.len());
-                                                if !frame.is_empty() {
-                                                    if let Err(e) = writer.write_all(&frame).await {
-                                                        warn!("Failed to write DVC response to TCP: {:?}", e);
+                                        let (tcp_messages, udp_messages): (Vec<_>, Vec<_>) = response_messages
+                                            .into_iter()
+                                            .partition(|msg| {
+                                                // Check PDU type name before encoding
+                                                let pdu_name = msg.pdu_name();
+                                                let is_tcp = pdu_name == "DYNVC_CREATE_RSP" || pdu_name == "DYNVC_CLOSE";
+                                                debug!("   📋 PDU '{}' → {} path", pdu_name, if is_tcp { "TCP" } else { "UDP" });
+                                                is_tcp
+                                            });
+                                        
+                                        // Send Create/Close responses via TCP
+                                        if !tcp_messages.is_empty() {
+                                            match active_stage.encode_dvc_messages(tcp_messages) {
+                                                Ok(frame) => {
+                                                    if !frame.is_empty() {
+                                                        debug!("   📤 Sending {} bytes Create/Close response via TCP", frame.len());
+                                                        if let Err(e) = writer.write_all(&frame).await {
+                                                            warn!("Failed to write DVC Create/Close response to TCP: {:?}", e);
+                                                        }
                                                     }
                                                 }
+                                                Err(e) => {
+                                                    warn!("Failed to encode DVC TCP messages: {:?}", e);
+                                                }
                                             }
-                                            Err(e) => {
-                                                warn!("Failed to encode DVC response messages: {:?}", e);
+                                        }
+                                        
+                                        // Send Data responses (GFX ACKs) via UDP
+                                        if !udp_messages.is_empty() {
+                                            match active_stage.encode_dvc_messages(udp_messages) {
+                                                Ok(frame) => {
+                                                    if !frame.is_empty() {
+                                                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
+                                                            debug!("   📤 Sending {} bytes Data response (GFX ACKs) via UDP tunnel", frame.len());
+                                                            if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SendData(frame)) {
+                                                                warn!("Failed to send Data response via UDP: {:?}", e);
+                                                            }
+                                                        } else {
+                                                            warn!("No UDP tunnel found for request_id={}", request_id);
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to encode DVC UDP messages: {:?}", e);
+                                                }
                                             }
                                         }
                                     }

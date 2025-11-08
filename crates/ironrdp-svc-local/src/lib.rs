@@ -100,6 +100,11 @@ impl SvcMessage {
         self.flags |= flags;
         self
     }
+
+    /// Returns the name of the PDU type
+    pub fn pdu_name(&self) -> &'static str {
+        self.pdu.name()
+    }
 }
 
 impl<T> From<T> for SvcMessage
