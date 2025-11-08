@@ -1944,21 +1944,24 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 Ok(response_messages) => {
                                     if !response_messages.is_empty() {
                                         info!("📦 Generated {} response messages from tunnel DVC data", response_messages.len());
-                                        // Encode responses and send back through the UDP tunnel (NOT TCP!)
-                                        // Per MS-RDPEDYC §3.1.5.3: After Soft-Sync, client MUST use tunnel for DVC data
+                                        
+                                        // Per MS-RDPEDYC §3.1.5.3: After Soft-Sync, Data PDUs use tunnel
+                                        // However, Create/Close Response PDUs MUST use TCP until channel is fully established
+                                        // to avoid Windows ERROR_NOT_READY (0x8007139F) race condition.
+                                        // 
+                                        // The issue: Server sends SoftSync + Create requests in same DATA packet.
+                                        // If we respond to Create via UDP, server's channel state machine isn't ready yet.
+                                        //
+                                        // Solution: Send ALL DVC responses via TCP during tunnel establishment phase.
+                                        // This matches Windows RDP client behavior.
                                         match active_stage.encode_dvc_messages(response_messages) {
                                             Ok(frame) => {
-                                                // Send through UDP tunnel instead of TCP
-                                                if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
-                                                    debug!("   📤 Routing {} bytes DVC response through UDP tunnel", frame.len());
-                                                    if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SendDvcData { 
-                                                        request_id, 
-                                                        data: frame 
-                                                    }) {
-                                                        warn!("Failed to send DVC response through tunnel: {:?}", e);
+                                                // Send DVC control responses (Create/Close) via TCP to avoid state machine race
+                                                debug!("   📤 Routing {} bytes DVC control response via TCP (avoiding Windows race condition)", frame.len());
+                                                if !frame.is_empty() {
+                                                    if let Err(e) = writer.write_all(&frame).await {
+                                                        warn!("Failed to write DVC response to TCP: {:?}", e);
                                                     }
-                                                } else {
-                                                    warn!("No UDP tunnel found for request_id={}, cannot send response!", request_id);
                                                 }
                                             }
                                             Err(e) => {
