@@ -148,10 +148,23 @@ impl DtlsUdpSocket {
         
         ctx_builder.set_options(options);
 
-        // DTLS-specific options
-        if config.protocol == EncryptionProtocol::Dtls {
-            // Ensure OpenSSL does not attempt to probe MTU on its own
-            ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
+        // Protocol-specific options
+        match config.protocol {
+            EncryptionProtocol::Tls => {
+                // For TLS over UDP: disable read-ahead to enforce strict record boundaries
+                // Each UDP packet contains exactly one TLS record, and OpenSSL must not
+                // buffer beyond the current record. This prevents state desynchronization
+                // when mixing encrypt/decrypt operations.
+                unsafe {
+                    ffi::SSL_CTX_set_read_ahead(ctx_builder.as_ptr(), 0);
+                }
+                info!("🔐 TLS read-ahead disabled for datagram mode (one record per UDP packet)");
+            }
+            EncryptionProtocol::Dtls => {
+                // DTLS needs read-ahead for packet loss handling
+                // Ensure OpenSSL does not attempt to probe MTU on its own
+                ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
+            }
         }
 
         ctx_builder.set_mode(SslMode::AUTO_RETRY);
