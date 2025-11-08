@@ -65,10 +65,13 @@ impl GfxDvcProcessor {
         self.client.ctx.set_event_sender(event_sender);
     }
 
-    /// Enable UDP transport mode (TCP GFX data will be ignored)
+    /// Enable UDP transport mode (for logging differentiation only)
+    ///
+    /// After this is called, graphics data arrives via UDP tunnel but still goes
+    /// through the normal DvcProcessor::process() method via DRDYNVC routing.
     pub fn enable_udp_mode(&mut self) {
         use tracing::info;
-        info!("🔄 GFX: Switching to UDP transport mode (TCP data will be ignored)");
+        info!("🔄 GFX: Switching to UDP transport mode");
         self.udp_active = true;
     }
 
@@ -170,21 +173,22 @@ impl DvcProcessor for GfxDvcProcessor {
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
         use tracing::{debug, info, warn};
 
-        // If UDP is active, ignore TCP GFX data
+        // Log differently for UDP vs TCP path
+        // Note: This method is called for Data PDUs from BOTH TCP and UDP tunnels!
+        // After UDP mode is enabled, most graphics data arrives via UDP tunnel.
         if self.udp_active {
-            info!(
-                "⏭️ RDPEGFX: Ignoring {} bytes on TCP channel {} (UDP mode active)",
+            debug!(
+                "📥 RDPEGFX (UDP): Received {} bytes on channel {}",
                 payload.len(),
                 channel_id
             );
-            return Ok(Vec::new());
+        } else {
+            debug!(
+                "📥 RDPEGFX (TCP): Received {} bytes on channel {}",
+                payload.len(),
+                channel_id
+            );
         }
-
-        debug!(
-            "📥 RDPEGFX: Received {} bytes on channel {}",
-            payload.len(),
-            channel_id
-        );
 
         // Decompress with zGFX (preserving error details in log)
         debug!(
