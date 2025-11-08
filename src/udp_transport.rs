@@ -82,6 +82,8 @@ pub enum UdpTransportCommand {
     TunnelData(Vec<u8>),
     /// Soft-Sync completed, channels should switch to UDP
     SoftSyncComplete { tunnel_type: u32 },
+    /// Send DVC data through the UDP tunnel (wraps in TunnelData PDU)
+    SendDvcData { request_id: u32, data: Vec<u8> },
 }
 
 /// Events from the UDP transport
@@ -507,6 +509,12 @@ impl UdpTransportManager {
                                 tunnel_type 
                             }) {
                                 warn!("Failed to send SoftSyncCompleted event: {}", e);
+                            }
+                        }
+                        UdpTransportCommand::SendDvcData { request_id, data } => {
+                            debug!("📤 Sending {} bytes of DVC data through tunnel (request_id={})", data.len(), request_id);
+                            if let Err(e) = self.send_dvc_data_through_tunnel(data).await {
+                                warn!("Error sending DVC data through tunnel: {}", e);
                             }
                         }
                     }
@@ -1000,7 +1008,7 @@ impl UdpTransportManager {
                                 }
                             }
                             Err(e) => {
-                                // ErrorCode(5) is WANT_READ - just means we need more data, not a fatal error
+                                // ErrorCode(1) often means SSL_ERROR_WANT_READ - just means we need more data, not a fatal error
                                 warn!("TLS decrypt failed: {} (continuing...)", e);
                                 // Don't return error, just continue - more data may arrive
                             }
@@ -1020,7 +1028,7 @@ impl UdpTransportManager {
                                 }
                             }
                             Err(e) => {
-                                // ErrorCode(5) is WANT_READ - just means we need more data, not a fatal error
+                                // ErrorCode(1) often means SSL_ERROR_WANT_READ - just means we need more data, not a fatal error
                                 warn!("DTLS decrypt failed: {} (continuing...)", e);
                                 // Don't return error, just continue - more data may arrive
                             }
@@ -1297,6 +1305,47 @@ impl UdpTransportManager {
 
         // For initial implementation, assume tunnel will be established
         // (response handling will be added in next iteration)
+        Ok(())
+    }
+
+    /// Send DVC data through the UDP tunnel (wraps in TunnelData PDU)
+    async fn send_dvc_data_through_tunnel(&mut self, dvc_data: Vec<u8>) -> Result<()> {
+        if !self.tunnel_established {
+            warn!("⚠️ Cannot send DVC data - tunnel not established yet");
+            return Ok(());
+        }
+
+        // Create TunnelData PDU: MS-RDPEMT §2.2.1.1 RDP_TUNNEL_HEADER structure
+        // HeaderLength (2 bytes) - Total header size (10 bytes for basic header)
+        // HeaderVersion (2 bytes) - Version (1)
+        // Action (2 bytes) - 0x0003 for DATA
+        // Flags (2 bytes) - 0x0000 for now
+        // PayloadLength (2 bytes) - Size of DVC payload
+        // [DVC payload data...]
+        
+        let header_length: u16 = 10; // Basic tunnel header with no subheaders
+        let header_version: u16 = 1;
+        let action: u16 = 0x0003; // DATA
+        let flags: u16 = 0x0000;
+        let payload_length = dvc_data.len() as u16;
+
+        let mut tunnel_pdu = Vec::with_capacity(header_length as usize + dvc_data.len());
+        tunnel_pdu.extend_from_slice(&header_length.to_le_bytes());
+        tunnel_pdu.extend_from_slice(&header_version.to_le_bytes());
+        tunnel_pdu.extend_from_slice(&action.to_le_bytes());
+        tunnel_pdu.extend_from_slice(&flags.to_le_bytes());
+        tunnel_pdu.extend_from_slice(&payload_length.to_le_bytes());
+        tunnel_pdu.extend_from_slice(&dvc_data);
+
+        debug!(
+            "📤 Sending {} bytes of DVC data through UDP tunnel ({} bytes total with header)",
+            dvc_data.len(),
+            tunnel_pdu.len()
+        );
+
+        // Send through tunnel (will be encrypted by send_tunnel_pdu if TLS/DTLS active)
+        self.send_tunnel_pdu(tunnel_pdu).await?;
+
         Ok(())
     }
 

@@ -1928,6 +1928,9 @@ async fn active_session<T: RdpEventSender + Clone>(
                     Some(UdpTransportEvent::TunnelDvcData { request_id, data: dvc_data }) => {
                         // DVC data extracted from tunnel DATA packet - process it as DRDYNVC data
                         debug!("📨 Processing {} bytes of DVC data from tunnel (request_id={})", dvc_data.len(), request_id);
+                        if dvc_data.len() > 0 {
+                            debug!("   First bytes: {:02x?}", &dvc_data[..dvc_data.len().min(32)]);
+                        }
 
                         // Skip empty payloads (keep-alive/framing packets)
                         if dvc_data.is_empty() {
@@ -1941,10 +1944,22 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 Ok(response_messages) => {
                                     if !response_messages.is_empty() {
                                         info!("📦 Generated {} response messages from tunnel DVC data", response_messages.len());
-                                        // Encode responses and send back through the tunnel
+                                        // Encode responses and send back through the UDP tunnel (NOT TCP!)
+                                        // Per MS-RDPEDYC §3.1.5.3: After Soft-Sync, client MUST use tunnel for DVC data
                                         match active_stage.encode_dvc_messages(response_messages) {
                                             Ok(frame) => {
-                                                outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                                // Send through UDP tunnel instead of TCP
+                                                if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
+                                                    debug!("   📤 Routing {} bytes DVC response through UDP tunnel", frame.len());
+                                                    if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SendDvcData { 
+                                                        request_id, 
+                                                        data: frame 
+                                                    }) {
+                                                        warn!("Failed to send DVC response through tunnel: {:?}", e);
+                                                    }
+                                                } else {
+                                                    warn!("No UDP tunnel found for request_id={}, cannot send response!", request_id);
+                                                }
                                             }
                                             Err(e) => {
                                                 warn!("Failed to encode DVC response messages: {:?}", e);
