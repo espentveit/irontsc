@@ -405,24 +405,13 @@ pub struct TileUpdate {
 struct TileDecodeScratch {
     channels: [Vec<i16>; COMPONENT_COUNT],
     temp: Vec<i16>,
-    // DWT scratch buffers to avoid allocations in hot path
-    // Max size needed is for level 1: ~1100 elements per buffer
-    dwt_hl: Vec<i16>,
-    dwt_lh: Vec<i16>,
-    dwt_hh: Vec<i16>,
-    dwt_ll: Vec<i16>,
 }
 
 impl TileDecodeScratch {
     fn new() -> Self {
-        const DWT_SCRATCH_SIZE: usize = 1200; // Slightly larger than max needed (1089 for level 1)
         Self {
             channels: std::array::from_fn(|_| vec![0i16; TILE_PIXELS]),
             temp: vec![0i16; TILE_PIXELS],
-            dwt_hl: vec![0i16; DWT_SCRATCH_SIZE],
-            dwt_lh: vec![0i16; DWT_SCRATCH_SIZE],
-            dwt_hh: vec![0i16; DWT_SCRATCH_SIZE],
-            dwt_ll: vec![0i16; DWT_SCRATCH_SIZE],
         }
     }
 
@@ -450,37 +439,6 @@ impl TileDecodeScratch {
         (
             [c0.as_mut_slice(), c1.as_mut_slice(), c2.as_mut_slice()],
             temp,
-        )
-    }
-
-    fn dwt_scratch_mut(&mut self) -> (&mut [i16], &mut [i16], &mut [i16], &mut [i16]) {
-        (
-            self.dwt_hl.as_mut_slice(),
-            self.dwt_lh.as_mut_slice(),
-            self.dwt_hh.as_mut_slice(),
-            self.dwt_ll.as_mut_slice(),
-        )
-    }
-
-    /// Split all scratch buffers for DWT operations
-    fn split_all_mut(
-        &mut self,
-    ) -> (
-        [&mut [i16]; COMPONENT_COUNT],
-        &mut [i16],
-        &mut [i16],
-        &mut [i16],
-        &mut [i16],
-        &mut [i16],
-    ) {
-        let [ref mut c0, ref mut c1, ref mut c2] = self.channels;
-        (
-            [c0.as_mut_slice(), c1.as_mut_slice(), c2.as_mut_slice()],
-            self.temp.as_mut_slice(),
-            self.dwt_hl.as_mut_slice(),
-            self.dwt_lh.as_mut_slice(),
-            self.dwt_hh.as_mut_slice(),
-            self.dwt_ll.as_mut_slice(),
         )
     }
 }
@@ -825,12 +783,12 @@ impl<'a> TileDecoder<'a> {
 
     fn reconstruct_rgba(&mut self, tile_state: &mut TileState, extrapolate: bool) -> Result<()> {
         {
-            let (mut channels, temp, hl, lh, hh, ll) = self.scratch.split_all_mut();
+            let (mut channels, temp) = self.scratch.split_mut();
 
             for (component, buffer_ref) in channels.as_mut_slice().iter_mut().enumerate() {
                 let buffer = &mut **buffer_ref;
                 buffer.copy_from_slice(&tile_state.coefficients[component]);
-                Self::inverse_dwt(buffer, temp, extrapolate, hl, lh, hh, ll);
+                Self::inverse_dwt(buffer, temp, extrapolate);
             }
         }
 
@@ -852,15 +810,11 @@ impl<'a> TileDecoder<'a> {
         buffer: &mut [i16],
         temp: &mut [i16],
         extrapolate: bool,
-        hl_scratch: &mut [i16],
-        lh_scratch: &mut [i16],
-        hh_scratch: &mut [i16],
-        ll_scratch: &mut [i16],
     ) {
         if !extrapolate {
             dwt::decode(buffer, temp);
         } else {
-            dwt_extrapolate_decode(buffer, temp, hl_scratch, lh_scratch, hh_scratch, ll_scratch);
+            dwt_extrapolate_decode(buffer, temp);
         }
     }
 
@@ -1382,10 +1336,6 @@ fn progressive_dwt_decode_block(
     buffer: &mut [i16],
     temp: &mut [i16],
     level: usize,
-    hl_scratch: &mut [i16],
-    lh_scratch: &mut [i16],
-    hh_scratch: &mut [i16],
-    ll_scratch: &mut [i16],
 ) {
     let n_band_l = progressive_get_band_l_count(level);
     let n_band_h = progressive_get_band_h_count(level);
@@ -1407,54 +1357,35 @@ fn progressive_dwt_decode_block(
         return;
     }
 
-    let ll_actual_len = ll_len
-        .min(buffer.len() - (hl_len + lh_len + hh_len))
-        .min(ll_scratch.len());
-
-    // OPTIMIZATION: Use split_at to avoid repeated indexing calculations
-    // This eliminates bounds checks and allows better compiler optimization
-    let (hl_band, rest) = buffer.split_at(hl_len);
-    let (lh_band, rest) = rest.split_at(lh_len);
-    let (hh_band, rest) = rest.split_at(hh_len);
-    let ll_band = &rest[..ll_actual_len];
-
-    // Fast path: Use ptr::copy_nonoverlapping for known non-overlapping regions
-    // This is faster than copy_from_slice as it compiles to memcpy directly
-    // 
-    // OPTIMIZATION: For larger copies, the compiler will use vector instructions (AVX2/AVX512)
-    // For small copies, this becomes a few mov instructions
-    // The key is to give the compiler maximum freedom to optimize
-    unsafe {
-        // Ensure proper alignment hints for better SIMD optimization
-        let hl_src = hl_band.as_ptr();
-        let hl_dst = hl_scratch.as_mut_ptr();
-        let lh_src = lh_band.as_ptr();
-        let lh_dst = lh_scratch.as_mut_ptr();
-        let hh_src = hh_band.as_ptr();
-        let hh_dst = hh_scratch.as_mut_ptr();
-        let ll_src = ll_band.as_ptr();
-        let ll_dst = ll_scratch.as_mut_ptr();
-        
-        // Compiler hint: these are separate, non-overlapping memory regions
-        std::ptr::copy_nonoverlapping(hl_src, hl_dst, hl_len);
-        std::ptr::copy_nonoverlapping(lh_src, lh_dst, lh_len);
-        std::ptr::copy_nonoverlapping(hh_src, hh_dst, hh_len);
-        std::ptr::copy_nonoverlapping(ll_src, ll_dst, ll_actual_len);
-    }
+    // OPTIMIZATION: Zero-copy approach - use direct slices into buffer (matches FreeRDP)
+    // Instead of copying subbands to scratch buffers, we slice directly into the buffer.
+    // This eliminates 4 memmove operations per decode_block call.
+    let mut offset = 0;
+    let hl_band = &buffer[offset..offset + hl_len];
+    offset += hl_len;
+    let lh_band = &buffer[offset..offset + lh_len];
+    offset += lh_len;
+    let hh_band = &buffer[offset..offset + hh_len];
+    offset += hh_len;
+    let ll_band = &buffer[offset..offset + ll_len.min(buffer.len() - offset)];
 
     let (l_temp, h_temp) = temp.split_at_mut(n_band_l * dst_step);
 
+    // Horizontal (LL + HL -> L)
     progressive_idwt_x(
-        &ll_scratch[..ll_actual_len], n_band_l,
-        &hl_scratch[..hl_len], n_band_h,
+        ll_band, n_band_l,
+        hl_band, n_band_h,
         l_temp, dst_step, n_band_l, n_band_h, n_band_l,
     );
+    
+    // Horizontal (LH + HH -> H)
     progressive_idwt_x(
-        &lh_scratch[..lh_len], n_band_l,
-        &hh_scratch[..hh_len], n_band_h,
+        lh_band, n_band_l,
+        hh_band, n_band_h,
         h_temp, dst_step, n_band_l, n_band_h, n_band_h,
     );
 
+    // Vertical (L + H -> LL)
     let llx = &mut buffer[0..dst_len];
     progressive_idwt_y(
         l_temp, dst_step, h_temp, dst_step, llx, dst_step, n_band_l, n_band_h, dst_step,
@@ -1464,42 +1395,14 @@ fn progressive_dwt_decode_block(
 fn dwt_extrapolate_decode(
     buffer: &mut [i16],
     temp: &mut [i16],
-    hl_scratch: &mut [i16],
-    lh_scratch: &mut [i16],
-    hh_scratch: &mut [i16],
-    ll_scratch: &mut [i16],
 ) {
     if buffer.len() < 4096 {
         return;
     }
 
-    progressive_dwt_decode_block(
-        &mut buffer[3807..],
-        temp,
-        3,
-        hl_scratch,
-        lh_scratch,
-        hh_scratch,
-        ll_scratch,
-    );
-    progressive_dwt_decode_block(
-        &mut buffer[3007..],
-        temp,
-        2,
-        hl_scratch,
-        lh_scratch,
-        hh_scratch,
-        ll_scratch,
-    );
-    progressive_dwt_decode_block(
-        &mut buffer[0..],
-        temp,
-        1,
-        hl_scratch,
-        lh_scratch,
-        hh_scratch,
-        ll_scratch,
-    );
+    progressive_dwt_decode_block(&mut buffer[3807..], temp, 3);
+    progressive_dwt_decode_block(&mut buffer[3007..], temp, 2);
+    progressive_dwt_decode_block(&mut buffer[0..], temp, 1);
 }
 
 struct BitStream<'a> {
