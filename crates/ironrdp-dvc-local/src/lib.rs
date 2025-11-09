@@ -59,6 +59,7 @@ pub trait DvcProcessor: AsAny + Send {
 
     fn close(&mut self, _channel_id: u32) {}
 
+    /// Called when a Soft-Sync request is received for this channel.
     fn on_soft_sync(&mut self, _channel_id: DynamicChannelId, _tunnel_type: SoftSyncTunnelType) {}
 }
 

@@ -14,8 +14,8 @@ use crate::gfx::GfxState;
 pub const GFX_CHANNEL_NAME: &str = "Microsoft::Windows::RDS::Graphics";
 
 /// GFX message wrapper for DVC
-struct GfxDvcMessage {
-    data: Vec<u8>,
+pub struct GfxDvcMessage {
+    pub data: Vec<u8>,
 }
 
 impl ironrdp_core::Encode for GfxDvcMessage {
@@ -38,7 +38,7 @@ impl ironrdp_dvc::DvcEncode for GfxDvcMessage {}
 /// GFX DVC Processor
 pub struct GfxDvcProcessor {
     /// GFX client
-    client: GfxClient<GfxState>,
+    pub client: GfxClient<GfxState>,
     /// Current channel ID (set when channel opens)
     channel_id: Option<u32>,
     /// zGFX decompressor (stateful)
@@ -266,7 +266,7 @@ impl DvcProcessor for GfxDvcProcessor {
         self.channel_id = None;
     }
 
-    fn on_soft_sync(&mut self, _channel_id: u32, _tunnel_type: SoftSyncTunnelType) {
+    fn on_soft_sync(&mut self, channel_id: u32, _tunnel_type: SoftSyncTunnelType) {
         use tracing::info;
         info!("🔄 RDPEGFX: SoftSync request received, enabling UDP mode");
         self.enable_udp_mode();

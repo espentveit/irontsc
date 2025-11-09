@@ -971,6 +971,10 @@ impl SoftSyncResponsePdu {
         }
     }
 
+    /// Create a Soft-Sync response from a request, including all unique tunnel types from the request.
+    /// 
+    /// Note: This method does not validate that the tunnels are actually available.
+    /// Use `from_request_with_available` for spec-compliant behavior.
     pub fn from_request(request: &SoftSyncRequestPdu) -> Self {
         let mut seen = BTreeSet::new();
         let mut tunnels = Vec::new();
@@ -979,6 +983,33 @@ impl SoftSyncResponsePdu {
                 tunnels.push(tunnel.tunnel_type);
             }
         }
+        Self::new(tunnels)
+    }
+
+    /// Create a Soft-Sync response from a request, including only tunnel types that are both
+    /// requested by the server AND available to the client.
+    ///
+    /// Per MS-RDPEDYC §3.2.5.3.2: "Each multitransport tunnel that the client manager will use
+    /// to send dynamic virtual channel data MUST be specified in the TunnelsToSwitch field."
+    ///
+    /// This ensures the client only confirms tunnels it has successfully established.
+    pub fn from_request_with_available(
+        request: &SoftSyncRequestPdu,
+        available_tunnels: &BTreeSet<SoftSyncTunnelType>,
+    ) -> Self {
+        let mut seen = BTreeSet::new();
+        let mut tunnels = Vec::new();
+        
+        for tunnel in &request.tunnels {
+            // Only include tunnels that are:
+            // 1. Requested by the server (in the request)
+            // 2. Available on the client (successfully established)
+            // 3. Not already added (unique)
+            if available_tunnels.contains(&tunnel.tunnel_type) && seen.insert(tunnel.tunnel_type) {
+                tunnels.push(tunnel.tunnel_type);
+            }
+        }
+        
         Self::new(tunnels)
     }
 

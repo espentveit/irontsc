@@ -32,6 +32,10 @@ pub struct DrdynvcClient {
     /// Maps channel IDs to their UDP tunnel type (if they've been switched via Soft-Sync)
     /// Channels not in this map use TCP transport
     udp_channels: BTreeMap<u32, u32>,
+    /// Set of UDP tunnel types that have been successfully established and are available for use.
+    /// Per MS-RDPEDYC §3.2.5.3.2: "Each multitransport tunnel that the client manager will use
+    /// to send dynamic virtual channel data MUST be specified in the TunnelsToSwitch field."
+    available_udp_tunnels: alloc::collections::BTreeSet<u32>,
 }
 
 impl fmt::Debug for DrdynvcClient {
@@ -58,6 +62,7 @@ impl DrdynvcClient {
             cap_handshake_done: false,
             soft_sync_completed_tunnel: None,
             udp_channels: BTreeMap::new(),
+            available_udp_tunnels: alloc::collections::BTreeSet::new(),
         }
     }
 
@@ -82,6 +87,22 @@ impl DrdynvcClient {
     /// Returns the tunnel type if soft-sync has been completed
     pub fn soft_sync_completed(&self) -> Option<u32> {
         self.soft_sync_completed_tunnel
+    }
+
+    /// Register that a UDP tunnel has been successfully established and is available for use.
+    /// Per MS-RDPEDYC §3.2.5.3.2: The client MUST NOT send the Soft-Sync Response PDU until
+    /// it has sent a successful Initiate Multitransport Response PDU for each tunnel.
+    ///
+    /// This should be called when the UDP transport initialization completes successfully.
+    pub fn register_available_tunnel(&mut self, tunnel_type: u32) {
+        debug!("Registering available UDP tunnel type: 0x{:08X}", tunnel_type);
+        self.available_udp_tunnels.insert(tunnel_type);
+    }
+
+    /// Unregister a UDP tunnel (e.g., if connection fails)
+    pub fn unregister_available_tunnel(&mut self, tunnel_type: u32) {
+        debug!("Unregistering UDP tunnel type: 0x{:08X}", tunnel_type);
+        self.available_udp_tunnels.remove(&tunnel_type);
     }
 
     /// Process DVC data with transport context.
@@ -321,7 +342,8 @@ impl DrdynvcClient {
                 self.udp_channels.insert(channel_id, tunnel.tunnel_type);
                 
                 if let Some(channel) = self.dynamic_channels.get_by_channel_id_mut(channel_id) {
-                    channel.on_soft_sync(tunnel.tunnel_type);
+                    // Notify channel that it's being switched to UDP
+                    let _ = channel.on_soft_sync(tunnel.tunnel_type);
                 } else {
                     debug!(
                         "SoftSync tunnel references unknown channel_id={channel_id} (tunnel_type=0x{:08X})",
@@ -337,7 +359,10 @@ impl DrdynvcClient {
         }
 
         let response =
-            DrdynvcClientPdu::SoftSyncResponse(SoftSyncResponsePdu::from_request(request));
+            DrdynvcClientPdu::SoftSyncResponse(SoftSyncResponsePdu::from_request_with_available(
+                request,
+                &self.available_udp_tunnels,
+            ));
         debug!("📤 Sending DVC SoftSync Response PDU: {response:?}");
         
         // Per MS-RDPEDYC: Soft-Sync responses MUST go over TCP
