@@ -608,12 +608,16 @@ impl GfxContext for GfxState {
             }
         }
 
-        // Don't send updates immediately - batch them until EndFrame
-        // This prevents visible tearing from tile-by-tile updates
-        trace!(
-            "📝 Decoded surface {} - waiting for EndFrame to send",
-            surface_id
-        );
+        // Send update immediately after decoding each tile
+        // Workaround: Server doesn't always send EndFrame PDUs, so we flush after each WireToSurface
+        // This causes some visual tearing but ensures rendering happens
+        if self.surface_output_mappings.len() == 1 {
+            // Fast path: single surface mapped, send directly
+            if let Some(surface) = self.surfaces.get(&surface_id) {
+                debug!("� Immediate flush: surface {} after WireToSurface", surface_id);
+                self.send_surface_to_ui(surface)?;
+            }
+        }
 
         Ok(())
     }

@@ -703,6 +703,11 @@ impl UdpTransportManager {
         match source_result {
             Ok(payloads) if !payloads.is_empty() => {
                 // Successfully extracted payloads from RDP UDP DATA packet(s)
+                debug!("📦 Extracted {} payload(s) from UDP packet", payloads.len());
+                for (idx, payload) in payloads.iter().enumerate() {
+                    debug!("   Payload[{}]: {} bytes, first: {:02x?}", 
+                           idx, payload.len(), &payload[..payload.len().min(16)]);
+                }
                 for payload in payloads {
                     // Check if we're still in TLS/DTLS handshake
                     let (in_handshake, protocol_name, is_dtls) =
