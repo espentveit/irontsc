@@ -972,7 +972,7 @@ impl SoftSyncResponsePdu {
     }
 
     /// Create a Soft-Sync response from a request, including all unique tunnel types from the request.
-    /// 
+    ///
     /// Note: This method does not validate that the tunnels are actually available.
     /// Use `from_request_with_available` for spec-compliant behavior.
     pub fn from_request(request: &SoftSyncRequestPdu) -> Self {
@@ -999,7 +999,7 @@ impl SoftSyncResponsePdu {
     ) -> Self {
         let mut seen = BTreeSet::new();
         let mut tunnels = Vec::new();
-        
+
         for tunnel in &request.tunnels {
             // Only include tunnels that are:
             // 1. Requested by the server (in the request)
@@ -1009,7 +1009,7 @@ impl SoftSyncResponsePdu {
                 tunnels.push(tunnel.tunnel_type);
             }
         }
-        
+
         Self::new(tunnels)
     }
 

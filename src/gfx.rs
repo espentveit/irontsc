@@ -608,7 +608,6 @@ impl GfxContext for GfxState {
             }
         }
 
-
         // Don't flush here - wait for EndFrame to batch all updates in the frame
         // This reduces redundant rendering and improves performance
 

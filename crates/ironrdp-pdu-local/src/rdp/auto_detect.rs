@@ -1,9 +1,8 @@
 /// Auto-Detect Request and Response PDUs for network characteristics detection
 /// MS-RDPBCGR 2.2.14
-
 use ironrdp_core::{
-    ensure_fixed_part_size, ensure_size, Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor,
-    other_err,
+    ensure_fixed_part_size, ensure_size, other_err, Decode, DecodeResult, Encode, EncodeResult,
+    ReadCursor, WriteCursor,
 };
 
 const HEADER_TYPE_ID_AUTODETECT_REQUEST: u8 = 0x00;
@@ -179,7 +178,7 @@ impl<'de> Decode<'de> for BandwidthMeasureStart {
 }
 
 /// Bandwidth Measure Stop (MS-RDPBCGR 2.2.14.1.4)
-/// 
+///
 /// Note: payloadLength is optional and only present when requestType is 0x002B
 /// headerLength is 0x06 if payloadLength is absent, 0x08 if present
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,17 +205,21 @@ impl BandwidthMeasureStop {
 impl Encode for BandwidthMeasureStop {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: self.size());
-        
-        let header_length = if self.payload_length.is_some() { 0x08 } else { 0x06 };
+
+        let header_length = if self.payload_length.is_some() {
+            0x08
+        } else {
+            0x06
+        };
         dst.write_u8(header_length);
         dst.write_u8(HEADER_TYPE_ID_AUTODETECT_REQUEST);
         dst.write_u16(self.sequence_number);
         dst.write_u16(self.request_type);
-        
+
         if let Some(payload_length) = self.payload_length {
             dst.write_u16(payload_length);
         }
-        
+
         Ok(())
     }
 
@@ -236,19 +239,19 @@ impl Encode for BandwidthMeasureStop {
 impl<'de> Decode<'de> for BandwidthMeasureStop {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
         ensure_size!(in: src, size: Self::MIN_SIZE);
-        
+
         let header_length = src.read_u8();
         let _header_type_id = src.read_u8();
         let sequence_number = src.read_u16();
         let request_type = src.read_u16();
-        
+
         // payloadLength is only present when headerLength is 0x08 (for requestType 0x002B)
         let payload_length = if header_length == 0x08 {
             Some(src.read_u16())
         } else {
             None
         };
-        
+
         Ok(Self {
             sequence_number,
             request_type,
@@ -355,7 +358,11 @@ impl NetworkCharacteristicsResult {
 
 impl Encode for NetworkCharacteristicsResult {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
-        let header_length = if self.request_type == 0x08C0 { 0x12 } else { 0x0E };
+        let header_length = if self.request_type == 0x08C0 {
+            0x12
+        } else {
+            0x0E
+        };
         dst.write_u8(header_length);
         dst.write_u8(HEADER_TYPE_ID_AUTODETECT_REQUEST);
         dst.write_u16(self.sequence_number);

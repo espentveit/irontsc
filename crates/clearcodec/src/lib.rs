@@ -1009,7 +1009,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressed.push(0x00); // glyph flags
         compressed.push(0x00); // seq number
-        
+
         // Residual data: 4 red pixels (2x2)
         let residual_data = vec![
             0x00, 0x00, 0xFF, 0x04, // B=0, G=0, R=255, RunLength=4
@@ -1019,7 +1019,8 @@ mod tests {
         compressed.extend_from_slice(&0u32.to_le_bytes()); // subcodec
         compressed.extend_from_slice(&residual_data);
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("Residual layer should decode");
 
         // All pixels should be red (BGRA)
@@ -1039,7 +1040,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressed.push(0x00); // glyph flags
         compressed.push(0x00); // seq number
-        
+
         // 256 blue pixels using extended run-length (0xFF marker + u16)
         let residual_data = vec![
             0xFF, 0x00, 0x00, 0xFF, // B=255, G=0, R=0, RunLength=0xFF (marker)
@@ -1050,7 +1051,8 @@ mod tests {
         compressed.extend_from_slice(&0u32.to_le_bytes());
         compressed.extend_from_slice(&residual_data);
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("Extended run-length should decode");
 
         for chunk in output.chunks_exact(4) {
@@ -1070,7 +1072,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressed.push(0x00); // glyph flags
         compressed.push(0x00); // seq number
-        
+
         let residual_data = vec![0x00, 0x00, 0x00, 0x10]; // 16 black pixels
         let bands_data = {
             let mut data = Vec::new();
@@ -1080,21 +1082,21 @@ mod tests {
             data.extend_from_slice(&0u16.to_le_bytes()); // y_start
             data.extend_from_slice(&3u16.to_le_bytes()); // y_end
             data.extend_from_slice(&[0xFF, 0x00, 0x00]); // Background color: blue
-            
+
             // VBar 0: SHORT_VBAR_CACHE_MISS (0x0000 pattern)
             // vbar_header: y_on=0, y_off=4 (all 4 pixels are solid red)
             data.extend_from_slice(&0x0400u16.to_le_bytes()); // header: (4<<8) | 0
-            // 4 red pixels
+                                                              // 4 red pixels
             for _ in 0..4 {
                 data.extend_from_slice(&[0x00, 0x00, 0xFF]); // BGR: red
             }
-            
+
             // VBar 1: SHORT_VBAR_CACHE_MISS
             data.extend_from_slice(&0x0400u16.to_le_bytes());
             for _ in 0..4 {
                 data.extend_from_slice(&[0x00, 0xFF, 0x00]); // BGR: green
             }
-            
+
             data
         };
 
@@ -1104,19 +1106,30 @@ mod tests {
         compressed.extend_from_slice(&residual_data);
         compressed.extend_from_slice(&bands_data);
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("Band layer should decode");
 
         // Check column 1 is red
         for y in 0..4 {
             let offset = ((y * width + 1) * 4) as usize;
-            assert_eq!(&output[offset..offset+4], &[0x00, 0x00, 0xFF, 0xFF], "Column 1, row {} should be red", y);
+            assert_eq!(
+                &output[offset..offset + 4],
+                &[0x00, 0x00, 0xFF, 0xFF],
+                "Column 1, row {} should be red",
+                y
+            );
         }
-        
+
         // Check column 2 is green
         for y in 0..4 {
             let offset = ((y * width + 2) * 4) as usize;
-            assert_eq!(&output[offset..offset+4], &[0x00, 0xFF, 0x00, 0xFF], "Column 2, row {} should be green", y);
+            assert_eq!(
+                &output[offset..offset + 4],
+                &[0x00, 0xFF, 0x00, 0xFF],
+                "Column 2, row {} should be green",
+                y
+            );
         }
     }
 
@@ -1139,7 +1152,8 @@ mod tests {
         compressed.extend_from_slice(&0u32.to_le_bytes());
         compressed.extend_from_slice(&[0x00, 0x00, 0x00, 0x04]); // 4 black pixels
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("CACHE_RESET should work");
 
         assert_eq!(codec.vbar_cursor, 0);
@@ -1159,7 +1173,7 @@ mod tests {
         compressed.push(CLEARCODEC_FLAG_GLYPH_INDEX); // flags
         compressed.push(0x00); // seq
         compressed.extend_from_slice(&glyph_index.to_le_bytes()); // glyph index
-        
+
         // Residual data: 4 cyan pixels
         let residual_data = vec![0xFF, 0xFF, 0x00, 0x04]; // B=255, G=255, R=0, count=4
         compressed.extend_from_slice(&(residual_data.len() as u32).to_le_bytes());
@@ -1167,7 +1181,8 @@ mod tests {
         compressed.extend_from_slice(&0u32.to_le_bytes());
         compressed.extend_from_slice(&residual_data);
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("Glyph miss should work");
 
         // Verify output is cyan
@@ -1177,7 +1192,10 @@ mod tests {
 
         // Verify glyph was cached
         assert_eq!(codec.glyph_cache[glyph_index as usize].pixels.len(), 16);
-        assert_eq!(&codec.glyph_cache[glyph_index as usize].pixels[0..4], &[0xFF, 0xFF, 0x00, 0xFF]);
+        assert_eq!(
+            &codec.glyph_cache[glyph_index as usize].pixels[0..4],
+            &[0xFF, 0xFF, 0x00, 0xFF]
+        );
     }
 
     #[test]
@@ -1199,7 +1217,8 @@ mod tests {
         compressed.push(0x00); // seq
         compressed.extend_from_slice(&glyph_index.to_le_bytes());
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("Glyph hit should work");
 
         // Verify output is magenta (from cache)
@@ -1215,8 +1234,20 @@ mod tests {
         let mut output = vec![0u8; 16];
 
         let compressed = vec![
-            CLEARCODEC_FLAG_GLYPH_HIT, 0x00, // Invalid: HIT without INDEX
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            CLEARCODEC_FLAG_GLYPH_HIT,
+            0x00, // Invalid: HIT without INDEX
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
         ];
 
         let result = codec.decompress(&compressed, 2, 2, &mut output);
@@ -1237,7 +1268,10 @@ mod tests {
 
         let result = codec.decompress(&compressed, 2, 2, &mut output);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid glyph index"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid glyph index"));
     }
 
     #[test]
@@ -1270,7 +1304,7 @@ mod tests {
         compressed.push(CLEARCODEC_FLAG_GLYPH_INDEX);
         compressed.push(0x00);
         compressed.extend_from_slice(&0u16.to_le_bytes());
-        
+
         // 1024 gray pixels using extended run-length
         let residual_data = vec![
             0x80, 0x80, 0x80, 0xFF, // B=128, G=128, R=128, RunLength=0xFF (extended marker)
@@ -1298,28 +1332,28 @@ mod tests {
         compressed.push(0x00);
         compressed.extend_from_slice(&0u32.to_le_bytes()); // no residual
         compressed.extend_from_slice(&0u32.to_le_bytes()); // no bands
-        
+
         // RLEX subcodec data
         let mut rlex_data = Vec::new();
         rlex_data.push(2); // palette_count = 2
         rlex_data.extend_from_slice(&[0xFF, 0x00, 0x00]); // Color 0: Blue
         rlex_data.extend_from_slice(&[0x00, 0xFF, 0x00]); // Color 1: Green
-        
+
         // Encode: suite_depth=1 (colors 0-1), stop_index=1
         // tmp = (suite_depth << num_bits) | stop_index = (1 << 1) | 1 = 3
         rlex_data.push(0x03); // tmp byte
         rlex_data.push(0x04); // run_length = 4 (run of color 0)
-        // This produces: 4 blue pixels, then 1 blue, then 1 green = 6 pixels
-        
+                              // This produces: 4 blue pixels, then 1 blue, then 1 green = 6 pixels
+
         // Need 2 more pixels (8 total for 4x2)
         rlex_data.push(0x03); // Same pattern
         rlex_data.push(0x01); // run_length = 1
-        // This produces: 1 blue, then 1 blue, then 1 green = 3 more pixels (but we only need 2)
-        
+                              // This produces: 1 blue, then 1 blue, then 1 green = 3 more pixels (but we only need 2)
+
         let tile_width = 4u16;
         let tile_height = 2u16;
         let bitmap_data_byte_count = rlex_data.len() as u32;
-        
+
         let mut subcodec_payload = Vec::new();
         subcodec_payload.extend_from_slice(&0u16.to_le_bytes()); // x_start
         subcodec_payload.extend_from_slice(&0u16.to_le_bytes()); // y_start
@@ -1328,7 +1362,7 @@ mod tests {
         subcodec_payload.extend_from_slice(&bitmap_data_byte_count.to_le_bytes());
         subcodec_payload.push(2); // subcodec_id = RLEX
         subcodec_payload.extend_from_slice(&rlex_data);
-        
+
         compressed.extend_from_slice(&(subcodec_payload.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&subcodec_payload);
 
@@ -1351,7 +1385,7 @@ mod tests {
         compressed.push(0x00);
         compressed.extend_from_slice(&0u32.to_le_bytes());
         compressed.extend_from_slice(&0u32.to_le_bytes());
-        
+
         // Uncompressed BGR24 data for 2x2
         let bgr_data = vec![
             0xFF, 0x00, 0x00, // Pixel 0: Blue
@@ -1359,7 +1393,7 @@ mod tests {
             0x00, 0x00, 0xFF, // Pixel 2: Red
             0xFF, 0xFF, 0x00, // Pixel 3: Cyan
         ];
-        
+
         let mut subcodec_payload = Vec::new();
         subcodec_payload.extend_from_slice(&0u16.to_le_bytes());
         subcodec_payload.extend_from_slice(&0u16.to_le_bytes());
@@ -1368,11 +1402,12 @@ mod tests {
         subcodec_payload.extend_from_slice(&(bgr_data.len() as u32).to_le_bytes());
         subcodec_payload.push(0); // subcodec_id = uncompressed
         subcodec_payload.extend_from_slice(&bgr_data);
-        
+
         compressed.extend_from_slice(&(subcodec_payload.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&subcodec_payload);
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("Uncompressed subcodec should work");
 
         assert_eq!(&output[0..4], &[0xFF, 0x00, 0x00, 0xFF]); // Blue
@@ -1392,27 +1427,27 @@ mod tests {
         let mut compressed = Vec::new();
         compressed.push(0x00);
         compressed.push(0x00);
-        
+
         // Fill with black - 104 pixels total (2x52)
         let mut residual = Vec::new();
         for _ in 0..26 {
             residual.extend_from_slice(&[0x00, 0x00, 0x00, 0x04]); // 4 black pixels each
         }
         compressed.extend_from_slice(&(residual.len() as u32).to_le_bytes()); // 104 bytes
-        
+
         let mut bands_data = Vec::new();
         bands_data.extend_from_slice(&0u16.to_le_bytes()); // x_start
         bands_data.extend_from_slice(&0u16.to_le_bytes()); // x_end
         bands_data.extend_from_slice(&0u16.to_le_bytes()); // y_start
         bands_data.extend_from_slice(&51u16.to_le_bytes()); // y_end (52 pixels)
         bands_data.extend_from_slice(&[0x00, 0x00, 0xFF]); // Background red
-        
+
         // VBar with 52 pixels - this is at the limit
         bands_data.extend_from_slice(&0x3400u16.to_le_bytes()); // y_on=0, y_off=52
         for _ in 0..52 {
             bands_data.extend_from_slice(&[0xFF, 0x00, 0x00]); // Blue pixels
         }
-        
+
         compressed.extend_from_slice(&(bands_data.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&0u32.to_le_bytes());
         compressed.extend_from_slice(&residual);
@@ -1433,7 +1468,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressed.push(0x00);
         compressed.push(0x00);
-        
+
         let residual_data = vec![0x00, 0x00, 0x00, 0xFF, 0x78, 0x00]; // 120 black pixels
         let mut bands_data = Vec::new();
         bands_data.extend_from_slice(&0u16.to_le_bytes());
@@ -1442,7 +1477,7 @@ mod tests {
         bands_data.extend_from_slice(&59u16.to_le_bytes()); // 60 pixels - exceeds 52
         bands_data.extend_from_slice(&[0x00, 0x00, 0xFF]);
         bands_data.extend_from_slice(&0x3C00u16.to_le_bytes()); // y_off=60
-        
+
         compressed.extend_from_slice(&(residual_data.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&(bands_data.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&0u32.to_le_bytes());
@@ -1451,7 +1486,10 @@ mod tests {
 
         let result = codec.decompress(&compressed, width, height, &mut output);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("VBar height too large"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("VBar height too large"));
     }
 
     #[test]
@@ -1465,10 +1503,10 @@ mod tests {
         compressed.push(0x00);
         compressed.extend_from_slice(&0u32.to_le_bytes());
         compressed.extend_from_slice(&0u32.to_le_bytes());
-        
+
         let mut rlex_data = Vec::new();
         rlex_data.push(128); // Invalid: > 127
-        
+
         let mut subcodec_payload = Vec::new();
         subcodec_payload.extend_from_slice(&0u16.to_le_bytes());
         subcodec_payload.extend_from_slice(&0u16.to_le_bytes());
@@ -1477,13 +1515,16 @@ mod tests {
         subcodec_payload.extend_from_slice(&(rlex_data.len() as u32).to_le_bytes());
         subcodec_payload.push(2); // RLEX
         subcodec_payload.extend_from_slice(&rlex_data);
-        
+
         compressed.extend_from_slice(&(subcodec_payload.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&subcodec_payload);
 
         let result = codec.decompress(&compressed, 2, 2, &mut output);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid palette count"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid palette count"));
     }
 
     #[test]
@@ -1497,7 +1538,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressed.push(0x00);
         compressed.push(0x00);
-        
+
         // Try to write 10 pixels (more than 4 available)
         let residual_data = vec![0xFF, 0x00, 0x00, 0x0A]; // 10 red pixels
         compressed.extend_from_slice(&(residual_data.len() as u32).to_le_bytes());
@@ -1521,10 +1562,10 @@ mod tests {
         let mut compressed = Vec::new();
         compressed.push(0x00);
         compressed.push(0x00);
-        
+
         // Layer 1: Residual fills everything with black
         let residual_data = vec![0x00, 0x00, 0x00, 0x10]; // 16 black pixels
-        
+
         // Layer 2: Bands paint a red stripe at x=1
         let mut bands_data = Vec::new();
         bands_data.extend_from_slice(&1u16.to_le_bytes()); // x_start
@@ -1536,7 +1577,7 @@ mod tests {
         for _ in 0..4 {
             bands_data.extend_from_slice(&[0x00, 0x00, 0xFF]); // Red
         }
-        
+
         // Layer 3: Subcodec paints one green pixel at (2,2)
         let bgr_data = vec![0x00, 0xFF, 0x00]; // Green
         let mut subcodec_payload = Vec::new();
@@ -1547,7 +1588,7 @@ mod tests {
         subcodec_payload.extend_from_slice(&(bgr_data.len() as u32).to_le_bytes());
         subcodec_payload.push(0); // uncompressed
         subcodec_payload.extend_from_slice(&bgr_data);
-        
+
         compressed.extend_from_slice(&(residual_data.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&(bands_data.len() as u32).to_le_bytes());
         compressed.extend_from_slice(&(subcodec_payload.len() as u32).to_le_bytes());
@@ -1555,20 +1596,33 @@ mod tests {
         compressed.extend_from_slice(&bands_data);
         compressed.extend_from_slice(&subcodec_payload);
 
-        codec.decompress(&compressed, width, height, &mut output)
+        codec
+            .decompress(&compressed, width, height, &mut output)
             .expect("Combined layers should decode");
 
         // Verify column 1 is red (from bands)
         for y in 0..4 {
             let offset = ((y * width + 1) * 4) as usize;
-            assert_eq!(&output[offset..offset+4], &[0x00, 0x00, 0xFF, 0xFF], "Column 1 should be red");
+            assert_eq!(
+                &output[offset..offset + 4],
+                &[0x00, 0x00, 0xFF, 0xFF],
+                "Column 1 should be red"
+            );
         }
-        
+
         // Verify pixel (2,2) is green (from subcodec)
         let offset = ((2 * width + 2) * 4) as usize;
-        assert_eq!(&output[offset..offset+4], &[0x00, 0xFF, 0x00, 0xFF], "Pixel (2,2) should be green");
-        
+        assert_eq!(
+            &output[offset..offset + 4],
+            &[0x00, 0xFF, 0x00, 0xFF],
+            "Pixel (2,2) should be green"
+        );
+
         // Verify pixel (0,0) is black (from residual)
-        assert_eq!(&output[0..4], &[0x00, 0x00, 0x00, 0xFF], "Pixel (0,0) should be black");
+        assert_eq!(
+            &output[0..4],
+            &[0x00, 0x00, 0x00, 0xFF],
+            "Pixel (0,0) should be black"
+        );
     }
 }

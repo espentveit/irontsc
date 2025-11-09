@@ -15,6 +15,7 @@ use crate::rdp::headers::{
 use crate::rdp::server_license::ServerLicenseError;
 use crate::PduError;
 
+pub mod auto_detect;
 pub mod capability_sets;
 pub mod client_info;
 pub mod finalization_messages;
@@ -27,7 +28,6 @@ pub mod session_info;
 pub mod suppress_output;
 pub mod tunnel;
 pub mod vc;
-pub mod auto_detect;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientInfoPdu {

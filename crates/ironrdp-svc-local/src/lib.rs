@@ -185,13 +185,15 @@ impl StaticVirtualChannel {
 
     /// Processes a payload received on the virtual channel. Returns a vector of PDUs to be sent back
     /// to the server. If no PDUs are to be sent, an empty vector is returned.
-    /// 
+    ///
     /// Static virtual channels typically use TCP transport. For dynamic channels over UDP tunnels,
     /// the transport context is managed by the DVC layer.
     pub fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>> {
         if let Some(payload) = self.dechunkify(payload).map_err(|e| decode_err!(e))? {
             // Static virtual channels always use TCP transport
-            return self.channel_processor.process(&payload, TransportContext::Tcp);
+            return self
+                .channel_processor
+                .process(&payload, TransportContext::Tcp);
         }
 
         Ok(Vec::new())
@@ -313,7 +315,11 @@ pub trait SvcProcessor: AsAny + fmt::Debug + Send {
     /// responses to be routed back via the same transport (TCP or UDP tunnel).
     ///
     /// Returns a list of PDUs to be sent back.
-    fn process(&mut self, payload: &[u8], transport: TransportContext) -> PduResult<Vec<SvcMessage>>;
+    fn process(
+        &mut self,
+        payload: &[u8],
+        transport: TransportContext,
+    ) -> PduResult<Vec<SvcMessage>>;
 }
 
 assert_obj_safe!(SvcProcessor);

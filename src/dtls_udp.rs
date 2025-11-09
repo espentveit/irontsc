@@ -140,12 +140,12 @@ impl DtlsUdpSocket {
         // Disable ChaCha20 globally for both TLS 1.3 and TLS 1.2
         // This is a workaround for OpenSSL adding ChaCha20 by default
         let mut options = SslOptions::NO_TICKET | SslOptions::CIPHER_SERVER_PREFERENCE;
-        
+
         // Enable middlebox compatibility mode to send ChangeCipherSpec
         // This makes TLS 1.3 handshakes look like TLS 1.2 for compatibility
         // The Windows RDP server expects to receive ChangeCipherSpec
         options |= SslOptions::ENABLE_MIDDLEBOX_COMPAT;
-        
+
         ctx_builder.set_options(options);
 
         // Protocol-specific options
@@ -492,7 +492,11 @@ impl DtlsUdpSocket {
         }
     }
 
-    fn ssl_write_datagram(ssl: &mut Ssl, buf: &[u8], protocol: EncryptionProtocol) -> Result<usize> {
+    fn ssl_write_datagram(
+        ssl: &mut Ssl,
+        buf: &[u8],
+        protocol: EncryptionProtocol,
+    ) -> Result<usize> {
         unsafe {
             let ssl_ptr = Self::ssl_ptr(ssl);
             if buf.is_empty() {
@@ -515,7 +519,11 @@ impl DtlsUdpSocket {
         }
     }
 
-    fn ssl_read_datagram(ssl: &mut Ssl, buf: &mut [u8], protocol: EncryptionProtocol) -> Result<Option<usize>> {
+    fn ssl_read_datagram(
+        ssl: &mut Ssl,
+        buf: &mut [u8],
+        protocol: EncryptionProtocol,
+    ) -> Result<Option<usize>> {
         unsafe {
             let ssl_ptr = Self::ssl_ptr(ssl);
             if buf.is_empty() {
@@ -536,21 +544,26 @@ impl DtlsUdpSocket {
                             EncryptionProtocol::Tls => "TLS",
                             EncryptionProtocol::Dtls => "DTLS",
                         };
-                        
+
                         // Get detailed OpenSSL error from error queue
                         let err = ffi::ERR_get_error();
                         let error_details = if err == 0 {
-                            format!("{} SSL_read failed with {:?} but no OpenSSL error in queue", protocol_name, code)
+                            format!(
+                                "{} SSL_read failed with {:?} but no OpenSSL error in queue",
+                                protocol_name, code
+                            )
                         } else {
                             let mut buf = vec![0u8; 256];
                             ERR_error_string_n(err, buf.as_mut_ptr() as *mut i8, buf.len());
                             let err_str = std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8)
                                 .to_string_lossy()
                                 .to_string();
-                            format!("{} SSL_read failed: {} (code {:?}, raw: 0x{:x})", 
-                                protocol_name, err_str, code, err)
+                            format!(
+                                "{} SSL_read failed: {} (code {:?}, raw: 0x{:x})",
+                                protocol_name, err_str, code, err
+                            )
                         };
-                        
+
                         Err(anyhow!("{}", error_details))
                     }
                 }
@@ -581,7 +594,7 @@ impl DtlsUdpSocket {
                 }
 
                 buf.truncate(read as usize);
-                
+
                 // Log TLS record type for debugging
                 if buf.len() >= 1 {
                     let record_type = buf[0];
@@ -592,10 +605,14 @@ impl DtlsUdpSocket {
                         23 => "Application Data",
                         _ => "Unknown",
                     };
-                    debug!("🔍 OpenSSL produced {} byte TLS record, type={} ({})", 
-                           buf.len(), record_type, type_name);
+                    debug!(
+                        "🔍 OpenSSL produced {} byte TLS record, type={} ({})",
+                        buf.len(),
+                        record_type,
+                        type_name
+                    );
                 }
-                
+
                 packets.push(buf);
             }
 
