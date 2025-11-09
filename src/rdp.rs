@@ -262,22 +262,9 @@ async fn connect(
     #[allow(unused_mut)]
     let mut drdynvc = ironrdp::dvc::DrdynvcClient::new();
 
-    // Add CoreInput and MouseCursor channels (required by Windows RDP server)
-    {
-        use crate::core_input_channel::CoreInputProcessor;
-        use crate::mouse_cursor_channel::MouseCursorProcessor;
-
-        info!("Registering CoreInput and MouseCursor channels...");
-        
-        let core_input = CoreInputProcessor::new();
-        let mouse_cursor = MouseCursorProcessor::new();
-
-        drdynvc = drdynvc
-            .with_dynamic_channel(core_input)
-            .with_dynamic_channel(mouse_cursor);
-
-        info!("CoreInput and MouseCursor channels registered");
-    }
+    // NOTE: CoreInput and MouseCursor channels are intentionally NOT registered here.
+    // The server will create these channels via DVC CREATE requests, and we respond with NO_LISTENER.
+    // This allows the server's native input handling to work properly without interference from mock handlers.
 
     // Add RDPEGFX channel (falls back to progressive mode when H.264 is absent)
     {
@@ -1901,6 +1888,22 @@ async fn active_session<T: RdpEventSender + Clone>(
                                             info!("   Processing {} deferred DVC message(s)", deferred_messages.len());
                                             let frame = active_stage.encode_dvc_messages(deferred_messages)?;
                                             outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                            
+                                            // Check if we have a pending resize now that channels (like DisplayControl) may be ready
+                                            if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
+                                                if let Some(result) = active_stage.encode_resize(
+                                                    width as u32,
+                                                    height as u32,
+                                                    Some(scale_factor),
+                                                    physical_size,
+                                                ) {
+                                                    info!(width, height, scale_factor, "📐 Sending queued resize after deferred channel creation");
+                                                    outputs.push(ActiveStageOutput::ResponseFrame(result?));
+                                                } else {
+                                                    // Still not available, put it back
+                                                    pending_initial_resize = Some((width, height, scale_factor, physical_size));
+                                                }
+                                            }
                                         }
                                     }
                                     Err(e) => {
