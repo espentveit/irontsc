@@ -137,16 +137,18 @@ impl DrdynvcClient {
                 let create_response =
                     DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
                 debug!("Send DVC Create Response PDU: {create_response:?}");
-                // Per MS-RDPEDYC: Create Response MUST use TCP to avoid race conditions
-                responses.push(SvcMessage::from(create_response).with_transport(ironrdp_svc::TransportContext::Tcp));
+                // Per MS-RDPEDYC: "The server DVC manager sends the Create Request PDU over 
+                // the selected transport, and the client responds by sending the Create Response 
+                // PDU back to the server over the same transport."
+                responses.push(SvcMessage::from(create_response).with_transport(transport));
 
-                // If this DVC has start messages, send them over the same transport
+                // If this DVC has start messages, send them over the same transport as the request
                 if !start_messages.is_empty() {
                     responses.extend(
                         encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
                             .map_err(|e| encode_err!(e))?
                             .into_iter()
-                            .map(|msg| msg.with_transport(ironrdp_svc::TransportContext::Tcp))
+                            .map(|msg| msg.with_transport(transport))
                     );
                 }
             }
@@ -159,8 +161,8 @@ impl DrdynvcClient {
                     DrdynvcClientPdu::Close(ClosePdu::new(close_request.channel_id));
 
                 debug!("Send DVC Close Response PDU: {close_response:?}");
-                // Per MS-RDPEDYC: Close Response MUST use TCP to avoid race conditions
-                responses.push(SvcMessage::from(close_response).with_transport(ironrdp_svc::TransportContext::Tcp));
+                // Use same transport as request (per general RDP principle)
+                responses.push(SvcMessage::from(close_response).with_transport(transport));
             }
             DrdynvcServerPdu::Data(data) => {
                 let channel_id = data.channel_id();

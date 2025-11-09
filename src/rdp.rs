@@ -1938,11 +1938,25 @@ async fn active_session<T: RdpEventSender + Clone>(
                             continue;
                         }
 
+                        // Determine transport context: use TCP until Soft-Sync completes, then UDP
+                        // Per MS-RDPEDYC: "The server manager and client manager MUST NOT send or receive 
+                        // any dynamic virtual channel data on the multitransport tunnels until the Soft-Sync 
+                        // negotiation has completed."
+                        let transport_context = if let Some(tunnel) = udp_tunnels.get(&request_id) {
+                            if tunnel.soft_sync_received {
+                                TransportContext::UdpTunnel(request_id)
+                            } else {
+                                TransportContext::Tcp
+                            }
+                        } else {
+                            TransportContext::Tcp
+                        };
+
                         // Process via unified DVC processor with transport context
                         // The processor will tag responses with the appropriate transport (TCP or UDP tunnel)
                         if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
-                            info!("   📋 Feeding to DRDYNVC processor with UDP transport context...");
-                            match drdynvc.process_with_transport(&dvc_data, TransportContext::UdpTunnel(request_id)) {
+                            info!("   📋 Feeding to DRDYNVC processor with {:?} transport context...", transport_context);
+                            match drdynvc.process_with_transport(&dvc_data, transport_context) {
                                 Ok(response_messages) => {
                                     info!("   ✅ DRDYNVC returned {} response messages", response_messages.len());
                                     
