@@ -1242,34 +1242,9 @@ impl GtkRdpWidget {
     }
 
     fn schedule_upload(&self, width: u16, height: u16) {
-        {
-            let mut pending = self.pending_upload.borrow_mut();
-            *pending = Some(PendingUpload { width, height });
-        }
-
-        if self.upload_source.borrow().is_some() {
-            return;
-        }
-
-        let widget = self.clone();
-        let pending_upload = self.pending_upload.clone();
-        let upload_source = self.upload_source.clone();
-
-        let source = glib::idle_add_local(move || {
-            let pending = pending_upload.borrow_mut().take();
-            *upload_source.borrow_mut() = None;
-
-            if let Some(pending) = pending {
-                tracing::debug!("⏰ Idle callback: uploading framebuffer");
-                widget.upload_framebuffer(pending.width, pending.height);
-                widget.root.queue_draw();
-                tracing::debug!("⏰ Idle callback: queue_draw called");
-            }
-
-            ControlFlow::Break
-        });
-
-        *self.upload_source.borrow_mut() = Some(source);
+        // Upload immediately to avoid frame skipping during fast updates
+        self.upload_framebuffer(width, height);
+        self.root.queue_draw();
     }
 
     fn cancel_pending_upload(&self) {
