@@ -177,16 +177,18 @@ impl DvcProcessor for GfxDvcProcessor {
         // Note: This method is called for Data PDUs from BOTH TCP and UDP tunnels!
         // After UDP mode is enabled, most graphics data arrives via UDP tunnel.
         if self.udp_active {
-            debug!(
-                "📥 RDPEGFX (UDP): Received {} bytes on channel {}",
+            info!(
+                "📥 RDPEGFX (UDP): Received {} bytes on channel {} (first 16: {:02x?})",
                 payload.len(),
-                channel_id
+                channel_id,
+                &payload[..payload.len().min(16)]
             );
         } else {
-            debug!(
-                "📥 RDPEGFX (TCP): Received {} bytes on channel {}",
+            info!(
+                "📥 RDPEGFX (TCP): Received {} bytes on channel {} (first 16: {:02x?})",
                 payload.len(),
-                channel_id
+                channel_id,
+                &payload[..payload.len().min(16)]
             );
         }
 

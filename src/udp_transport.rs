@@ -1001,15 +1001,24 @@ impl UdpTransportManager {
                             continue;
                         }
                         
+                        debug!("🔐 Attempting TLS decrypt on {} byte payload (first bytes: {:02x?})", 
+                               payload.len(), &payload[..payload.len().min(16)]);
+                        
                         match tls.decrypt(&payload) {
                             Ok(decrypted_payloads) => {
+                                info!("✅ TLS decrypt succeeded, got {} decrypted payload(s)", decrypted_payloads.len());
+                                for (i, decrypted) in decrypted_payloads.iter().enumerate() {
+                                    info!("   Decrypted[{}]: {} bytes (first: {:02x?})", 
+                                          i, decrypted.len(), &decrypted[..decrypted.len().min(16)]);
+                                }
                                 for decrypted in decrypted_payloads {
                                     self.handle_tunnel_pdu_or_data(&decrypted).await?;
                                 }
                             }
                             Err(e) => {
                                 // ErrorCode(1) often means SSL_ERROR_WANT_READ - just means we need more data, not a fatal error
-                                warn!("TLS decrypt failed: {} (continuing...)", e);
+                                debug!("TLS decrypt failed: {} (payload len={}, first bytes: {:02x?})", 
+                                       e, payload.len(), &payload[..payload.len().min(16)]);
                                 // Don't return error, just continue - more data may arrive
                             }
                         }
@@ -1158,6 +1167,12 @@ impl UdpTransportManager {
                     header.header_length,
                     header.payload_length
                 );
+                
+                if payload.len() > 0 {
+                    info!("   TunnelData payload first 32 bytes: {:02x?}", &payload[..payload.len().min(32)]);
+                } else {
+                    info!("   TunnelData payload is empty (keepalive)");
+                }
 
                 if !self.tunnel_established {
                     warn!("⚠️ Received TunnelData before tunnel established, buffering...");

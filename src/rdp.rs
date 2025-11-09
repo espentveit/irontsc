@@ -30,7 +30,7 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     fast_path, ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult,
 };
-use ironrdp::svc::{SvcMessage, SvcProcessor};
+use ironrdp::svc::{SvcMessage, TransportContext};
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
 use ironrdp_connector::legacy;
 use ironrdp_core::impl_as_any;
@@ -1926,77 +1926,57 @@ async fn active_session<T: RdpEventSender + Clone>(
                         info!("   Note: Server has 10 seconds to send Soft-Sync request, otherwise traffic stays on TCP");
                     }
                     Some(UdpTransportEvent::TunnelDvcData { request_id, data: dvc_data }) => {
-                        // DVC data extracted from tunnel DATA packet - process it as DRDYNVC data
-                        debug!("📨 Processing {} bytes of DVC data from tunnel (request_id={})", dvc_data.len(), request_id);
+                        // DVC data extracted from tunnel DATA packet - process it via unified processor
+                        info!("📨 Processing {} bytes of DVC data from UDP tunnel (request_id={})", dvc_data.len(), request_id);
                         if dvc_data.len() > 0 {
-                            debug!("   First bytes: {:02x?}", &dvc_data[..dvc_data.len().min(32)]);
+                            info!("   First 32 bytes: {:02x?}", &dvc_data[..dvc_data.len().min(32)]);
                         }
 
                         // Skip empty payloads (keep-alive/framing packets)
                         if dvc_data.is_empty() {
-                            debug!("   Skipping empty TunnelData payload (keep-alive)");
+                            info!("   Skipping empty TunnelData payload (keep-alive)");
                             continue;
                         }
 
-                        // Feed the DVC data to the DRDYNVC processor
-                        // This will:
-                        // 1. Decode the DVC PDU (Create/Close/Data/SoftSync)
-                        // 2. Route Data PDUs to channel processors (e.g., GfxDvcProcessor)
-                        // 3. Channel processors process the data and update state (graphics, etc.)
-                        // 4. Return any response messages (Create/Close responses, acknowledgements)
+                        // Process via unified DVC processor with transport context
+                        // The processor will tag responses with the appropriate transport (TCP or UDP tunnel)
                         if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
-                            match drdynvc.process(&dvc_data) {
+                            info!("   📋 Feeding to DRDYNVC processor with UDP transport context...");
+                            match drdynvc.process_with_transport(&dvc_data, TransportContext::UdpTunnel(request_id)) {
                                 Ok(response_messages) => {
-                                    debug!("📦 DRDYNVC returned {} response messages", response_messages.len());
-                                    if !response_messages.is_empty() {
-                                        // Separate Create/Close responses from Data responses (GFX ACKs)
-                                        // Per MS-RDPEDYC: Create/Close Response PDUs MUST use TCP to avoid race condition
-                                        // But Data responses (GFX frame ACKs) MUST use UDP per MS-RDPEGFX spec
-                                        
-                                        let (tcp_messages, udp_messages): (Vec<_>, Vec<_>) = response_messages
-                                            .into_iter()
-                                            .partition(|msg| {
-                                                // Check PDU type name before encoding
-                                                let pdu_name = msg.pdu_name();
-                                                let is_tcp = pdu_name == "DYNVC_CREATE_RSP" || pdu_name == "DYNVC_CLOSE";
-                                                debug!("   📋 PDU '{}' → {} path", pdu_name, if is_tcp { "TCP" } else { "UDP" });
-                                                is_tcp
-                                            });
-                                        
-                                        // Send Create/Close responses via TCP
-                                        if !tcp_messages.is_empty() {
-                                            match active_stage.encode_dvc_messages(tcp_messages) {
-                                                Ok(frame) => {
-                                                    if !frame.is_empty() {
-                                                        debug!("   📤 Sending {} bytes Create/Close response via TCP", frame.len());
+                                    info!("   ✅ DRDYNVC returned {} response messages", response_messages.len());
+                                    
+                                    // Route responses based on their transport context
+                                    for msg in response_messages {
+                                        match msg.transport() {
+                                            Some(TransportContext::Tcp) | None => {
+                                                // Send via TCP
+                                                debug!("   � Routing {} response to TCP", msg.pdu_name());
+                                                match active_stage.encode_dvc_messages(vec![msg]) {
+                                                    Ok(frame) if !frame.is_empty() => {
                                                         if let Err(e) = writer.write_all(&frame).await {
-                                                            warn!("Failed to write DVC Create/Close response to TCP: {:?}", e);
+                                                            warn!("Failed to write DVC response to TCP: {:?}", e);
                                                         }
                                                     }
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to encode DVC TCP messages: {:?}", e);
+                                                    Err(e) => warn!("Failed to encode DVC TCP message: {:?}", e),
+                                                    _ => {}
                                                 }
                                             }
-                                        }
-                                        
-                                        // Send Data responses (GFX ACKs) via UDP
-                                        if !udp_messages.is_empty() {
-                                            match active_stage.encode_dvc_messages(udp_messages) {
-                                                Ok(frame) => {
-                                                    if !frame.is_empty() {
-                                                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
-                                                            debug!("   📤 Sending {} bytes Data response (GFX ACKs) via UDP tunnel", frame.len());
+                                            Some(TransportContext::UdpTunnel(tunnel_id)) => {
+                                                // Send via UDP tunnel
+                                                debug!("   📤 Routing {} response to UDP tunnel {}", msg.pdu_name(), tunnel_id);
+                                                match active_stage.encode_dvc_messages(vec![msg]) {
+                                                    Ok(frame) if !frame.is_empty() => {
+                                                        if let Some(tunnel) = udp_tunnels.get_mut(&tunnel_id) {
                                                             if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SendData(frame)) {
-                                                                warn!("Failed to send Data response via UDP: {:?}", e);
+                                                                warn!("Failed to send response via UDP: {:?}", e);
                                                             }
                                                         } else {
-                                                            warn!("No UDP tunnel found for request_id={}", request_id);
+                                                            warn!("No UDP tunnel found for tunnel_id={}", tunnel_id);
                                                         }
                                                     }
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to encode DVC UDP messages: {:?}", e);
+                                                    Err(e) => warn!("Failed to encode DVC UDP message: {:?}", e),
+                                                    _ => {}
                                                 }
                                             }
                                         }
