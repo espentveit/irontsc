@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use core::any::TypeId;
 use core::fmt;
 
@@ -36,6 +37,9 @@ pub struct DrdynvcClient {
     /// Per MS-RDPEDYC §3.2.5.3.2: "Each multitransport tunnel that the client manager will use
     /// to send dynamic virtual channel data MUST be specified in the TunnelsToSwitch field."
     available_udp_tunnels: alloc::collections::BTreeSet<u32>,
+    /// Deferred CREATE requests that arrived before UDP tunnel was available.
+    /// Stored as (channel_id, channel_name, transport) to be processed when tunnel is ready.
+    deferred_creates: Vec<(u32, String, ironrdp_svc::TransportContext)>,
 }
 
 impl fmt::Debug for DrdynvcClient {
@@ -63,6 +67,7 @@ impl DrdynvcClient {
             soft_sync_completed_tunnel: None,
             udp_channels: BTreeMap::new(),
             available_udp_tunnels: alloc::collections::BTreeSet::new(),
+            deferred_creates: Vec::new(),
         }
     }
 
@@ -94,9 +99,56 @@ impl DrdynvcClient {
     /// it has sent a successful Initiate Multitransport Response PDU for each tunnel.
     ///
     /// This should be called when the UDP transport initialization completes successfully.
-    pub fn register_available_tunnel(&mut self, tunnel_type: u32) {
+    /// Returns any deferred CREATE requests that should now be processed.
+    pub fn register_available_tunnel(&mut self, tunnel_type: u32) -> Result<Vec<SvcMessage>, pdu::PduError> {
         debug!("Registering available UDP tunnel type: 0x{:08X}", tunnel_type);
         self.available_udp_tunnels.insert(tunnel_type);
+        
+        // Process any deferred CREATEs now that UDP is available
+        let mut responses = Vec::new();
+        let deferred = core::mem::take(&mut self.deferred_creates);
+        
+        if !deferred.is_empty() {
+            debug!("Processing {} deferred CREATE request(s) now that UDP tunnel is available", deferred.len());
+        }
+        
+        for (channel_id, channel_name, transport) in deferred {
+            debug!("Processing deferred CREATE for channel: {} (id={})", channel_name, channel_id);
+            
+            let channel_exists = self
+                .dynamic_channels
+                .get_by_channel_name(&channel_name)
+                .is_some();
+            let (creation_status, start_messages) = if channel_exists {
+                self.dynamic_channels
+                    .attach_channel_id(channel_name.clone(), channel_id);
+                let dynamic_channel = self
+                    .dynamic_channels
+                    .get_by_channel_name_mut(&channel_name)
+                    .expect("channel exists");
+                (CreationStatus::OK, dynamic_channel.start()?)
+            } else {
+                (CreationStatus::NO_LISTENER, Vec::new())
+            };
+
+            let create_response =
+                DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
+            debug!("Send deferred DVC Create Response PDU: {create_response:?}");
+            // Send over UDP transport since that's now available
+            let udp_transport = ironrdp_svc::TransportContext::UdpTunnel(tunnel_type);
+            responses.push(SvcMessage::from(create_response).with_transport(udp_transport));
+
+            if !start_messages.is_empty() {
+                responses.extend(
+                    encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
+                        .map_err(|e| encode_err!(e))?
+                        .into_iter()
+                        .map(|msg| msg.with_transport(udp_transport))
+                );
+            }
+        }
+        
+        Ok(responses)
     }
 
     /// Unregister a UDP tunnel (e.g., if connection fails)
@@ -137,40 +189,60 @@ impl DrdynvcClient {
                     responses.push(self.create_capabilities_response(CapsVersion::V1));
                 }
 
-                let channel_exists = self
-                    .dynamic_channels
-                    .get_by_channel_name(&channel_name)
-                    .is_some();
-                let (creation_status, start_messages) = if channel_exists {
-                    // If we have a handler for this channel, attach the channel ID
-                    // and get any start messages.
-                    self.dynamic_channels
-                        .attach_channel_id(channel_name.clone(), channel_id);
-                    let dynamic_channel = self
-                        .dynamic_channels
-                        .get_by_channel_name_mut(&channel_name)
-                        .expect("channel exists");
-                    (CreationStatus::OK, dynamic_channel.start()?)
-                } else {
-                    (CreationStatus::NO_LISTENER, Vec::new())
-                };
-
-                let create_response =
-                    DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
-                debug!("Send DVC Create Response PDU: {create_response:?}");
-                // Per MS-RDPEDYC: "The server DVC manager sends the Create Request PDU over 
-                // the selected transport, and the client responds by sending the Create Response 
-                // PDU back to the server over the same transport."
-                responses.push(SvcMessage::from(create_response).with_transport(transport));
-
-                // If this DVC has start messages, send them over the same transport as the request
-                if !start_messages.is_empty() {
-                    responses.extend(
-                        encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
-                            .map_err(|e| encode_err!(e))?
-                            .into_iter()
-                            .map(|msg| msg.with_transport(transport))
+                // For RDPEGFX channel: delay creation until after UDP tunnel is available
+                // This matches Microsoft's test pattern where GFX is created over UDP after tunnel setup
+                // Check if we have any available UDP tunnels registered (not just Soft-Sync completed)
+                const GFX_CHANNEL_NAME: &str = "Microsoft::Windows::RDS::Graphics";
+                let is_gfx_channel = channel_name == GFX_CHANNEL_NAME;
+                let has_udp_tunnel = !self.available_udp_tunnels.is_empty();
+                
+                if is_gfx_channel && !has_udp_tunnel {
+                    debug!("⏸️  Deferring GFX channel creation until UDP tunnel is available (server sent CREATE too early)");
+                    // Store the CREATE request to process later when UDP tunnel is ready
+                    self.deferred_creates.push((channel_id, channel_name.clone(), transport));
+                    // Respond with NO_LISTENER to tell server channel not ready yet
+                    // If server doesn't retry, we'll process the deferred request ourselves
+                    let create_response = DrdynvcClientPdu::Create(
+                        CreateResponsePdu::new(channel_id, CreationStatus::NO_LISTENER)
                     );
+                    debug!("Send DVC Create Response PDU (deferred): {create_response:?}");
+                    responses.push(SvcMessage::from(create_response).with_transport(transport));
+                } else {
+                    let channel_exists = self
+                        .dynamic_channels
+                        .get_by_channel_name(&channel_name)
+                        .is_some();
+                    let (creation_status, start_messages) = if channel_exists {
+                        // If we have a handler for this channel, attach the channel ID
+                        // and get any start messages.
+                        self.dynamic_channels
+                            .attach_channel_id(channel_name.clone(), channel_id);
+                        let dynamic_channel = self
+                            .dynamic_channels
+                            .get_by_channel_name_mut(&channel_name)
+                            .expect("channel exists");
+                        (CreationStatus::OK, dynamic_channel.start()?)
+                    } else {
+                        (CreationStatus::NO_LISTENER, Vec::new())
+                    };
+
+                    let create_response =
+                        DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
+                    debug!("Send DVC Create Response PDU: {create_response:?}");
+                    // Per MS-RDPEDYC: "The server DVC manager sends the Create Request PDU over 
+                    // the selected transport, and the client responds by sending the Create Response 
+                    // PDU back to the server over the same transport."
+                    responses.push(SvcMessage::from(create_response).with_transport(transport));
+
+                    // If this DVC has start messages, send them over the same transport as the request
+                    if !start_messages.is_empty() {
+                        responses.extend(
+                            encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
+                                .map_err(|e| encode_err!(e))?
+                                .into_iter()
+                                .map(|msg| msg.with_transport(transport))
+                        );
+                    }
                 }
             }
             DrdynvcServerPdu::Close(close_request) => {
@@ -458,35 +530,56 @@ impl SvcProcessor for DrdynvcClient {
                     responses.push(self.create_capabilities_response(CapsVersion::V1));
                 }
 
-                let channel_exists = self
-                    .dynamic_channels
-                    .get_by_channel_name(&channel_name)
-                    .is_some();
-                let (creation_status, start_messages) = if channel_exists {
-                    // If we have a handler for this channel, attach the channel ID
-                    // and get any start messages.
-                    self.dynamic_channels
-                        .attach_channel_id(channel_name.clone(), channel_id);
-                    let dynamic_channel = self
-                        .dynamic_channels
-                        .get_by_channel_name_mut(&channel_name)
-                        .expect("channel exists");
-                    (CreationStatus::OK, dynamic_channel.start()?)
-                } else {
-                    (CreationStatus::NO_LISTENER, Vec::new())
-                };
-
-                let create_response =
-                    DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
-                debug!("Send DVC Create Response PDU: {create_response:?}");
-                responses.push(SvcMessage::from(create_response));
-
-                // If this DVC has start messages, send them.
-                if !start_messages.is_empty() {
-                    responses.extend(
-                        encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
-                            .map_err(|e| encode_err!(e))?,
+                // For RDPEGFX channel: delay creation until after UDP tunnel is available
+                // This matches Microsoft's test pattern where GFX is created over UDP after tunnel setup
+                // Check if we have any available UDP tunnels registered (not just Soft-Sync completed)
+                const GFX_CHANNEL_NAME: &str = "Microsoft::Windows::RDS::Graphics";
+                let is_gfx_channel = channel_name == GFX_CHANNEL_NAME;
+                let has_udp_tunnel = !self.available_udp_tunnels.is_empty();
+                
+                if is_gfx_channel && !has_udp_tunnel {
+                    debug!("⏸️  Deferring GFX channel creation until UDP tunnel is available (server sent CREATE too early)");
+                    // Store the CREATE request to process later when UDP tunnel is ready
+                    // Use TCP transport as default since we're in the trait method
+                    self.deferred_creates.push((channel_id, channel_name.clone(), TransportContext::Tcp));
+                    // Respond with NO_LISTENER to tell server channel not ready yet
+                    // If server doesn't retry, we'll process the deferred request ourselves
+                    let create_response = DrdynvcClientPdu::Create(
+                        CreateResponsePdu::new(channel_id, CreationStatus::NO_LISTENER)
                     );
+                    debug!("Send DVC Create Response PDU (deferred): {create_response:?}");
+                    responses.push(SvcMessage::from(create_response));
+                } else {
+                    let channel_exists = self
+                        .dynamic_channels
+                        .get_by_channel_name(&channel_name)
+                        .is_some();
+                    let (creation_status, start_messages) = if channel_exists {
+                        // If we have a handler for this channel, attach the channel ID
+                        // and get any start messages.
+                        self.dynamic_channels
+                            .attach_channel_id(channel_name.clone(), channel_id);
+                        let dynamic_channel = self
+                            .dynamic_channels
+                            .get_by_channel_name_mut(&channel_name)
+                            .expect("channel exists");
+                        (CreationStatus::OK, dynamic_channel.start()?)
+                    } else {
+                        (CreationStatus::NO_LISTENER, Vec::new())
+                    };
+
+                    let create_response =
+                        DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
+                    debug!("Send DVC Create Response PDU: {create_response:?}");
+                    responses.push(SvcMessage::from(create_response));
+
+                    // If this DVC has start messages, send them.
+                    if !start_messages.is_empty() {
+                        responses.extend(
+                            encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
+                                .map_err(|e| encode_err!(e))?,
+                        );
+                    }
                 }
             }
             DrdynvcServerPdu::Close(close_request) => {
