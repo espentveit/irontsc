@@ -1614,19 +1614,19 @@ fn handle_autodetect_request(
 
     match request {
         AutoDetectRequest::RttMeasure(rtt_req) => {
-            info!("📊 Received RTT Measure Request (seq={})", rtt_req.sequence_number);
+            trace!("📊 Received RTT Measure Request (seq={})", rtt_req.sequence_number);
             
             // Respond immediately with RTT Measure Response
             let response = AutoDetectResponse::RttMeasure(
                 RttMeasureResponse::new(rtt_req.sequence_number)
             );
             
-            info!("📤 Sending RTT Measure Response (seq={})", rtt_req.sequence_number);
+            trace!("📤 Sending RTT Measure Response (seq={})", rtt_req.sequence_number);
             encode_autodetect_response(&response, user_channel_id, message_channel_id)
         }
         
         AutoDetectRequest::BandwidthMeasureStart(start_req) => {
-            info!("📊 Received Bandwidth Measure Start (seq={})", start_req.sequence_number);
+            trace!("📊 Received Bandwidth Measure Start (seq={})", start_req.sequence_number);
             
             // Start bandwidth measurement
             *bandwidth_start_time = Some(std::time::Instant::now());
@@ -1638,7 +1638,7 @@ fn handle_autodetect_request(
         }
         
         AutoDetectRequest::BandwidthMeasureStop(stop_req) => {
-            info!("📊 Received Bandwidth Measure Stop (seq={}, type=0x{:04x}, payload_len={:?})", 
+            trace!("📊 Received Bandwidth Measure Stop (seq={}, type=0x{:04x}, payload_len={:?})", 
                   stop_req.sequence_number, stop_req.request_type, stop_req.payload_length);
             
             // Calculate bandwidth and send results
@@ -1646,7 +1646,7 @@ fn handle_autodetect_request(
                 let elapsed = start_time.elapsed();
                 let time_delta_ms = elapsed.as_millis() as u32;
                 
-                info!("📊 Bandwidth measurement: {} bytes in {}ms", 
+                trace!("📊 Bandwidth measurement: {} bytes in {}ms", 
                       *bandwidth_byte_count, time_delta_ms);
                 
                 // Determine response type based on request type
@@ -1671,7 +1671,7 @@ fn handle_autodetect_request(
                 *bandwidth_byte_count = 0;
                 *bandwidth_sequence = None;
                 
-                info!("📤 Sending Bandwidth Measure Results (seq={}, {}ms, {} bytes)", 
+                trace!("📤 Sending Bandwidth Measure Results (seq={}, {}ms, {} bytes)", 
                       stop_req.sequence_number, time_delta_ms, *bandwidth_byte_count);
                 encode_autodetect_response(&response, user_channel_id, message_channel_id)
             } else {
@@ -1681,7 +1681,7 @@ fn handle_autodetect_request(
         }
         
         AutoDetectRequest::NetworkCharacteristicsResult(result) => {
-            info!("📊 Received Network Characteristics Result: baseRTT={:?}ms, bandwidth={:?}kbps, avgRTT={:?}ms",
+            trace!("📊 Received Network Characteristics Result: baseRTT={:?}ms, bandwidth={:?}kbps, avgRTT={:?}ms",
                   result.base_rtt, result.bandwidth, result.average_rtt);
             // This is informational from server, no response needed
             None

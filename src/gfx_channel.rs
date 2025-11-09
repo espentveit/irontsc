@@ -171,20 +171,20 @@ impl DvcProcessor for GfxDvcProcessor {
     }
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
-        use tracing::{debug, info, warn};
+        use tracing::{debug, info, trace, warn};
 
         // Log differently for UDP vs TCP path
         // Note: This method is called for Data PDUs from BOTH TCP and UDP tunnels!
         // After UDP mode is enabled, most graphics data arrives via UDP tunnel.
         if self.udp_active {
-            info!(
+            trace!(
                 "📥 RDPEGFX (UDP): Received {} bytes on channel {} (first 16: {:02x?})",
                 payload.len(),
                 channel_id,
                 &payload[..payload.len().min(16)]
             );
         } else {
-            info!(
+            trace!(
                 "📥 RDPEGFX (TCP): Received {} bytes on channel {} (first 16: {:02x?})",
                 payload.len(),
                 channel_id,
