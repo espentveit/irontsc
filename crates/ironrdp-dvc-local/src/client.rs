@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::any::TypeId;
 use core::fmt;
 
@@ -104,14 +104,17 @@ impl DrdynvcClient {
     ///
     /// This should be called when the UDP transport initialization completes successfully.
     /// Returns any deferred CREATE requests that should now be processed.
-    pub fn register_available_tunnel(&mut self, tunnel_type: u32) -> Result<Vec<SvcMessage>, pdu::PduError> {
+    pub fn register_available_tunnel(
+        &mut self,
+        tunnel_type: u32,
+    ) -> Result<Vec<SvcMessage>, pdu::PduError> {
         debug!(
             "Registering available UDP tunnel type: 0x{:08X} ({})",
             tunnel_type,
             tunnel_type_name(tunnel_type)
         );
         self.available_udp_tunnels.insert(tunnel_type);
-        
+
         // No deferred CREATEs to process - server will retry CREATE requests over UDP
         Ok(Vec::new())
     }
@@ -153,7 +156,7 @@ impl DrdynvcClient {
         // Per MS-RDPEDYC §2.2.1.2, client MUST respond with the version level it supports
         // We support up to V3, but must negotiate with server's requested version
         const CLIENT_MAX_VERSION: CapsVersion = CapsVersion::V3;
-        
+
         // Negotiate: use minimum of client max and server requested
         let negotiated_version = match (CLIENT_MAX_VERSION, server_version) {
             (CapsVersion::V3, CapsVersion::V3) => CapsVersion::V3,
@@ -164,7 +167,7 @@ impl DrdynvcClient {
             (CapsVersion::V2, CapsVersion::V1) => CapsVersion::V1,
             (CapsVersion::V1, _) => CapsVersion::V1,
         };
-        
+
         let caps_response =
             DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(negotiated_version));
         debug!(
@@ -174,7 +177,7 @@ impl DrdynvcClient {
         self.cap_handshake_done = true;
         SvcMessage::from(caps_response)
     }
-    
+
     /// Extract the version from a CapabilitiesRequestPdu
     fn get_caps_version(caps_request: &crate::pdu::CapabilitiesRequestPdu) -> CapsVersion {
         match caps_request {
@@ -238,7 +241,7 @@ impl DrdynvcClient {
                     tunnel_type_name(tunnel.tunnel_type)
                 );
                 self.udp_channels.insert(channel_id, tunnel.tunnel_type);
-                
+
                 if let Some(channel) = self.dynamic_channels.get_by_channel_id_mut(channel_id) {
                     // Notify channel that it's being switched to UDP
                     let _ = channel.on_soft_sync(tunnel.tunnel_type);
@@ -257,18 +260,16 @@ impl DrdynvcClient {
             }
         }
 
-        let response =
-            DrdynvcClientPdu::SoftSyncResponse(SoftSyncResponsePdu::from_request_with_available(
-                request,
-                &self.available_udp_tunnels,
-            ));
+        let response = DrdynvcClientPdu::SoftSyncResponse(
+            SoftSyncResponsePdu::from_request_with_available(request, &self.available_udp_tunnels),
+        );
         debug!("📤 Sending DVC SoftSync Response PDU: {response:?}");
-        
+
         // Per MS-RDPEDYC: Soft-Sync responses MUST go over TCP
         // This is the transition message that signals switching to UDP is complete
         // The response itself uses TCP, but signals that subsequent Data PDUs can use UDP
         let mut msg = SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp);
-        
+
         responses.push(msg);
         Ok(())
     }
@@ -331,7 +332,11 @@ impl SvcProcessor for DrdynvcClient {
         CompressionCondition::WhenRdpDataIsCompressed
     }
 
-    fn process(&mut self, payload: &[u8], transport: ironrdp_svc::TransportContext) -> PduResult<Vec<SvcMessage>> {
+    fn process(
+        &mut self,
+        payload: &[u8],
+        transport: ironrdp_svc::TransportContext,
+    ) -> PduResult<Vec<SvcMessage>> {
         let pdu = decode_dvc_message(payload).map_err(|e| decode_err!(e))?;
         let mut responses = Vec::new();
 
@@ -377,8 +382,8 @@ impl SvcProcessor for DrdynvcClient {
                 let create_response =
                     DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
                 debug!("Send DVC Create Response PDU: {create_response:?}");
-                // Per MS-RDPEDYC: "The server DVC manager sends the Create Request PDU over 
-                // the selected transport, and the client responds by sending the Create Response 
+                // Per MS-RDPEDYC: "The server DVC manager sends the Create Request PDU over
+                // the selected transport, and the client responds by sending the Create Response
                 // PDU back to the server over the same transport."
                 responses.push(SvcMessage::from(create_response).with_transport(transport));
 
@@ -388,7 +393,7 @@ impl SvcProcessor for DrdynvcClient {
                         encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
                             .map_err(|e| encode_err!(e))?
                             .into_iter()
-                            .map(|msg| msg.with_transport(transport))
+                            .map(|msg| msg.with_transport(transport)),
                     );
                 }
             }
@@ -423,7 +428,7 @@ impl SvcProcessor for DrdynvcClient {
                     encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
                         .map_err(|e| encode_err!(e))?
                         .into_iter()
-                        .map(|msg| msg.with_transport(response_transport))
+                        .map(|msg| msg.with_transport(response_transport)),
                 );
             }
             DrdynvcServerPdu::SoftSyncRequest(request) => {

@@ -37,10 +37,7 @@ impl DvcProcessor for CoreInputProcessor {
     }
 
     fn start(&mut self, channel_id: u32) -> PduResult<Vec<DvcMessage>> {
-        info!(
-            "🎹 CoreInput channel opened! channel_id={}",
-            channel_id
-        );
+        info!("🎹 CoreInput channel opened! channel_id={}", channel_id);
         // No initial messages to send
         Ok(Vec::new())
     }

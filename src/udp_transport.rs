@@ -323,18 +323,18 @@ impl UdpTransportManager {
         if let Err(e) = self.handshake().await {
             error!("UDP handshake failed: {}", e);
             let request_id = self.request_id.unwrap_or(0);
-            let _ = self
-                .event_tx
-                .send(UdpTransportEvent::Disconnected {
-                    request_id,
-                    reason: format!("{}", e),
-                });
+            let _ = self.event_tx.send(UdpTransportEvent::Disconnected {
+                request_id,
+                reason: format!("{}", e),
+            });
             return Err(e);
         }
 
         info!("UDP connection established");
         let request_id = self.request_id.unwrap_or(0);
-        let _ = self.event_tx.send(UdpTransportEvent::Connected { request_id });
+        let _ = self
+            .event_tx
+            .send(UdpTransportEvent::Connected { request_id });
 
         // ═══════════════════════════════════════════════════════════════════════
         // TLS/DTLS HANDSHAKE (MS-RDPEMT Requirement with Enhanced RDP Security)
@@ -504,9 +504,9 @@ impl UdpTransportManager {
                             info!("✅ Soft-Sync completed for tunnel_type=0x{:08X}", tunnel_type);
                             let request_id = self.request_id.unwrap_or(0);
                             // Emit event to signal that channels should switch to UDP
-                            if let Err(e) = self.event_tx.send(UdpTransportEvent::SoftSyncCompleted { 
+                            if let Err(e) = self.event_tx.send(UdpTransportEvent::SoftSyncCompleted {
                                 request_id,
-                                tunnel_type 
+                                tunnel_type
                             }) {
                                 warn!("Failed to send SoftSyncCompleted event: {}", e);
                             }
@@ -598,7 +598,10 @@ impl UdpTransportManager {
         // RDP UDP protocol packets (SYN, ACK, DATA with headers) are NEVER encrypted
         // Only the payload INSIDE DATA packets gets encrypted via send_data() -> send_tunnel_pdu()
         // This function sends complete RDP UDP packets directly to the socket
-        trace!("Sending RDP UDP packet ({} bytes) unencrypted", payload.len());
+        trace!(
+            "Sending RDP UDP packet ({} bytes) unencrypted",
+            payload.len()
+        );
         self.socket
             .send(payload)
             .await
@@ -705,8 +708,12 @@ impl UdpTransportManager {
                 // Successfully extracted payloads from RDP UDP DATA packet(s)
                 debug!("📦 Extracted {} payload(s) from UDP packet", payloads.len());
                 for (idx, payload) in payloads.iter().enumerate() {
-                    debug!("   Payload[{}]: {} bytes, first: {:02x?}", 
-                           idx, payload.len(), &payload[..payload.len().min(16)]);
+                    debug!(
+                        "   Payload[{}]: {} bytes, first: {:02x?}",
+                        idx,
+                        payload.len(),
+                        &payload[..payload.len().min(16)]
+                    );
                 }
                 for payload in payloads {
                     // Check if we're still in TLS/DTLS handshake
@@ -738,7 +745,7 @@ impl UdpTransportManager {
 
                         // Process handshake and collect response packets
                         let handshake_result = socket.process_handshake_data(&payload);
-                        
+
                         // Drop the socket borrow before we potentially call create_tunnel
                         drop(socket);
 
@@ -760,7 +767,7 @@ impl UdpTransportManager {
                                     // Send raw TLS record (no encryption - handshake messages are plaintext)
                                     self.send_raw_tls_record(response).await?;
                                 }
-                                
+
                                 // Now mark handshake as complete so future packets get encrypted
                                 // This must be done AFTER sending the final handshake messages
                                 if let Some(tls) = self.tls_socket.as_mut() {
@@ -789,7 +796,7 @@ impl UdpTransportManager {
                                 } else {
                                     false
                                 };
-                                
+
                                 // Check if handshake completed
                                 if handshake_complete {
                                     info!(
@@ -798,17 +805,22 @@ impl UdpTransportManager {
                                     );
 
                                     // Notify RDP layer to send MultitransportResponse on TCP channel
-                                    debug!("🔍 Checking if should send HandshakeComplete event: request_id={:?}", self.request_id);
+                                    debug!(
+                                        "🔍 Checking if should send HandshakeComplete event: request_id={:?}",
+                                        self.request_id
+                                    );
                                     if let Some(request_id) = self.request_id {
                                         info!(
                                             "📤 Notifying RDP layer to send MultitransportResponse for request_id={}",
                                             request_id
                                         );
-                                        let _ = self.event_tx.send(UdpTransportEvent::HandshakeComplete {
-                                            request_id,
-                                        });
+                                        let _ = self.event_tx.send(
+                                            UdpTransportEvent::HandshakeComplete { request_id },
+                                        );
                                     } else {
-                                        warn!("⚠️  Cannot send HandshakeComplete event: request_id is None");
+                                        warn!(
+                                            "⚠️  Cannot send HandshakeComplete event: request_id is None"
+                                        );
                                     }
 
                                     // Check if there's a queued TunnelCreateResponse to process
@@ -1002,16 +1014,26 @@ impl UdpTransportManager {
                         // Once handshake is complete, ALL payloads are encrypted application data
                         // We CANNOT inspect payload[0] to determine type - it's encrypted!
                         // The TLS library will handle retransmissions internally via SSL_read
-                        
-                        debug!("🔐 Attempting TLS decrypt on {} byte payload (first bytes: {:02x?})", 
-                               payload.len(), &payload[..payload.len().min(16)]);
-                        
+
+                        debug!(
+                            "🔐 Attempting TLS decrypt on {} byte payload (first bytes: {:02x?})",
+                            payload.len(),
+                            &payload[..payload.len().min(16)]
+                        );
+
                         match tls.decrypt(&payload) {
                             Ok(decrypted_payloads) => {
-                                info!("✅ TLS decrypt succeeded, got {} decrypted payload(s)", decrypted_payloads.len());
+                                info!(
+                                    "✅ TLS decrypt succeeded, got {} decrypted payload(s)",
+                                    decrypted_payloads.len()
+                                );
                                 for (i, decrypted) in decrypted_payloads.iter().enumerate() {
-                                    info!("   Decrypted[{}]: {} bytes (first: {:02x?})", 
-                                          i, decrypted.len(), &decrypted[..decrypted.len().min(16)]);
+                                    info!(
+                                        "   Decrypted[{}]: {} bytes (first: {:02x?})",
+                                        i,
+                                        decrypted.len(),
+                                        &decrypted[..decrypted.len().min(16)]
+                                    );
                                 }
                                 for decrypted in decrypted_payloads {
                                     self.handle_tunnel_pdu_or_data(&decrypted).await?;
@@ -1019,8 +1041,12 @@ impl UdpTransportManager {
                             }
                             Err(e) => {
                                 // ErrorCode(1) often means SSL_ERROR_WANT_READ - just means we need more data, not a fatal error
-                                debug!("TLS decrypt failed: {} (payload len={}, first bytes: {:02x?})", 
-                                       e, payload.len(), &payload[..payload.len().min(16)]);
+                                debug!(
+                                    "TLS decrypt failed: {} (payload len={}, first bytes: {:02x?})",
+                                    e,
+                                    payload.len(),
+                                    &payload[..payload.len().min(16)]
+                                );
                                 // Don't return error, just continue - more data may arrive
                             }
                         }
@@ -1028,7 +1054,7 @@ impl UdpTransportManager {
                         // Once handshake is complete, ALL payloads are encrypted application data
                         // We CANNOT inspect payload bytes to determine type - it's encrypted!
                         // The DTLS library will handle retransmissions internally
-                        
+
                         match dtls.decrypt(&payload) {
                             Ok(decrypted_payloads) => {
                                 for decrypted in decrypted_payloads {
@@ -1107,12 +1133,10 @@ impl UdpTransportManager {
         if let Err(e) = self.handle_tunnel_pdu(data).await {
             debug!("Not a tunnel PDU ({}), forwarding as regular data", e);
             let request_id = self.request_id.unwrap_or(0);
-            let _ = self
-                .event_tx
-                .send(UdpTransportEvent::DataReceived {
-                    request_id,
-                    data: data.to_vec(),
-                });
+            let _ = self.event_tx.send(UdpTransportEvent::DataReceived {
+                request_id,
+                data: data.to_vec(),
+            });
         }
 
         Ok(())
@@ -1147,7 +1171,9 @@ impl UdpTransportManager {
                     self.tunnel_established = true;
                     let request_id = self.request_id.unwrap_or(0);
                     // Notify application that tunnel is ready
-                    let _ = self.event_tx.send(UdpTransportEvent::TunnelEstablished { request_id });
+                    let _ = self
+                        .event_tx
+                        .send(UdpTransportEvent::TunnelEstablished { request_id });
                 } else {
                     error!(
                         "❌ Tunnel creation failed: hrResponse=0x{:08X}",
@@ -1166,9 +1192,12 @@ impl UdpTransportManager {
                     header.header_length,
                     header.payload_length
                 );
-                
+
                 if payload.len() > 0 {
-                    info!("   TunnelData payload first 32 bytes: {:02x?}", &payload[..payload.len().min(32)]);
+                    info!(
+                        "   TunnelData payload first 32 bytes: {:02x?}",
+                        &payload[..payload.len().min(32)]
+                    );
                 } else {
                     info!("   TunnelData payload is empty (keepalive)");
                 }
@@ -1180,9 +1209,9 @@ impl UdpTransportManager {
                 let request_id = self.request_id.unwrap_or(0);
                 // Forward the DVC payload to the DRDYNVC processor
                 // The payload contains DVC protocol messages (Create, Data, etc.), not raw RDPEGFX
-                let _ = self.event_tx.send(UdpTransportEvent::TunnelDvcData { 
+                let _ = self.event_tx.send(UdpTransportEvent::TunnelDvcData {
                     request_id,
-                    data: payload 
+                    data: payload,
                 });
             }
             TunnelPdu::CreateRequest { .. } => {
@@ -1231,7 +1260,7 @@ impl UdpTransportManager {
     /// TLS records that must be sent as-is, wrapped only in RDP UDP DATA packets
     async fn send_raw_tls_record(&mut self, tls_record: Vec<u8>) -> Result<()> {
         debug!("📤 Sending raw TLS record ({} bytes)", tls_record.len());
-        
+
         // Send the TLS record directly - it's already a complete TLS/DTLS record
         // Just wrap it in RDP UDP DATA packet
         self.send_data(tls_record).await
@@ -1336,7 +1365,7 @@ impl UdpTransportManager {
         // Flags (2 bytes) - 0x0000 for now
         // PayloadLength (2 bytes) - Size of DVC payload
         // [DVC payload data...]
-        
+
         let header_length: u16 = 10; // Basic tunnel header with no subheaders
         let header_version: u16 = 1;
         let action: u16 = 0x0003; // DATA
@@ -1364,10 +1393,10 @@ impl UdpTransportManager {
     }
 
     /// Process tunnel data received on TCP channel 1008 (e.g., TunnelCreateResponse)
-    /// 
+    ///
     /// Per MS-RDPEMT §2.2.1.1, tunnel PDUs arrive over TCP which is a byte stream.
     /// PDUs may be fragmented across multiple TCP segments, so we buffer and reassemble.
-    /// 
+    ///
     /// Note: Channel 1008 also receives heartbeat PDUs (MS-RDPBCGR §2.2.16.1) which
     /// have SEC_HEARTBEAT (0x4000) flag. These must be filtered out.
     async fn process_tunnel_data(&mut self, data: &[u8]) -> Result<()> {
@@ -1384,15 +1413,20 @@ impl UdpTransportManager {
             let flags = u16::from_le_bytes([data[0], data[1]]);
             const SEC_HEARTBEAT: u16 = 0x4000;
             if flags == SEC_HEARTBEAT {
-                debug!("   ❤️ Heartbeat PDU (period={}s, count1={}, count2={}) - ignoring",
-                       data[4], data[5], data[6]);
+                debug!(
+                    "   ❤️ Heartbeat PDU (period={}s, count1={}, count2={}) - ignoring",
+                    data[4], data[5], data[6]
+                );
                 return Ok(());
             }
         }
 
         // Append new data to buffer (TCP stream reassembly)
         self.tunnel_data_buffer.extend_from_slice(data);
-        debug!("   Buffer now contains {} bytes total", self.tunnel_data_buffer.len());
+        debug!(
+            "   Buffer now contains {} bytes total",
+            self.tunnel_data_buffer.len()
+        );
 
         // Try to parse complete tunnel PDUs from the buffer
         loop {
@@ -1405,76 +1439,92 @@ impl UdpTransportManager {
             // Per MS-RDPEMT §2.2.1.1, there may be a wrapper before the tunnel header
             let mut found_pdu = false;
             let mut pdu_start_offset = 0;
-            
+
             // Try different wrapper sizes (including 0 for no wrapper)
             for wrapper_size in [0, 11, 10, 12] {
                 if self.tunnel_data_buffer.len() < wrapper_size + MIN_TUNNEL_HEADER_SIZE {
                     continue;
                 }
-                
+
                 let offset = wrapper_size;
                 let possible_header_length = u16::from_le_bytes([
                     self.tunnel_data_buffer[offset],
-                    self.tunnel_data_buffer[offset + 1]
+                    self.tunnel_data_buffer[offset + 1],
                 ]) as usize;
-                
+
                 // Validate HeaderLength is in valid range
-                if possible_header_length < MIN_TUNNEL_HEADER_SIZE 
-                   || possible_header_length > MAX_TUNNEL_HEADER_SIZE {
+                if possible_header_length < MIN_TUNNEL_HEADER_SIZE
+                    || possible_header_length > MAX_TUNNEL_HEADER_SIZE
+                {
                     continue;
                 }
-                
+
                 // Check if we have the complete header
                 if self.tunnel_data_buffer.len() < wrapper_size + possible_header_length {
                     // Header is incomplete - wait for more data
-                    debug!("   Found potential header (len={}) at offset {} but need {} more bytes",
-                           possible_header_length, offset, 
-                           wrapper_size + possible_header_length - self.tunnel_data_buffer.len());
+                    debug!(
+                        "   Found potential header (len={}) at offset {} but need {} more bytes",
+                        possible_header_length,
+                        offset,
+                        wrapper_size + possible_header_length - self.tunnel_data_buffer.len()
+                    );
                     break;
                 }
-                
+
                 // Read PayloadLength from header (at offset 8-9 within the header)
                 let payload_len = if possible_header_length >= 10 {
                     u16::from_le_bytes([
                         self.tunnel_data_buffer[offset + 8],
-                        self.tunnel_data_buffer[offset + 9]
+                        self.tunnel_data_buffer[offset + 9],
                     ]) as usize
                 } else {
                     0
                 };
-                
+
                 let total_pdu_len = possible_header_length + payload_len;
-                
+
                 // Check if we have the complete PDU
                 if self.tunnel_data_buffer.len() < wrapper_size + total_pdu_len {
                     // PDU is incomplete - wait for more data
-                    debug!("   Found header at offset {} (header={}, payload={}) but need {} more bytes for complete PDU",
-                           offset, possible_header_length, payload_len,
-                           wrapper_size + total_pdu_len - self.tunnel_data_buffer.len());
+                    debug!(
+                        "   Found header at offset {} (header={}, payload={}) but need {} more bytes for complete PDU",
+                        offset,
+                        possible_header_length,
+                        payload_len,
+                        wrapper_size + total_pdu_len - self.tunnel_data_buffer.len()
+                    );
                     break;
                 }
-                
+
                 // We have a complete PDU!
                 pdu_start_offset = wrapper_size;
                 found_pdu = true;
-                debug!("   ✅ Found complete tunnel PDU: wrapper={}, header={}, payload={}, total={}",
-                       wrapper_size, possible_header_length, payload_len, total_pdu_len);
-                
+                debug!(
+                    "   ✅ Found complete tunnel PDU: wrapper={}, header={}, payload={}, total={}",
+                    wrapper_size, possible_header_length, payload_len, total_pdu_len
+                );
+
                 // Extract PDU data to process (copy to avoid borrow checker issues)
-                let pdu_data: Vec<u8> = self.tunnel_data_buffer[pdu_start_offset..pdu_start_offset + total_pdu_len].to_vec();
-                
+                let pdu_data: Vec<u8> = self.tunnel_data_buffer
+                    [pdu_start_offset..pdu_start_offset + total_pdu_len]
+                    .to_vec();
+
                 // Remove processed data from buffer (including wrapper) BEFORE processing
-                self.tunnel_data_buffer.drain(0..pdu_start_offset + total_pdu_len);
-                debug!("   Buffer after drain: {} bytes remain", self.tunnel_data_buffer.len());
-                
+                self.tunnel_data_buffer
+                    .drain(0..pdu_start_offset + total_pdu_len);
+                debug!(
+                    "   Buffer after drain: {} bytes remain",
+                    self.tunnel_data_buffer.len()
+                );
+
                 // Now process the PDU (self is no longer borrowed)
                 if let Err(e) = self.process_tunnel_pdu(&pdu_data).await {
                     warn!("Failed to process tunnel PDU: {}", e);
                 }
-                
+
                 break;
             }
-            
+
             if !found_pdu {
                 // No valid PDU found - either incomplete or junk data
                 if self.tunnel_data_buffer.len() > 1024 {
@@ -1491,7 +1541,7 @@ impl UdpTransportManager {
 
         Ok(())
     }
-    
+
     /// Process an MS-RDPEMT tunnel PDU (after wrapper is stripped)
     async fn process_tunnel_pdu(&mut self, tunnel_data: &[u8]) -> Result<()> {
         // MS-RDPEMT RDP_TUNNEL_HEADER structure (little-endian):
@@ -1501,13 +1551,13 @@ impl UdpTransportManager {
         // Flags (2 bytes)
         // PayloadLength (2 bytes)
         // [Optional subheaders...]
-        
+
         const MIN_TUNNEL_HEADER_SIZE: usize = 10;
         if tunnel_data.len() < MIN_TUNNEL_HEADER_SIZE {
             warn!("Tunnel data too short: {} bytes", tunnel_data.len());
             return Ok(());
         }
-        
+
         let header_length = u16::from_le_bytes([tunnel_data[0], tunnel_data[1]]) as usize;
         let header_version = u16::from_le_bytes([tunnel_data[2], tunnel_data[3]]);
         let action = u16::from_le_bytes([tunnel_data[4], tunnel_data[5]]);
@@ -1565,12 +1615,10 @@ impl UdpTransportManager {
             // The main loop will feed this to DrdynvcClient::process() which handles
             // DRDYNVC-level fragmentation (DATA_FIRST/DATA PDUs) via CompleteData
             let request_id = self.request_id.unwrap_or(0);
-            let _ = self
-                .event_tx
-                .send(UdpTransportEvent::TunnelDvcData { 
-                    request_id,
-                    data: payload.to_vec() 
-                });
+            let _ = self.event_tx.send(UdpTransportEvent::TunnelDvcData {
+                request_id,
+                data: payload.to_vec(),
+            });
         } else {
             debug!("   Unknown tunnel action: 0x{:04x}", action);
         }
@@ -1604,7 +1652,9 @@ impl UdpTransportManager {
 
             let request_id = self.request_id.unwrap_or(0);
             // Send event to notify tunnel is established
-            let _ = self.event_tx.send(UdpTransportEvent::TunnelEstablished { request_id });
+            let _ = self
+                .event_tx
+                .send(UdpTransportEvent::TunnelEstablished { request_id });
         } else {
             warn!(
                 "   Tunnel creation failed (HRESULT = 0x{:08x})",

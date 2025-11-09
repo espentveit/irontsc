@@ -166,7 +166,11 @@ impl SvcProcessor for RdpsndServer {
         CompressionCondition::Never
     }
 
-    fn process(&mut self, payload: &[u8], _transport: ironrdp_svc::TransportContext) -> PduResult<Vec<SvcMessage>> {
+    fn process(
+        &mut self,
+        payload: &[u8],
+        _transport: ironrdp_svc::TransportContext,
+    ) -> PduResult<Vec<SvcMessage>> {
         let pdu = pdu::ClientAudioOutputPdu::decode(&mut ReadCursor::new(payload))
             .map_err(|e| decode_err!(e))?;
         debug!(?pdu);

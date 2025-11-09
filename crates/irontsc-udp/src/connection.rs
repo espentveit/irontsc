@@ -529,11 +529,11 @@ impl UdpConnection {
             UdpProtocolVersion::V3 => {
                 use crate::rdpudp_v2_overhead;
                 let mut flags = V2HeaderFlags::ACK;
-                
+
                 // Add OVERHEADSIZE flag per MS-RDPEUDP2 spec
                 // OverheadSize is sent by Receiver to inform overhead bytes at RDP-UDP2 layer
                 flags |= rdpudp_v2_flags!(OVERHEADSIZE);
-                
+
                 let header = V2PacketHeader::new(flags, 0)?;
                 let ack_payload = V2AckPayload {
                     sequence_number: self.v3_expected_sequence.wrapping_sub(1),
@@ -543,13 +543,13 @@ impl UdpConnection {
                     delay_ack_time_scale: 0,
                     delay_ack_time_additions: Vec::new(),
                 };
-                
+
                 // OverheadSize: typical RDP UDP v3 overhead is around 8-12 bytes
                 // (header + prefix + various payloads)
                 let overhead_size = Some(rdpudp_v2_overhead!(10));
-                
+
                 rdpudp_v2_packet_bytes!(
-                    header = header, 
+                    header = header,
                     ack = Some(ack_payload),
                     overhead_size = overhead_size
                 )

@@ -325,7 +325,11 @@ impl<R: Role> SvcProcessor for Cliprdr<R> {
         }
     }
 
-    fn process(&mut self, payload: &[u8], _transport: ironrdp_svc::TransportContext) -> PduResult<Vec<SvcMessage>> {
+    fn process(
+        &mut self,
+        payload: &[u8],
+        _transport: ironrdp_svc::TransportContext,
+    ) -> PduResult<Vec<SvcMessage>> {
         let pdu = decode::<ClipboardPdu<'_>>(payload).map_err(|e| decode_err!(e))?;
 
         if self.state == CliprdrState::Failed {

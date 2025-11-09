@@ -164,14 +164,14 @@ impl Sequence for ConnectionActivationSequence {
                     );
 
                     // **DO NOT** send InitiateMultitransportResponse here!
-                    // Per MS-RDPBCGR and MS-RDPEMT specs, the response MUST be sent 
+                    // Per MS-RDPBCGR and MS-RDPEMT specs, the response MUST be sent
                     // AFTER the multitransport tunnel is created and authenticated.
-                    // Sending it prematurely causes Windows RDP servers to fail with 
+                    // Sending it prematurely causes Windows RDP servers to fail with
                     // error 0x800708CA (RPC_S_SERVER_UNAVAILABLE).
                     //
                     // The response will be sent later in rdp.rs after the UDP tunnel
                     // completes its TLS/DTLS handshake and MS-RDPEMT Tunnel Create sequence.
-                    
+
                     debug!("⏸️  Deferring InitiateMultitransportResponse until UDP tunnel is established");
 
                     // Stay in CapabilitiesExchange state to wait for ServerDemandActive

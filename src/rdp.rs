@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use ironrdp::cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
 use ironrdp::cliprdr::pdu::FileDescriptor;
 use ironrdp::cliprdr::pdu::{
@@ -16,6 +16,7 @@ use ironrdp::connector::connection_activation::ConnectionActivationState;
 use ironrdp::connector::{ConnectionResult, ConnectorResult};
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::graphics::pointer::DecodedPointer;
+use ironrdp::pdu::PduResult;
 use ironrdp::pdu::basic_output::orders::DrawingOrder;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
@@ -23,11 +24,10 @@ use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
-use ironrdp::pdu::PduResult;
 use ironrdp::session::desktop_composition::DesktopCompositionHandler;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
-    fast_path, ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult,
+    ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
 };
 use ironrdp::svc::{ChannelFlags, SvcMessage, SvcProcessor, TransportContext};
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
@@ -37,11 +37,11 @@ use ironrdp_core::{Encode, IntoOwned, WriteBuf, WriteCursor};
 use ironrdp_pdu::nego;
 use ironrdp_rdpsnd_native::cpal;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
-use ironrdp_tokio::{single_sequence_step_read, split_tokio_framed, FramedWrite};
+use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
 use rdpdr::NoopRdpdrBackend;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
@@ -341,14 +341,14 @@ async fn connect(
     // Add Display Control channel for dynamic resolution changes
     {
         use ironrdp_displaycontrol::client::DisplayControlClient;
-        
+
         info!("Registering Display Control channel (Microsoft::Windows::RDS::DisplayControl)");
-        
+
         let display_control = DisplayControlClient::new(Box::new(|_caps| {
             // Capabilities received from server - we could log/process these if needed
             Ok(Vec::new())
         }));
-        
+
         drdynvc = drdynvc.with_dynamic_channel(display_control);
     }
 
@@ -358,22 +358,27 @@ async fn connect(
         use crate::core_input_channel::CoreInputProcessor;
         use crate::mouse_cursor_channel::MouseCursorProcessor;
         use crate::stub_dvc::StubDvcProcessor;
-        
+
         info!("Registering DVC handlers for protocol compliance...");
-        
+
         // Input-related channels with proper implementations
         drdynvc = drdynvc.with_dynamic_channel(CoreInputProcessor::new());
         drdynvc = drdynvc.with_dynamic_channel(MouseCursorProcessor::new());
-        
+
         // Input-related channels - stubs for now (Microsoft::Windows::RDS::Input uses advanced input protocol MS-RDPEAI)
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
-        
+        drdynvc =
+            drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
+        drdynvc =
+            drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
+
         // Other protocol channels - stubs (would need full protocol implementations)
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Notify"));
+        drdynvc =
+            drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Notify"));
         drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("RDCamera_Device_Enumerator"));
-        
-        info!("DVC handlers registered: CoreInput, MouseCursor, Input (stub), TextInput (stub), Notify (stub), RDCamera (stub)");
+
+        info!(
+            "DVC handlers registered: CoreInput, MouseCursor, Input (stub), TextInput (stub), Notify (stub), RDCamera (stub)"
+        );
     }
 
     // TODO: DVC proxies not yet implemented
@@ -1457,21 +1462,24 @@ fn detect_autodetect_request(
     // Look for security header with AUTODETECT_REQ flag
     for offset in 0..user_data.len().saturating_sub(8) {
         let mut cursor = ReadCursor::new(&user_data[offset..]);
-        
+
         let flags_bits = cursor.read_u16();
         let flags = BasicSecurityHeaderFlags::from_bits(flags_bits)?;
-        
+
         if !flags.contains(BasicSecurityHeaderFlags::AUTODETECT_REQ) {
             continue;
         }
-        
+
         let _security_flags_hi = cursor.read_u16();
-        
+
         // The remaining data should be the auto-detect request PDU
         let remaining = cursor.remaining();
         if remaining.len() >= 6 {
             // Minimum auto-detect header size
-            debug!("📊 Detected auto-detect request ({} bytes)", remaining.len());
+            debug!(
+                "📊 Detected auto-detect request ({} bytes)",
+                remaining.len()
+            );
             return Some(remaining.to_vec());
         }
     }
@@ -1582,7 +1590,7 @@ fn encode_autodetect_response(
         user_channel_id,
         message_channel_id,
         &wrapped_pdu,
-        &mut buf
+        &mut buf,
     ) {
         warn!("Failed to encode auto-detect send data request: {:?}", e);
         return None;
@@ -1614,41 +1622,53 @@ fn handle_autodetect_request(
 
     match request {
         AutoDetectRequest::RttMeasure(rtt_req) => {
-            trace!("📊 Received RTT Measure Request (seq={})", rtt_req.sequence_number);
-            
-            // Respond immediately with RTT Measure Response
-            let response = AutoDetectResponse::RttMeasure(
-                RttMeasureResponse::new(rtt_req.sequence_number)
+            trace!(
+                "📊 Received RTT Measure Request (seq={})",
+                rtt_req.sequence_number
             );
-            
-            trace!("📤 Sending RTT Measure Response (seq={})", rtt_req.sequence_number);
+
+            // Respond immediately with RTT Measure Response
+            let response =
+                AutoDetectResponse::RttMeasure(RttMeasureResponse::new(rtt_req.sequence_number));
+
+            trace!(
+                "📤 Sending RTT Measure Response (seq={})",
+                rtt_req.sequence_number
+            );
             encode_autodetect_response(&response, user_channel_id, message_channel_id)
         }
-        
+
         AutoDetectRequest::BandwidthMeasureStart(start_req) => {
-            trace!("📊 Received Bandwidth Measure Start (seq={})", start_req.sequence_number);
-            
+            trace!(
+                "📊 Received Bandwidth Measure Start (seq={})",
+                start_req.sequence_number
+            );
+
             // Start bandwidth measurement
             *bandwidth_start_time = Some(std::time::Instant::now());
             *bandwidth_byte_count = 0;
             *bandwidth_sequence = Some(start_req.sequence_number);
-            
+
             // No immediate response needed
             None
         }
-        
+
         AutoDetectRequest::BandwidthMeasureStop(stop_req) => {
-            trace!("📊 Received Bandwidth Measure Stop (seq={}, type=0x{:04x}, payload_len={:?})", 
-                  stop_req.sequence_number, stop_req.request_type, stop_req.payload_length);
-            
+            trace!(
+                "📊 Received Bandwidth Measure Stop (seq={}, type=0x{:04x}, payload_len={:?})",
+                stop_req.sequence_number, stop_req.request_type, stop_req.payload_length
+            );
+
             // Calculate bandwidth and send results
             if let Some(start_time) = *bandwidth_start_time {
                 let elapsed = start_time.elapsed();
                 let time_delta_ms = elapsed.as_millis() as u32;
-                
-                trace!("📊 Bandwidth measurement: {} bytes in {}ms", 
-                      *bandwidth_byte_count, time_delta_ms);
-                
+
+                trace!(
+                    "📊 Bandwidth measurement: {} bytes in {}ms",
+                    *bandwidth_byte_count, time_delta_ms
+                );
+
                 // Determine response type based on request type
                 let response_type = match stop_req.request_type {
                     0x002B => AutoDetectResponseType::BandwidthMeasureResultsConnectTime as u16,
@@ -1656,33 +1676,36 @@ fn handle_autodetect_request(
                     0x0629 => AutoDetectResponseType::BandwidthMeasureResultsAfterConnect as u16,
                     _ => AutoDetectResponseType::BandwidthMeasureResultsAfterConnect as u16,
                 };
-                
-                let response = AutoDetectResponse::BandwidthMeasureResults(
-                    BandwidthMeasureResults::new(
+
+                let response =
+                    AutoDetectResponse::BandwidthMeasureResults(BandwidthMeasureResults::new(
                         stop_req.sequence_number,
                         response_type,
                         time_delta_ms,
                         *bandwidth_byte_count,
-                    )
-                );
-                
+                    ));
+
                 // Reset measurement state
                 *bandwidth_start_time = None;
                 *bandwidth_byte_count = 0;
                 *bandwidth_sequence = None;
-                
-                trace!("📤 Sending Bandwidth Measure Results (seq={}, {}ms, {} bytes)", 
-                      stop_req.sequence_number, time_delta_ms, *bandwidth_byte_count);
+
+                trace!(
+                    "📤 Sending Bandwidth Measure Results (seq={}, {}ms, {} bytes)",
+                    stop_req.sequence_number, time_delta_ms, *bandwidth_byte_count
+                );
                 encode_autodetect_response(&response, user_channel_id, message_channel_id)
             } else {
                 warn!("Received Bandwidth Measure Stop without Start");
                 None
             }
         }
-        
+
         AutoDetectRequest::NetworkCharacteristicsResult(result) => {
-            trace!("📊 Received Network Characteristics Result: baseRTT={:?}ms, bandwidth={:?}kbps, avgRTT={:?}ms",
-                  result.base_rtt, result.bandwidth, result.average_rtt);
+            trace!(
+                "📊 Received Network Characteristics Result: baseRTT={:?}ms, bandwidth={:?}kbps, avgRTT={:?}ms",
+                result.base_rtt, result.bandwidth, result.average_rtt
+            );
             // This is informational from server, no response needed
             None
         }
@@ -1846,7 +1869,8 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut pending_initial_resize: Option<(u16, u16, u32, Option<(u32, u32)>)> = None;
 
     // Track active UDP transport tunnel (currently only one tunnel is supported)
-    let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> = std::collections::HashMap::new();
+    let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> =
+        std::collections::HashMap::new();
 
     // Track bandwidth measurement state for auto-detect
     let mut bandwidth_measure_start_time: Option<std::time::Instant> = None;
@@ -1932,7 +1956,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                 match frame {
                     Ok((action, payload)) => {
                         trace!(?action, frame_length = payload.len(), "Frame received");
-                        
+
                         // Track bytes for bandwidth measurement if active
                         if bandwidth_measure_start_time.is_some() {
                             bandwidth_measure_byte_count += payload.len() as u32;
@@ -2109,7 +2133,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         .values_mut()
                         .map(|tunnel| Box::pin(tunnel.event_rx.recv()))
                         .collect();
-                    
+
                     if futures.is_empty() {
                         pending::<Option<UdpTransportEvent>>().await
                     } else {
@@ -2138,7 +2162,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                             tunnel.tunnel_established_time = Some(std::time::Instant::now());
                         }
                         info!("🔐 UDP tunnel established (request_id={}, MS-RDPEMT)", request_id);
-                        
+
                         // Register the available tunnel with DVC client for Soft-Sync
                         // Per MS-RDPEDYC §3.2.5.3.2: Client should only confirm tunnels it has successfully established
                         if let Some(tunnel) = udp_tunnels.get(&request_id) {
@@ -2152,7 +2176,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                             info!("   Processing {} deferred DVC message(s)", deferred_messages.len());
                                             let frame = active_stage.encode_dvc_messages(deferred_messages)?;
                                             outputs.push(ActiveStageOutput::ResponseFrame(frame));
-                                            
+
                                             // Check if we have a pending resize now that channels (like DisplayControl) may be ready
                                             if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
                                                 if let Some(result) = active_stage.encode_resize(
@@ -2176,7 +2200,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 }
                             }
                         }
-                        
+
                         // NOW send MultitransportResponse on TCP channel (per MS-RDPBCGR spec)
                         // This must be sent AFTER the tunnel is fully established (TunnelCreateResponse received)
                         // Sending it too early (e.g., after TLS handshake) causes server-side RDP_SEC error 0x8007139F
@@ -2189,7 +2213,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 initiator_id: tunnel.initiator_id,
                                 channel_id: tunnel.channel_id,
                             };
-                            
+
                             match encode_multitransport_response_frame(request_info, message_channel_id) {
                                 Ok(frame) => {
                                     info!(
@@ -2208,7 +2232,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         } else {
                             warn!("⚠️  TunnelEstablished received but tunnel info not found for request_id={}", request_id);
                         }
-                        
+
                         info!("⏳ Awaiting Soft-Sync negotiation before switching graphics to UDP");
                         info!("   Note: Server has 10 seconds to send Soft-Sync request, otherwise traffic stays on TCP");
                     }
@@ -2226,8 +2250,8 @@ async fn active_session<T: RdpEventSender + Clone>(
                         }
 
                         // Determine transport context: use TCP until Soft-Sync completes, then UDP
-                        // Per MS-RDPEDYC: "The server manager and client manager MUST NOT send or receive 
-                        // any dynamic virtual channel data on the multitransport tunnels until the Soft-Sync 
+                        // Per MS-RDPEDYC: "The server manager and client manager MUST NOT send or receive
+                        // any dynamic virtual channel data on the multitransport tunnels until the Soft-Sync
                         // negotiation has completed."
                         let transport_context = if let Some(tunnel) = udp_tunnels.get(&request_id) {
                             if tunnel.soft_sync_received {
@@ -2246,7 +2270,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                             match drdynvc.process(&dvc_data, transport_context) {
                                 Ok(response_messages) => {
                                     info!("   ✅ DRDYNVC returned {} response messages", response_messages.len());
-                                    
+
                                     // Route responses based on their transport context
                                     for msg in response_messages {
                                         info!("   🔍 Response has transport: {:?}, PDU: {}", msg.transport(), msg.pdu_name());
@@ -2295,12 +2319,12 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                     Some(UdpTransportEvent::SoftSyncCompleted { request_id, tunnel_type }) => {
                         info!("🔄 Received SoftSyncCompleted event for request_id={}, tunnel_type=0x{:08X}", request_id, tunnel_type);
-                        
+
                         // Mark that Soft-Sync was received
                         if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
                             tunnel.soft_sync_received = true;
                         }
-                        
+
                         // Enable UDP mode for the GFX channel
                         use crate::gfx_channel::GfxDvcProcessor;
                         if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
@@ -2663,10 +2687,13 @@ async fn active_session<T: RdpEventSender + Clone>(
                             .command_tx
                             .send(UdpTransportCommand::TunnelData(data.clone()))
                         {
-                            warn!("Failed to forward tunnel data to UDP tunnel {}: {}", request_id, e);
+                            warn!(
+                                "Failed to forward tunnel data to UDP tunnel {}: {}",
+                                request_id, e
+                            );
                         }
                     }
-                    
+
                     if udp_tunnels.is_empty() {
                         warn!("Received tunnel data but no UDP tunnels active");
                     }
@@ -2685,10 +2712,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                     tunnel_type
                 );
                 info!("   GFX channel CREATE requests will now be accepted (over UDP transport)");
-                
+
                 // Clear the completion flag
                 drdynvc_client.clear_soft_sync_completed();
-                
+
                 // Signal all active UDP transports that soft-sync is complete
                 for (request_id, tunnel) in &udp_tunnels {
                     if let Err(e) = tunnel
@@ -2701,7 +2728,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         );
                     }
                 }
-                
+
                 if udp_tunnels.is_empty() {
                     warn!("Soft-Sync completed but no UDP tunnels active");
                 }
@@ -2711,16 +2738,15 @@ async fn active_session<T: RdpEventSender + Clone>(
         // Check for Soft-Sync timeout (per MS-RDPEDYC §3.1.5.3, servers MAY skip Soft-Sync)
         const SOFT_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         for (request_id, tunnel) in udp_tunnels.iter_mut() {
-            if tunnel.tunnel_established 
-               && !tunnel.soft_sync_received 
-               && tunnel.tunnel_established_time.is_some() 
+            if tunnel.tunnel_established
+                && !tunnel.soft_sync_received
+                && tunnel.tunnel_established_time.is_some()
             {
                 let elapsed = tunnel.tunnel_established_time.unwrap().elapsed();
                 if elapsed > SOFT_SYNC_TIMEOUT {
                     warn!(
                         "⏱️  Soft-Sync timeout for tunnel {}: Server did not send Soft-Sync request within {:?}",
-                        request_id,
-                        SOFT_SYNC_TIMEOUT
+                        request_id, SOFT_SYNC_TIMEOUT
                     );
                     info!(
                         "ℹ️  Per MS-RDPEDYC spec, this is allowed. Graphics traffic will remain on TCP."
