@@ -1592,7 +1592,6 @@ impl GfxState {
     }
 
     /// Send a surface to the UI for rendering
-    /// Send a surface to the UI for rendering
     fn send_surface_to_ui(&mut self, surface_id: u16) -> Result<()> {
         let surface = self.surfaces.get_mut(&surface_id)
             .ok_or_else(|| anyhow::anyhow!("Surface {} not found", surface_id))?;
@@ -1641,8 +1640,13 @@ impl GfxState {
         let full_size = (width.get() as usize) * (height.get() as usize) * 4;
         let dirty_size = (region_width as usize) * (region_height as usize) * 4;
         
-        // If dirty region is >70% of frame, send full frame (cheaper than extracting)
-        if dirty_size > (full_size * 7 / 10) {
+        // If GTK still holds a reference, prefer full frame to avoid Arc::make_mut clones
+        let arc_refcount = Arc::strong_count(&surface.buffer);
+        let prefer_full_frame = arc_refcount > 1;
+        
+        // If dirty region is >50% of frame, send full frame (cheaper than extracting)
+        // Also send full frame if Arc has multiple references (GTK holding previous frame)
+        if dirty_size > (full_size / 2) || prefer_full_frame {
             let buffer = surface.buffer.clone();
             self.event_sender
                 .send_event(RdpOutputEvent::Image {
@@ -1659,31 +1663,59 @@ impl GfxState {
             let region_height_nz = NonZeroU16::new(region_height)
                 .ok_or_else(|| anyhow::anyhow!("Region height is zero"))?;
             
-            let mut region_buffer = Vec::with_capacity(dirty_size);
+            let mut region_buffer: Vec<u8> = Vec::with_capacity(dirty_size);
             let surface_width = surface.width as usize;
             let row_bytes = region_width as usize * 4;
             
-            for y in 0..region_height {
-                let src_y = (merged.top + y) as usize;
-                let src_x = merged.left as usize;
-                let src_offset = (src_y * surface_width + src_x) * 4;
-                
-                if src_offset + row_bytes <= surface.buffer.len() {
-                    region_buffer.extend_from_slice(
-                        &surface.buffer[src_offset..src_offset + row_bytes]
+            // Validate bounds once before copying
+            let last_row = merged.top as usize + region_height as usize - 1;
+            let last_col = merged.left as usize + region_width as usize - 1;
+            let last_offset = (last_row * surface_width + last_col + 1) * 4;
+            
+            if last_offset > surface.buffer.len() {
+                // Out of bounds, fall back to full frame
+                let buffer = surface.buffer.clone();
+                self.event_sender
+                    .send_event(RdpOutputEvent::Image {
+                        buffer,
+                        width,
+                        height,
+                        region: None,
+                    })
+                    .map_err(|_| anyhow::anyhow!("Failed to send image event to UI"))?;
+                return Ok(());
+            }
+            
+            // Use unsafe bulk copy to avoid memmove overhead
+            unsafe {
+                region_buffer.set_len(dirty_size);
+            }
+            
+            // Optimization: if dirty region spans full width, do single contiguous copy
+            if region_width == width.get() {
+                let src_offset = (merged.top as usize * surface_width) * 4;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        surface.buffer.as_ptr().add(src_offset),
+                        region_buffer.as_mut_ptr(),
+                        dirty_size,
                     );
-                } else {
-                    // Out of bounds, fall back to full frame
-                    let buffer = surface.buffer.clone();
-                    self.event_sender
-                        .send_event(RdpOutputEvent::Image {
-                            buffer,
-                            width,
-                            height,
-                            region: None,
-                        })
-                        .map_err(|_| anyhow::anyhow!("Failed to send image event to UI"))?;
-                    return Ok(());
+                }
+            } else {
+                // Row-by-row copy for partial width regions
+                for y in 0..region_height {
+                    let src_y = (merged.top + y) as usize;
+                    let src_x = merged.left as usize;
+                    let src_offset = (src_y * surface_width + src_x) * 4;
+                    let dst_offset = y as usize * row_bytes;
+                    
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            surface.buffer.as_ptr().add(src_offset),
+                            region_buffer.as_mut_ptr().add(dst_offset),
+                            row_bytes,
+                        );
+                    }
                 }
             }
             
