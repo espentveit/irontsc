@@ -782,11 +782,17 @@ impl<'a> TileDecoder<'a> {
     }
 
     fn reconstruct_rgba(&mut self, tile_state: &mut TileState, extrapolate: bool) -> Result<()> {
+        // NOTE: We MUST copy coefficients to scratch buffers because:
+        // 1. tile_state.coefficients stores frequency-domain DWT data that must be preserved
+        // 2. inverse_dwt() transforms in-place, converting frequency → spatial domain
+        // 3. Progressive codec accumulates coefficients across multiple passes
+        // 4. Destroying coefficients causes artifacts in subsequent frames
         {
             let (mut channels, temp) = self.scratch.split_mut();
 
             for (component, buffer_ref) in channels.as_mut_slice().iter_mut().enumerate() {
                 let buffer = &mut **buffer_ref;
+                // Copy preserves tile_state.coefficients for future progressive updates
                 buffer.copy_from_slice(&tile_state.coefficients[component]);
                 Self::inverse_dwt(buffer, temp, extrapolate);
             }
@@ -1172,7 +1178,6 @@ fn progressive_idwt_x(
         let mut h0 = high_band.get(high_idx).copied().unwrap_or_default();
         high_idx += 1;
 
-        // **THE FIX IS HERE**: `l0` is now `mut` and is updated inside the loop.
         let mut l0 = low_band.get(low_idx).copied().unwrap_or_default();
         low_idx += 1;
 
@@ -1289,7 +1294,6 @@ fn progressive_idwt_y(
                     *val = clamp_i16(i32::from(x2) + 2 * i32::from(h0));
                 }
             } else {
-                // Here we use the final `l0` value updated from the loop.
                 l0 = low_band.get(low_idx).copied().unwrap_or_default();
                 let x_next = clamp_i16(i32::from(l0) - i32::from(h0));
 
