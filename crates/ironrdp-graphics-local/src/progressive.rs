@@ -485,6 +485,7 @@ impl TileDecodeScratch {
     }
 }
 
+#[derive(Debug)]
 struct TileSimpleBlock<'a> {
     block_type: BlockType,
     quant_idx: [u8; COMPONENT_COUNT],
@@ -498,6 +499,7 @@ struct TileSimpleBlock<'a> {
     tail_data: &'a [u8],
 }
 
+#[derive(Debug)]
 struct TileUpgradeBlock<'a> {
     block_type: BlockType,
     quant_idx: [u8; COMPONENT_COUNT],
@@ -2058,8 +2060,1168 @@ impl ProgressiveDecoder {
     }
 }
 
+#[derive(Debug)]
 pub struct ProgressiveSurfaceUpdate {
     pub surface_id: u16,
     pub frame_index: u32,
     pub tiles: Vec<TileUpdate>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase 1: Block Parsing Tests
+
+    #[test]
+    fn test_parse_sync_block_valid() {
+        let data = [
+            0xC0, 0xCC, // blockType = SYNC (0xCCC0)
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12
+            0xCA, 0xAC, 0xCC, 0xCA, // magic = 0xCACCACCA (little-endian)
+            0x00, 0x01, // version = 0x0100
+        ];
+
+        let sync = SyncBlock::parse(&data[6..]).expect("Should parse valid SYNC block");
+        assert_eq!(sync.version, 0x0100, "Version should be 0x0100");
+    }
+
+    #[test]
+    fn test_parse_sync_block_invalid_magic() {
+        let data = [
+            0xDE, 0xAD, 0xBE, 0xEF, // wrong magic
+            0x00, 0x01, // version
+        ];
+
+        let result = SyncBlock::parse(&data);
+        assert!(result.is_err(), "Should fail with invalid magic");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ProgressiveError::Invalid(_)),
+            "Should be Invalid error"
+        );
+    }
+
+    #[test]
+    fn test_parse_sync_block_truncated() {
+        let data = [
+            0xCA, 0xCC, 0xAC, 0xCA, // magic only
+        ];
+
+        let result = SyncBlock::parse(&data);
+        assert!(result.is_err(), "Should fail with truncated data");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_parse_context_block_valid() {
+        let data = [
+            0x01, // contextId = 1
+            0x40, 0x00, // tileSize = 64
+            0x01, // flags = RFX_DWT_REDUCE_EXTRAPOLATE
+        ];
+
+        let context = ContextBlock::parse(&data).expect("Should parse valid CONTEXT block");
+        assert_eq!(context.context_id, 1);
+        assert_eq!(context.tile_size, 64);
+        assert_eq!(context.flags, 1);
+    }
+
+    #[test]
+    fn test_parse_context_block_truncated() {
+        let data = [
+            0x01, // contextId only
+        ];
+
+        let result = ContextBlock::parse(&data);
+        assert!(result.is_err(), "Should fail with truncated data");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_parse_frame_begin_block_valid() {
+        let data = [
+            0x01, 0x00, 0x00, 0x00, // frameIndex = 1
+            0x02, 0x00, // regionCount = 2
+        ];
+
+        let frame_begin =
+            FrameBeginBlock::parse(&data).expect("Should parse valid FRAME_BEGIN block");
+        assert_eq!(frame_begin.frame_index, 1);
+        assert_eq!(frame_begin.region_count, 2);
+    }
+
+    #[test]
+    fn test_parse_frame_begin_block_truncated() {
+        let data = [
+            0x01, 0x00, 0x00, 0x00, // frameIndex only
+        ];
+
+        let result = FrameBeginBlock::parse(&data);
+        assert!(result.is_err(), "Should fail with truncated data");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_parse_region_block_valid() {
+        let data = [
+            0x40, // tileSize = 64
+            0x01, 0x00, // numRects = 1
+            0x01, // numQuant = 1
+            0x00, // numProgQuant = 0
+            0x00, // flags = 0
+            0x01, 0x00, // numTiles = 1
+            0x00, 0x00, 0x00, 0x00, // tileDataSize = 0
+            // rect
+            0x00, 0x00, // x = 0
+            0x00, 0x00, // y = 0
+            0x40, 0x00, // width = 64
+            0x40, 0x00, // height = 64
+            // quant (5 bytes)
+            0x66, // LL3/LH3
+            0x66, // HL3/HH3
+            0x66, // LH2/HL2
+            0x66, // HH2/LH1
+            0x66, // HL1/HH1
+        ];
+
+        let region = RegionBlock::parse(&data).expect("Should parse valid REGION block");
+        assert_eq!(region.tile_size, 64);
+        assert_eq!(region.num_rects, 1);
+        assert_eq!(region.num_tiles, 1);
+        assert_eq!(region.rects.len(), 1);
+        assert_eq!(region.quant_values.len(), 1);
+        assert_eq!(region.progressive_quants.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_region_block_zero_rects() {
+        let data = [
+            0x40, // tileSize = 64
+            0x00, 0x00, // numRects = 0
+            0x01, // numQuant = 1
+            0x00, // numProgQuant = 0
+            0x00, // flags = 0
+            0x01, 0x00, // numTiles = 1
+            0x00, 0x00, 0x00, 0x00, // tileDataSize = 0
+            // quant (5 bytes)
+            0x66, 0x66, 0x66, 0x66, 0x66,
+        ];
+
+        let region = RegionBlock::parse(&data).expect("Should parse region with zero rects");
+        assert_eq!(region.num_rects, 0);
+        assert_eq!(region.rects.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_region_block_truncated_rects() {
+        let data = [
+            0x40, // tileSize = 64
+            0x02, 0x00, // numRects = 2
+            0x01, // numQuant = 1
+            0x00, // numProgQuant = 0
+            0x00, // flags = 0
+            0x01, 0x00, // numTiles = 1
+            0x00, 0x00, 0x00, 0x00, // tileDataSize = 0
+            // Only 1 rect provided, but claimed 2
+            0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x40, 0x00,
+        ];
+
+        let result = RegionBlock::parse(&data);
+        assert!(result.is_err(), "Should fail with truncated rects");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_parse_tile_simple_block_valid() {
+        let mut data = vec![
+            0x00, // quantIdxY = 0
+            0x00, // quantIdxCb = 0
+            0x00, // quantIdxCr = 0
+            0x00, 0x00, // xIdx = 0
+            0x00, 0x00, // yIdx = 0
+            0x00, // flags = 0
+            // No quality field for TILE_SIMPLE
+            0x0A, 0x00, // yLen = 10
+            0x05, 0x00, // cbLen = 5
+            0x05, 0x00, // crLen = 5
+            0x00, 0x00, // tailLen = 0
+        ];
+        // Add y data (10 bytes)
+        data.extend_from_slice(&[0u8; 10]);
+        // Add cb data (5 bytes)
+        data.extend_from_slice(&[0u8; 5]);
+        // Add cr data (5 bytes)
+        data.extend_from_slice(&[0u8; 5]);
+
+        let mut slice = data.as_slice();
+        let block = parse_tile_simple_block(&mut slice, BlockType::TileSimple)
+            .expect("Should parse valid TILE_SIMPLE block");
+        assert_eq!(block.quant_idx, [0, 0, 0]);
+        assert_eq!(block.x_idx, 0);
+        assert_eq!(block.y_idx, 0);
+        assert_eq!(block.flags, 0);
+        assert_eq!(block.quality, 0xFF); // Default for TILE_SIMPLE
+        assert_eq!(block.y_data.len(), 10);
+        assert_eq!(block.cb_data.len(), 5);
+        assert_eq!(block.cr_data.len(), 5);
+    }
+
+    #[test]
+    fn test_parse_tile_first_block_valid() {
+        let mut data = vec![
+            0x00, // quantIdxY = 0
+            0x00, // quantIdxCb = 0
+            0x00, // quantIdxCr = 0
+            0x01, 0x00, // xIdx = 1
+            0x02, 0x00, // yIdx = 2
+            0x00, // flags = 0
+            0x32, // quality = 50 (TILE_FIRST has quality field)
+            0x0A, 0x00, // yLen = 10
+            0x05, 0x00, // cbLen = 5
+            0x05, 0x00, // crLen = 5
+            0x00, 0x00, // tailLen = 0
+        ];
+        data.extend_from_slice(&[0u8; 20]); // y + cb + cr data
+
+        let mut slice = data.as_slice();
+        let block = parse_tile_simple_block(&mut slice, BlockType::TileFirst)
+            .expect("Should parse valid TILE_FIRST block");
+        assert_eq!(block.x_idx, 1);
+        assert_eq!(block.y_idx, 2);
+        assert_eq!(block.quality, 50);
+    }
+
+    #[test]
+    fn test_parse_tile_simple_block_truncated() {
+        let data = [
+            0x00, 0x00, 0x00, // quantIdx
+            0x00, 0x00, // xIdx
+            0x00, 0x00, // yIdx
+            0x00, // flags
+            // Missing length fields
+        ];
+
+        let mut slice = data.as_slice();
+        let result = parse_tile_simple_block(&mut slice, BlockType::TileSimple);
+        assert!(result.is_err(), "Should fail with truncated data");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_parse_tile_upgrade_block_valid() {
+        let mut data = vec![
+            0x00, // quantIdxY = 0
+            0x00, // quantIdxCb = 0
+            0x00, // quantIdxCr = 0
+            0x00, 0x00, // xIdx = 0
+            0x00, 0x00, // yIdx = 0
+            0x64, // quality = 100
+            0x05, 0x00, // ySrlLen = 5
+            0x05, 0x00, // yRawLen = 5
+            0x03, 0x00, // cbSrlLen = 3
+            0x03, 0x00, // cbRawLen = 3
+            0x03, 0x00, // crSrlLen = 3
+            0x03, 0x00, // crRawLen = 3
+        ];
+        // Add all data streams
+        data.extend_from_slice(&[0u8; 5]); // ySrl
+        data.extend_from_slice(&[0u8; 5]); // yRaw
+        data.extend_from_slice(&[0u8; 3]); // cbSrl
+        data.extend_from_slice(&[0u8; 3]); // cbRaw
+        data.extend_from_slice(&[0u8; 3]); // crSrl
+        data.extend_from_slice(&[0u8; 3]); // crRaw
+
+        let mut slice = data.as_slice();
+        let block =
+            parse_tile_upgrade_block(&mut slice).expect("Should parse valid TILE_UPGRADE block");
+        assert_eq!(block.quant_idx, [0, 0, 0]);
+        assert_eq!(block.x_idx, 0);
+        assert_eq!(block.y_idx, 0);
+        assert_eq!(block.quality, 100);
+        assert_eq!(block.y_srl.len(), 5);
+        assert_eq!(block.y_raw.len(), 5);
+        assert_eq!(block.cb_srl.len(), 3);
+        assert_eq!(block.cb_raw.len(), 3);
+        assert_eq!(block.cr_srl.len(), 3);
+        assert_eq!(block.cr_raw.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_tile_upgrade_block_truncated() {
+        let data = [
+            0x00, 0x00, 0x00, // quantIdx
+            0x00, 0x00, // xIdx
+            0x00, 0x00, // yIdx
+            0x64, // quality
+            0x05, 0x00, // ySrlLen = 5
+            // Missing rest of length fields
+        ];
+
+        let mut slice = data.as_slice();
+        let result = parse_tile_upgrade_block(&mut slice);
+        assert!(result.is_err(), "Should fail with truncated data");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_block_header_parse_valid() {
+        let mut data: &[u8] = &[
+            0xC0, 0xCC, // blockType = SYNC
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12
+            0xCA, 0xCC, 0xAC, 0xCA, // payload (magic)
+            0x00, 0x01, // payload (version)
+        ];
+
+        let header = BlockHeader::parse(&mut data).expect("Should parse valid block header");
+        assert_eq!(header.block_type, BlockType::Sync);
+        assert_eq!(header.length, 12);
+        assert_eq!(data.len(), 6, "Should consume 6 bytes from header");
+    }
+
+    #[test]
+    fn test_block_header_parse_invalid_type() {
+        let mut data: &[u8] = &[
+            0xFF, 0xFF, // invalid blockType
+            0x0C, 0x00, 0x00, 0x00, // blockLen
+        ];
+
+        let result = BlockHeader::parse(&mut data);
+        assert!(result.is_err(), "Should fail with invalid block type");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Invalid(_)),
+            "Should be Invalid error"
+        );
+    }
+
+    #[test]
+    fn test_block_header_parse_too_short_length() {
+        let mut data: &[u8] = &[
+            0xC0, 0xCC, // blockType = SYNC
+            0x05, 0x00, 0x00, 0x00, // blockLen = 5 (< 6, invalid)
+        ];
+
+        let result = BlockHeader::parse(&mut data);
+        assert!(result.is_err(), "Should fail with length < 6");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Invalid(_)),
+            "Should be Invalid error"
+        );
+    }
+
+    #[test]
+    fn test_block_type_from_u16() {
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_SYNC).unwrap(),
+            BlockType::Sync
+        );
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_FRAME_BEGIN).unwrap(),
+            BlockType::FrameBegin
+        );
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_FRAME_END).unwrap(),
+            BlockType::FrameEnd
+        );
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_CONTEXT).unwrap(),
+            BlockType::Context
+        );
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_REGION).unwrap(),
+            BlockType::Region
+        );
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_TILE_SIMPLE).unwrap(),
+            BlockType::TileSimple
+        );
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_TILE_FIRST).unwrap(),
+            BlockType::TileFirst
+        );
+        assert_eq!(
+            BlockType::from_u16(PROGRESSIVE_WBT_TILE_UPGRADE).unwrap(),
+            BlockType::TileUpgrade
+        );
+
+        assert!(BlockType::from_u16(0xFFFF).is_err(), "Should fail for unknown type");
+    }
+
+    #[test]
+    fn test_progressive_codec_quant_parse() {
+        let data = [
+            0x64, // quality = 100
+            // Y component
+            0x66, 0x66, 0x66, 0x66, 0x66, // Cb component
+            0x55, 0x55, 0x55, 0x55, 0x55, // Cr component
+            0x44, 0x44, 0x44, 0x44, 0x44,
+        ];
+
+        let mut slice = data.as_slice();
+        let quant = ProgressiveCodecQuant::parse(&mut slice)
+            .expect("Should parse progressive codec quant");
+        assert_eq!(quant.quality, 100);
+        // Verify some quant values were parsed
+        assert_eq!(quant.y.ll3, 6); // 0x66 & 0x0F
+        assert_eq!(quant.y.lh3, 6); // 0x66 >> 4
+    }
+
+    #[test]
+    fn test_progressive_codec_quant_parse_truncated() {
+        let data = [
+            0x64, // quality only
+        ];
+
+        let mut slice = data.as_slice();
+        let result = ProgressiveCodecQuant::parse(&mut slice);
+        assert!(result.is_err(), "Should fail with truncated data");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    // ========================================================================
+    // Phase 2: Decoding Logic Tests
+    // ========================================================================
+
+    #[test]
+    fn test_quant_levels_from_quant() {
+        let quant = Quant {
+            ll3: 5,
+            lh3: 7,
+            hl3: 6,
+            hh3: 8,
+            lh2: 4,
+            hl2: 3,
+            hh2: 5,
+            lh1: 2,
+            hl1: 1,
+            hh1: 3,
+        };
+
+        let levels = QuantLevels::from_quant(&quant);
+        assert_eq!(levels.ll3, 5, "LL3 should match");
+        assert_eq!(levels.lh3, 7, "LH3 should match");
+        assert_eq!(levels.hl3, 6, "HL3 should match");
+        assert_eq!(levels.hh3, 8, "HH3 should match");
+        assert_eq!(levels.lh2, 4, "LH2 should match");
+        assert_eq!(levels.hl2, 3, "HL2 should match");
+        assert_eq!(levels.hh2, 5, "HH2 should match");
+        assert_eq!(levels.lh1, 2, "LH1 should match");
+        assert_eq!(levels.hl1, 1, "HL1 should match");
+        assert_eq!(levels.hh1, 3, "HH1 should match");
+    }
+
+    #[test]
+    fn test_quant_levels_add() {
+        let a = QuantLevels {
+            ll3: 5,
+            lh3: 7,
+            hl3: 6,
+            hh3: 8,
+            lh2: 4,
+            hl2: 3,
+            hh2: 5,
+            lh1: 2,
+            hl1: 1,
+            hh1: 3,
+        };
+
+        let b = QuantLevels {
+            ll3: 2,
+            lh3: 3,
+            hl3: 1,
+            hh3: 4,
+            lh2: 1,
+            hl2: 2,
+            hh2: 3,
+            lh1: 1,
+            hl1: 2,
+            hh1: 1,
+        };
+
+        let result = a.add(&b);
+        assert_eq!(result.ll3, 7, "LL3 should be 5 + 2");
+        assert_eq!(result.lh3, 10, "LH3 should be 7 + 3");
+        assert_eq!(result.hl3, 7, "HL3 should be 6 + 1");
+        assert_eq!(result.hh3, 12, "HH3 should be 8 + 4");
+        assert_eq!(result.lh2, 5, "LH2 should be 4 + 1");
+        assert_eq!(result.hl2, 5, "HL2 should be 3 + 2");
+        assert_eq!(result.hh2, 8, "HH2 should be 5 + 3");
+        assert_eq!(result.lh1, 3, "LH1 should be 2 + 1");
+        assert_eq!(result.hl1, 3, "HL1 should be 1 + 2");
+        assert_eq!(result.hh1, 4, "HH1 should be 3 + 1");
+    }
+
+    #[test]
+    fn test_quant_levels_sub() {
+        let a = QuantLevels {
+            ll3: 10,
+            lh3: 12,
+            hl3: 8,
+            hh3: 15,
+            lh2: 9,
+            hl2: 7,
+            hh2: 11,
+            lh1: 6,
+            hl1: 5,
+            hh1: 8,
+        };
+
+        let b = QuantLevels {
+            ll3: 2,
+            lh3: 3,
+            hl3: 1,
+            hh3: 4,
+            lh2: 1,
+            hl2: 2,
+            hh2: 3,
+            lh1: 1,
+            hl1: 2,
+            hh1: 1,
+        };
+
+        let result = a.sub(&b);
+        assert_eq!(result.ll3, 8, "LL3 should be 10 - 2");
+        assert_eq!(result.lh3, 9, "LH3 should be 12 - 3");
+        assert_eq!(result.hl3, 7, "HL3 should be 8 - 1");
+        assert_eq!(result.hh3, 11, "HH3 should be 15 - 4");
+        assert_eq!(result.lh2, 8, "LH2 should be 9 - 1");
+        assert_eq!(result.hl2, 5, "HL2 should be 7 - 2");
+        assert_eq!(result.hh2, 8, "HH2 should be 11 - 3");
+        assert_eq!(result.lh1, 5, "LH1 should be 6 - 1");
+        assert_eq!(result.hl1, 3, "HL1 should be 5 - 2");
+        assert_eq!(result.hh1, 7, "HH1 should be 8 - 1");
+    }
+
+    #[test]
+    fn test_quant_levels_sub_scalar() {
+        let a = QuantLevels {
+            ll3: 10,
+            lh3: 12,
+            hl3: 8,
+            hh3: 15,
+            lh2: 9,
+            hl2: 7,
+            hh2: 11,
+            lh1: 6,
+            hl1: 5,
+            hh1: 8,
+        };
+
+        let result = a.sub_scalar(3);
+        assert_eq!(result.ll3, 7, "LL3 should be 10 - 3");
+        assert_eq!(result.lh3, 9, "LH3 should be 12 - 3");
+        assert_eq!(result.hl3, 5, "HL3 should be 8 - 3");
+        assert_eq!(result.hh3, 12, "HH3 should be 15 - 3");
+        assert_eq!(result.lh2, 6, "LH2 should be 9 - 3");
+        assert_eq!(result.hl2, 4, "HL2 should be 7 - 3");
+        assert_eq!(result.hh2, 8, "HH2 should be 11 - 3");
+        assert_eq!(result.lh1, 3, "LH1 should be 6 - 3");
+        assert_eq!(result.hl1, 2, "HL1 should be 5 - 3");
+        assert_eq!(result.hh1, 5, "HH1 should be 8 - 3");
+    }
+
+    #[test]
+    fn test_apply_quant_shift_standard() {
+        // Create a buffer with known values
+        let mut buffer = vec![0i16; 4096];
+        
+        // Set some test values in different subbands based on actual layout
+        // HL1: offset 0, len 1024
+        buffer[0] = 16;
+        buffer[100] = 32;
+        
+        // LH1: offset 1024, len 1024
+        buffer[1024] = 8;
+        buffer[1025] = 16;
+        
+        // LL3: offset 4032, len 64
+        buffer[4032] = 4;
+        buffer[4033] = 8;
+
+        let quant = QuantLevels {
+            hl1: 1, // shift by 1
+            lh1: 2, // shift by 2
+            hh1: 0, // no shift
+            hl2: 0,
+            lh2: 0,
+            hh2: 0,
+            hl3: 0,
+            lh3: 0,
+            hh3: 0,
+            ll3: 3, // shift by 3
+        };
+
+        apply_quant_shift_standard(&mut buffer, &quant);
+
+        // Verify shifts were applied correctly
+        assert_eq!(buffer[0], 16 << 1, "HL1 should be shifted left by 1");
+        assert_eq!(buffer[100], 32 << 1, "HL1 should be shifted left by 1");
+        
+        assert_eq!(buffer[1024], 8 << 2, "LH1 should be shifted left by 2");
+        assert_eq!(buffer[1025], 16 << 2, "LH1 should be shifted left by 2");
+        
+        assert_eq!(buffer[4032], 4 << 3, "LL3 should be shifted left by 3");
+        assert_eq!(buffer[4033], 8 << 3, "LL3 should be shifted left by 3");
+    }
+
+    #[test]
+    fn test_apply_quant_shift_extrapolate() {
+        // Create a buffer with known values
+        let mut buffer = vec![0i16; 4096];
+        
+        // Set some test values in different subbands for extrapolate layout
+        // HL1: offset 0, len 1023
+        buffer[0] = 16;
+        buffer[100] = 32;
+        
+        // LL3: offset 4015, len 81 (extrapolate has larger LL3)
+        buffer[4015] = 4;
+        buffer[4016] = 8;
+        buffer[4095] = 12; // last coefficient
+
+        let quant = QuantLevels {
+            hl1: 1, // shift by 1
+            lh1: 0,
+            hh1: 0,
+            hl2: 0,
+            lh2: 0,
+            hh2: 0,
+            hl3: 0,
+            lh3: 0,
+            hh3: 0,
+            ll3: 2, // shift by 2
+        };
+
+        apply_quant_shift_extrapolate(&mut buffer, &quant);
+
+        // Verify shifts were applied correctly
+        assert_eq!(buffer[0], 16 << 1, "HL1 should be shifted left by 1");
+        assert_eq!(buffer[100], 32 << 1, "HL1 should be shifted left by 1");
+        
+        assert_eq!(buffer[4015], 4 << 2, "LL3 should be shifted left by 2");
+        assert_eq!(buffer[4016], 8 << 2, "LL3 should be shifted left by 2");
+        assert_eq!(buffer[4095], 12 << 2, "LL3 last coeff should be shifted");
+    }
+
+    #[test]
+    fn test_subband_metadata_standard() {
+        // Verify STANDARD_SUBBANDS metadata is correct
+        let total_coeffs: usize = STANDARD_SUBBANDS.iter().map(|m| m.len).sum();
+        assert_eq!(total_coeffs, 4096, "Standard layout should have 4096 coefficients");
+
+        // Check HL1 is first
+        assert_eq!(STANDARD_SUBBANDS[0].offset, 0, "HL1 should start at 0");
+        assert_eq!(STANDARD_SUBBANDS[0].len, 1024, "HL1 should have 1024 coeffs");
+
+        // Check LL3 is last and 64 coefficients
+        let ll3 = STANDARD_SUBBANDS.iter().find(|m| matches!(m.band, Band::Ll3)).unwrap();
+        assert_eq!(ll3.len, 64, "LL3 should have 64 coeffs in standard layout");
+        assert_eq!(ll3.offset, 4032, "LL3 should start at offset 4032");
+    }
+
+    #[test]
+    fn test_subband_metadata_extrapolate() {
+        // Verify EXTRAPOLATE_SUBBANDS metadata is correct
+        let total_coeffs: usize = EXTRAPOLATE_SUBBANDS.iter().map(|m| m.len).sum();
+        assert_eq!(total_coeffs, 4096, "Extrapolate layout should have 4096 coefficients");
+
+        // Check HL1 is first
+        assert_eq!(EXTRAPOLATE_SUBBANDS[0].offset, 0, "HL1 should start at 0");
+        assert_eq!(EXTRAPOLATE_SUBBANDS[0].len, 1023, "HL1 should have 1023 coeffs in extrapolate");
+
+        // Check LL3 is last and 81 coefficients (larger than standard)
+        let ll3 = EXTRAPOLATE_SUBBANDS.iter().find(|m| matches!(m.band, Band::Ll3)).unwrap();
+        assert_eq!(ll3.len, 81, "LL3 should have 81 coeffs in extrapolate layout");
+        assert_eq!(ll3.offset, 4015, "LL3 should start at offset 4015");
+    }
+
+    #[test]
+    fn test_rfx_differential_decode_standard() {
+        // Test differential decoding for standard layout (LL3 = 64 coeffs)
+        let mut buffer = vec![0i16; 4096];
+        
+        // Set LL3 subband with differential values
+        // LL3 starts at offset 4032, length 64
+        buffer[4032] = 10; // First value
+        buffer[4033] = 5;  // Diff from previous
+        buffer[4034] = -3; // Diff from previous
+        buffer[4035] = 7;  // Diff from previous
+
+        subband_reconstruction::decode(&mut buffer[4032..]);
+
+        // After differential decode:
+        // buffer[4032] = 10 (unchanged)
+        // buffer[4033] = 10 + 5 = 15
+        // buffer[4034] = 15 + (-3) = 12
+        // buffer[4035] = 12 + 7 = 19
+        assert_eq!(buffer[4032], 10, "First LL3 value unchanged");
+        assert_eq!(buffer[4033], 15, "Second LL3 value accumulated");
+        assert_eq!(buffer[4034], 12, "Third LL3 value accumulated");
+        assert_eq!(buffer[4035], 19, "Fourth LL3 value accumulated");
+    }
+
+    #[test]
+    fn test_rfx_differential_decode_extrapolate() {
+        // Test differential decoding for extrapolate layout (LL3 = 81 coeffs)
+        let mut buffer = vec![0i16; 4096];
+        
+        // Set LL3 subband with differential values
+        // LL3 starts at offset 4015, length 81
+        buffer[4015] = 20; // First value
+        buffer[4016] = 8;  // Diff from previous
+        buffer[4017] = -5; // Diff from previous
+        buffer[4018] = 10; // Diff from previous
+
+        rfx_differential_decode_extrapolate(&mut buffer);
+
+        // After differential decode:
+        // buffer[4015] = 20 (unchanged)
+        // buffer[4016] = 20 + 8 = 28
+        // buffer[4017] = 28 + (-5) = 23
+        // buffer[4018] = 23 + 10 = 33
+        assert_eq!(buffer[4015], 20, "First LL3 value unchanged");
+        assert_eq!(buffer[4016], 28, "Second LL3 value accumulated");
+        assert_eq!(buffer[4017], 23, "Third LL3 value accumulated");
+        assert_eq!(buffer[4018], 33, "Fourth LL3 value accumulated");
+    }
+
+    #[test]
+    fn test_progressive_codec_quant_quality() {
+        let data = [
+            0x64, // quality = 100
+            0x00, 0x00, 0x00, 0x00, 0x00, // Y quant (all zeros)
+            0x00, 0x00, 0x00, 0x00, 0x00, // Cb quant (all zeros)
+            0x00, 0x00, 0x00, 0x00, 0x00, // Cr quant (all zeros)
+        ];
+
+        let mut slice = data.as_slice();
+        let quant = ProgressiveCodecQuant::parse(&mut slice).expect("Should parse quality 100");
+        assert_eq!(quant.quality, 100, "Quality should be 100");
+
+        // Test with different quality value
+        let data2 = [
+            0x32, // quality = 50
+            0x12, 0x34, 0x56, 0x78, 0x9A, // Y quant
+            0x00, 0x00, 0x00, 0x00, 0x00, // Cb quant
+            0x00, 0x00, 0x00, 0x00, 0x00, // Cr quant
+        ];
+
+        let mut slice2 = data2.as_slice();
+        let quant2 = ProgressiveCodecQuant::parse(&mut slice2).expect("Should parse quality 50");
+        assert_eq!(quant2.quality, 50, "Quality should be 50");
+    }
+
+    #[test]
+    fn test_block_type_all_variants() {
+        // Test all valid block types
+        assert_eq!(BlockType::from_u16(0xCCC0).unwrap(), BlockType::Sync);
+        assert_eq!(BlockType::from_u16(0xCCC1).unwrap(), BlockType::FrameBegin);
+        assert_eq!(BlockType::from_u16(0xCCC2).unwrap(), BlockType::FrameEnd);
+        assert_eq!(BlockType::from_u16(0xCCC3).unwrap(), BlockType::Context);
+        assert_eq!(BlockType::from_u16(0xCCC4).unwrap(), BlockType::Region);
+        assert_eq!(BlockType::from_u16(0xCCC5).unwrap(), BlockType::TileSimple);
+        assert_eq!(BlockType::from_u16(0xCCC6).unwrap(), BlockType::TileFirst);
+        assert_eq!(BlockType::from_u16(0xCCC7).unwrap(), BlockType::TileUpgrade);
+
+        // Test invalid block types
+        assert!(BlockType::from_u16(0x0000).is_err(), "0x0000 should be invalid");
+        assert!(BlockType::from_u16(0xFFFF).is_err(), "0xFFFF should be invalid");
+        assert!(BlockType::from_u16(0xCCBF).is_err(), "0xCCBF should be invalid");
+        assert!(BlockType::from_u16(0xCCC8).is_err(), "0xCCC8 should be invalid");
+    }
+
+    #[test]
+    fn test_progressive_magic_constant() {
+        // Verify the PROGRESSIVE_MAGIC constant is correct
+        assert_eq!(PROGRESSIVE_MAGIC, 0xCACCACCA, "Magic should be 0xCACCACCA");
+    }
+
+    #[test]
+    fn test_region_flags() {
+        // Test RFX_TILE_DIFFERENCE flag
+        const RFX_TILE_DIFFERENCE: u8 = 0x01;
+        let flags_with_diff = RFX_TILE_DIFFERENCE;
+        assert_eq!(
+            flags_with_diff & RFX_TILE_DIFFERENCE,
+            RFX_TILE_DIFFERENCE,
+            "Flag should be set"
+        );
+
+        let flags_without_diff = 0x00;
+        assert_eq!(
+            flags_without_diff & RFX_TILE_DIFFERENCE,
+            0,
+            "Flag should not be set"
+        );
+    }
+
+    #[test]
+    fn test_context_flags_extrapolate() {
+        // Test RFX_DWT_REDUCE_EXTRAPOLATE flag (bit 0 of flags)
+        const RFX_DWT_REDUCE_EXTRAPOLATE: u8 = 0x01;
+        
+        let flags_with_extrapolate = RFX_DWT_REDUCE_EXTRAPOLATE;
+        assert_eq!(
+            flags_with_extrapolate & RFX_DWT_REDUCE_EXTRAPOLATE,
+            RFX_DWT_REDUCE_EXTRAPOLATE,
+            "Extrapolate flag should be set"
+        );
+
+        let flags_without_extrapolate = 0x00;
+        assert_eq!(
+            flags_without_extrapolate & RFX_DWT_REDUCE_EXTRAPOLATE,
+            0,
+            "Extrapolate flag should not be set"
+        );
+    }
+
+    // ========================================================================
+    // Phase 3: Integration & Error Handling Tests
+    // ========================================================================
+
+    #[test]
+    fn test_progressive_decoder_creation() {
+        let decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        // Should create successfully with no surfaces
+        assert!(decoder.surfaces.is_empty(), "New decoder should have no surfaces");
+    }
+
+    #[test]
+    fn test_progressive_decoder_add_remove_surface() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        
+        // Add a surface
+        decoder.reset_surface(1, 1024, 768);
+        assert!(decoder.surfaces.contains_key(&1), "Surface 1 should exist");
+        
+        // Add another surface
+        decoder.reset_surface(2, 800, 600);
+        assert!(decoder.surfaces.contains_key(&2), "Surface 2 should exist");
+        
+        // Remove surface
+        decoder.remove_surface(1);
+        assert!(!decoder.surfaces.contains_key(&1), "Surface 1 should be removed");
+        assert!(decoder.surfaces.contains_key(&2), "Surface 2 should still exist");
+    }
+
+    #[test]
+    fn test_decode_unknown_surface() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        
+        // Try to decode on non-existent surface
+        let data = [
+            0xC0, 0xCC, // SYNC block type
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12
+            0xCA, 0xAC, 0xCC, 0xCA, // magic
+            0x00, 0x01, // version
+        ];
+        
+        let result = decoder.decode_surface_update(999, 0, &data);
+        assert!(result.is_err(), "Should fail with unknown surface");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::UnknownSurface(999)),
+            "Should be UnknownSurface error"
+        );
+    }
+
+    #[test]
+    fn test_decode_sync_block_only() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // Minimal valid stream with just SYNC block
+        let data = [
+            0xC0, 0xCC, // SYNC block type
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12
+            0xCA, 0xAC, 0xCC, 0xCA, // magic (little-endian)
+            0x00, 0x01, // version = 0x0100
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_ok(), "Should parse SYNC block successfully");
+        
+        let update = result.unwrap();
+        assert_eq!(update.surface_id, 1, "Surface ID should match");
+        assert_eq!(update.tiles.len(), 0, "Should have no tiles");
+    }
+
+    #[test]
+    fn test_decode_sync_unsupported_version() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // SYNC block with old version
+        let data = [
+            0xC0, 0xCC, // SYNC block type
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12
+            0xCA, 0xAC, 0xCC, 0xCA, // magic
+            0x00, 0x00, // version = 0x0000 (unsupported)
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_err(), "Should fail with unsupported version");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::UnsupportedVersion(0)),
+            "Should be UnsupportedVersion error"
+        );
+    }
+
+    #[test]
+    fn test_decode_sync_and_context() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // SYNC + CONTEXT blocks
+        let data = [
+            // SYNC block
+            0xC0, 0xCC, // block type
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12
+            0xCA, 0xAC, 0xCC, 0xCA, // magic
+            0x00, 0x01, // version
+            
+            // CONTEXT block
+            0xC3, 0xCC, // block type = CONTEXT (0xCCC3)
+            0x0A, 0x00, 0x00, 0x00, // blockLen = 10
+            0x01, // contextId
+            0x40, // tileSize = 64
+            0x00, 0x00, // flags = 0 (standard DWT)
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_ok(), "Should parse SYNC + CONTEXT successfully");
+        
+        // Context flags should be stored
+        assert_eq!(decoder.context_flags, 0, "Context flags should be 0");
+    }
+
+    #[test]
+    fn test_decode_context_with_extrapolate_flag() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // CONTEXT block with extrapolate flag (flags is 1 byte, not 2)
+        let data = [
+            0xC3, 0xCC, // block type = CONTEXT
+            0x0A, 0x00, 0x00, 0x00, // blockLen = 10
+            0x01, // contextId
+            0x40, 0x00, // tileSize = 64 (little-endian)
+            0x01, // flags = 0x01 (RFX_DWT_REDUCE_EXTRAPOLATE)
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_ok(), "Should parse CONTEXT with extrapolate flag");
+        
+        // Context flags should be stored
+        assert_eq!(decoder.context_flags, 1, "Context flags should be 1");
+    }
+
+    #[test]
+    fn test_decode_frame_begin_and_end() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // FRAME_BEGIN + FRAME_END
+        let data = [
+            // FRAME_BEGIN
+            0xC1, 0xCC, // block type = FRAME_BEGIN (0xCCC1)
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12
+            0x2A, 0x00, 0x00, 0x00, // frameIndex = 42
+            0x01, 0x00, // regionCount = 1
+            
+            // FRAME_END
+            0xC2, 0xCC, // block type = FRAME_END (0xCCC2)
+            0x06, 0x00, 0x00, 0x00, // blockLen = 6
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_ok(), "Should parse FRAME_BEGIN + FRAME_END");
+        
+        let update = result.unwrap();
+        assert_eq!(update.frame_index, 42, "Frame index should be 42");
+    }
+
+    #[test]
+    fn test_decode_truncated_block_header() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // Truncated block header (only 4 bytes instead of 6)
+        let data = [
+            0xC0, 0xCC, // block type
+            0x0C, 0x00, // incomplete length field
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_err(), "Should fail with truncated header");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_decode_truncated_block_body() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // Block header claims 12 bytes, but only 6 bytes of body provided
+        let data = [
+            0xC0, 0xCC, // block type = SYNC
+            0x0C, 0x00, 0x00, 0x00, // blockLen = 12 (but only 6 bytes follow)
+            0xCA, 0xAC, 0xCC, 0xCA, // magic (4 bytes)
+            0x00, // only 1 byte of version instead of 2
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_err(), "Should fail with truncated body");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Truncated(_)),
+            "Should be Truncated error"
+        );
+    }
+
+    #[test]
+    fn test_decode_invalid_block_type() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // Invalid block type (0xCCBF, before SYNC range)
+        let data = [
+            0xBF, 0xCC, // invalid block type
+            0x06, 0x00, 0x00, 0x00, // blockLen = 6
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_err(), "Should fail with invalid block type");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Invalid(_)),
+            "Should be Invalid error"
+        );
+    }
+
+    #[test]
+    fn test_decode_multiple_blocks_sequence() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        // SYNC + CONTEXT + FRAME_BEGIN + FRAME_END sequence
+        let data = [
+            // SYNC
+            0xC0, 0xCC,
+            0x0C, 0x00, 0x00, 0x00,
+            0xCA, 0xAC, 0xCC, 0xCA,
+            0x00, 0x01,
+            
+            // CONTEXT
+            0xC3, 0xCC,
+            0x0A, 0x00, 0x00, 0x00,
+            0x01,
+            0x40,
+            0x00, 0x00,
+            
+            // FRAME_BEGIN
+            0xC1, 0xCC,
+            0x0C, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+            
+            // FRAME_END
+            0xC2, 0xCC,
+            0x06, 0x00, 0x00, 0x00,
+        ];
+        
+        let result = decoder.decode_surface_update(1, 0, &data);
+        assert!(result.is_ok(), "Should parse complete frame sequence");
+        
+        let update = result.unwrap();
+        assert_eq!(update.frame_index, 1, "Frame index should be 1");
+        assert_eq!(update.surface_id, 1, "Surface ID should be 1");
+    }
+
+    #[test]
+    fn test_decode_empty_data() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        decoder.reset_surface(1, 1024, 768);
+        
+        let data: &[u8] = &[];
+        let result = decoder.decode_surface_update(1, 0, data);
+        
+        // Empty data should succeed with no tiles
+        assert!(result.is_ok(), "Empty data should be valid");
+        let update = result.unwrap();
+        assert_eq!(update.tiles.len(), 0, "Should have no tiles");
+    }
+
+    #[test]
+    fn test_block_header_minimum_length_check() {
+        // Test that blockLen must be at least 6
+        let data = [
+            0xC0, 0xCC, // block type = SYNC
+            0x05, 0x00, 0x00, 0x00, // blockLen = 5 (too short!)
+        ];
+        
+        let mut slice = &data[..];
+        let result = BlockHeader::parse(&mut slice);
+        assert!(result.is_err(), "Should reject blockLen < 6");
+        assert!(
+            matches!(result.unwrap_err(), ProgressiveError::Invalid(_)),
+            "Should be Invalid error for short length"
+        );
+    }
+
+    #[test]
+    fn test_surface_state_reset() {
+        let mut decoder = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        
+        // Create surface with one size
+        decoder.reset_surface(1, 800, 600);
+        assert!(decoder.surfaces.contains_key(&1), "Surface 1 should exist");
+        
+        // Reset same surface with different size
+        decoder.reset_surface(1, 1024, 768);
+        assert!(decoder.surfaces.contains_key(&1), "Surface 1 should still exist");
+        
+        // Surface should be reset - tiles HashMap starts empty and grows on demand
+        let surface = decoder.surfaces.get(&1).unwrap();
+        assert_eq!(surface.grid_width, 16, "Should have 16 tile columns for 1024 width");
+        assert_eq!(surface.grid_height, 12, "Should have 12 tile rows for 768 height");
+        assert_eq!(surface.width, 1024, "Width should be 1024");
+        assert_eq!(surface.height, 768, "Height should be 768");
+    }
+
+    #[test]
+    fn test_entropy_algorithm_storage() {
+        let decoder_rlgr1 = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1);
+        assert!(
+            matches!(decoder_rlgr1.entropy, EntropyAlgorithm::Rlgr1),
+            "Should store Rlgr1"
+        );
+        
+        let decoder_rlgr3 = ProgressiveDecoder::new(EntropyAlgorithm::Rlgr3);
+        assert!(
+            matches!(decoder_rlgr3.entropy, EntropyAlgorithm::Rlgr3),
+            "Should store Rlgr3"
+        );
+    }
 }
