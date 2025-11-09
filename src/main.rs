@@ -12,10 +12,12 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 mod config;
+mod core_input_channel;
 mod dtls_udp;
 mod gfx;
 mod gfx_channel;
 mod h264_codec_caps;
+mod mouse_cursor_channel;
 mod rdp;
 mod udp_gfx;
 mod udp_transport;
