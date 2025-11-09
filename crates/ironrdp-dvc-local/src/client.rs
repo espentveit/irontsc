@@ -106,7 +106,7 @@ impl DrdynvcClient {
         // Per MS-RDPEDYC §2.2.1.2, client MUST respond with the version level it supports
         // We support up to V3, but must negotiate with server's requested version
         const CLIENT_MAX_VERSION: CapsVersion = CapsVersion::V3;
-
+        
         // Negotiate: use minimum of client max and server requested
         let negotiated_version = match (CLIENT_MAX_VERSION, server_version) {
             (CapsVersion::V3, CapsVersion::V3) => CapsVersion::V3,
@@ -117,7 +117,7 @@ impl DrdynvcClient {
             (CapsVersion::V2, CapsVersion::V1) => CapsVersion::V1,
             (CapsVersion::V1, _) => CapsVersion::V1,
         };
-
+        
         let caps_response =
             DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(negotiated_version));
         debug!(
@@ -127,7 +127,7 @@ impl DrdynvcClient {
         self.cap_handshake_done = true;
         SvcMessage::from(caps_response)
     }
-
+    
     /// Extract the version from a CapabilitiesRequestPdu
     fn get_caps_version(caps_request: &crate::pdu::CapabilitiesRequestPdu) -> CapsVersion {
         match caps_request {
