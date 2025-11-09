@@ -21,6 +21,15 @@ use crate::{encode_dvc_messages, DvcProcessor, DynamicChannelSet, DynamicVirtual
 
 pub trait DvcClientProcessor: DvcProcessor {}
 
+/// Format tunnel type as a human-readable string
+fn tunnel_type_name(tunnel_type: u32) -> &'static str {
+    match tunnel_type {
+        0x00000001 => "TUNNELTYPE_UDPFECR (Reliable UDP)",
+        0x00000003 => "TUNNELTYPE_UDPFECL (Lossy UDP)",
+        _ => "Unknown",
+    }
+}
+
 /// DRDYNVC Static Virtual Channel (the Remote Desktop Protocol: Dynamic Virtual Channel Extension)
 ///
 /// It adds support for dynamic virtual channels (DVC).
@@ -97,7 +106,11 @@ impl DrdynvcClient {
     /// This should be called when the UDP transport initialization completes successfully.
     /// Returns any deferred CREATE requests that should now be processed.
     pub fn register_available_tunnel(&mut self, tunnel_type: u32) -> Result<Vec<SvcMessage>, pdu::PduError> {
-        debug!("Registering available UDP tunnel type: 0x{:08X}", tunnel_type);
+        debug!(
+            "Registering available UDP tunnel type: 0x{:08X} ({})",
+            tunnel_type,
+            tunnel_type_name(tunnel_type)
+        );
         self.available_udp_tunnels.insert(tunnel_type);
         
         // No deferred CREATEs to process - server will retry CREATE requests over UDP
@@ -106,7 +119,11 @@ impl DrdynvcClient {
 
     /// Unregister a UDP tunnel (e.g., if connection fails)
     pub fn unregister_available_tunnel(&mut self, tunnel_type: u32) {
-        debug!("Unregistering UDP tunnel type: 0x{:08X}", tunnel_type);
+        debug!(
+            "Unregistering UDP tunnel type: 0x{:08X} ({})",
+            tunnel_type,
+            tunnel_type_name(tunnel_type)
+        );
         self.available_udp_tunnels.remove(&tunnel_type);
     }
 
@@ -228,8 +245,9 @@ impl DrdynvcClient {
                 // Store the first tunnel type for notification
                 if let Some(&tunnel_type) = response.tunnels_to_switch.first() {
                     debug!(
-                        "Server confirmed soft-sync for tunnel_type=0x{:08X}",
-                        tunnel_type
+                        "Server confirmed soft-sync for tunnel_type=0x{:08X} ({})",
+                        tunnel_type,
+                        tunnel_type_name(tunnel_type)
                     );
                     self.soft_sync_completed_tunnel = Some(tunnel_type);
                 }
@@ -337,13 +355,19 @@ impl DrdynvcClient {
 
         for tunnel in &request.tunnels {
             debug!(
-                "   Tunnel type=0x{:08X}, {} channel(s)",
+                "   Tunnel type=0x{:08X} ({}), {} channel(s)",
                 tunnel.tunnel_type,
+                tunnel_type_name(tunnel.tunnel_type),
                 tunnel.channel_ids.len()
             );
             for &channel_id in &tunnel.channel_ids {
                 // Mark this channel as using UDP with this tunnel type
-                debug!("   Marking channel_id={} for UDP tunnel 0x{:08X}", channel_id, tunnel.tunnel_type);
+                debug!(
+                    "   Marking channel_id={} for UDP tunnel 0x{:08X} ({})",
+                    channel_id,
+                    tunnel.tunnel_type,
+                    tunnel_type_name(tunnel.tunnel_type)
+                );
                 self.udp_channels.insert(channel_id, tunnel.tunnel_type);
                 
                 if let Some(channel) = self.dynamic_channels.get_by_channel_id_mut(channel_id) {
@@ -351,8 +375,9 @@ impl DrdynvcClient {
                     let _ = channel.on_soft_sync(tunnel.tunnel_type);
                 } else {
                     debug!(
-                        "SoftSync tunnel references unknown channel_id={channel_id} (tunnel_type=0x{:08X})",
-                        tunnel.tunnel_type
+                        "SoftSync tunnel references unknown channel_id={channel_id} (tunnel_type=0x{:08X} / {})",
+                        tunnel.tunnel_type,
+                        tunnel_type_name(tunnel.tunnel_type)
                     );
                 }
             }

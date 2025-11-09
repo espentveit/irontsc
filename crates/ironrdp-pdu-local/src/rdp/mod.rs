@@ -27,6 +27,7 @@ pub mod session_info;
 pub mod suppress_output;
 pub mod tunnel;
 pub mod vc;
+pub mod auto_detect;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientInfoPdu {
