@@ -338,6 +338,42 @@ async fn connect(
         );
     }
 
+    // Add Display Control channel for dynamic resolution changes
+    {
+        use ironrdp_displaycontrol::client::DisplayControlClient;
+        
+        info!("Registering Display Control channel (Microsoft::Windows::RDS::DisplayControl)");
+        
+        let display_control = DisplayControlClient::new(Box::new(|_caps| {
+            // Capabilities received from server - we could log/process these if needed
+            Ok(Vec::new())
+        }));
+        
+        drdynvc = drdynvc.with_dynamic_channel(display_control);
+    }
+
+    // Register stub handlers for channels we need to accept but don't process
+    // This prevents CreationStatus::NO_LISTENER errors that break the graphics pipeline
+    {
+        use crate::stub_dvc::StubDvcProcessor;
+        
+        info!("Registering stub handlers for protocol compliance...");
+        
+        // Input-related channels
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::CoreInput"));
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::MouseCursor"));
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
+        
+        // Other protocol channels
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Notify"));
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("rdpdr"));
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("cliprdr"));
+        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("RDCamera_Device_Enumerator"));
+        
+        info!("Stub handlers registered: CoreInput, MouseCursor, Input, TextInput, Notify, rdpdr, cliprdr, RDCamera");
+    }
+
     // TODO: DVC proxies not yet implemented
     // Instantiate all DVC proxies
     // for proxy in config.dvc_pipe_proxies.iter() {
