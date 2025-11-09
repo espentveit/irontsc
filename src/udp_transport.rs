@@ -1371,7 +1371,7 @@ impl UdpTransportManager {
     /// Note: Channel 1008 also receives heartbeat PDUs (MS-RDPBCGR §2.2.16.1) which
     /// have SEC_HEARTBEAT (0x4000) flag. These must be filtered out.
     async fn process_tunnel_data(&mut self, data: &[u8]) -> Result<()> {
-        info!(
+        trace!(
             "📥 Received tunnel data from TCP channel ({} bytes)",
             data.len()
         );
