@@ -999,12 +999,9 @@ impl UdpTransportManager {
                     // If we get here, handshake is complete or not needed
                     // Try to decrypt if we have TLS/DTLS
                     if let Some(tls) = self.tls_socket.as_mut() {
-                        // Check if this is a duplicate/retransmitted TLS handshake record
-                        // TLS record type 22 = Handshake (ServerHello, etc.)
-                        if payload.len() > 0 && payload[0] == 22 {
-                            debug!("📥 Ignoring duplicate TLS handshake record (type 22) after handshake complete");
-                            continue;
-                        }
+                        // Once handshake is complete, ALL payloads are encrypted application data
+                        // We CANNOT inspect payload[0] to determine type - it's encrypted!
+                        // The TLS library will handle retransmissions internally via SSL_read
                         
                         debug!("🔐 Attempting TLS decrypt on {} byte payload (first bytes: {:02x?})", 
                                payload.len(), &payload[..payload.len().min(16)]);
@@ -1028,12 +1025,9 @@ impl UdpTransportManager {
                             }
                         }
                     } else if let Some(dtls) = self.dtls_socket.as_mut() {
-                        // Check if this is a duplicate/retransmitted DTLS handshake record  
-                        // DTLS record type 22 = Handshake (ServerHello, etc.)
-                        if payload.len() > 13 && payload[13] == 22 {
-                            debug!("📥 Ignoring duplicate DTLS handshake record (type 22) after handshake complete");
-                            continue;
-                        }
+                        // Once handshake is complete, ALL payloads are encrypted application data
+                        // We CANNOT inspect payload bytes to determine type - it's encrypted!
+                        // The DTLS library will handle retransmissions internally
                         
                         match dtls.decrypt(&payload) {
                             Ok(decrypted_payloads) => {
