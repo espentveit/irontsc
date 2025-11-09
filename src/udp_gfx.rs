@@ -55,10 +55,7 @@ impl UdpGfxChannel {
                     // Handshake complete is good, but wait for Connected event
                 }
                 UdpTransportEvent::TunnelEstablished { request_id } => {
-                    info!(
-                        "🔐 MS-RDPEMT tunnel established (request_id={})",
-                        request_id
-                    );
+                    info!("🔐 MS-RDPEMT tunnel established (request_id={})", request_id);
                     // Tunnel establishment is good, but wait for Connected event
                 }
                 UdpTransportEvent::SoftSyncCompleted { .. } => {
@@ -69,10 +66,7 @@ impl UdpGfxChannel {
                     // DVC data from tunnel - not relevant here, handled in main RDP loop
                 }
                 UdpTransportEvent::Disconnected { request_id, reason } => {
-                    warn!(
-                        "UDP connection failed (request_id={}): {}",
-                        request_id, reason
-                    );
+                    warn!("UDP connection failed (request_id={}): {}", request_id, reason);
                     anyhow::bail!("UDP connection failed: {}", reason);
                 }
                 UdpTransportEvent::DataReceived { .. } => {

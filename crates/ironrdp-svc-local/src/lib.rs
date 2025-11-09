@@ -105,11 +105,6 @@ impl SvcMessage {
     pub fn pdu_name(&self) -> &'static str {
         self.pdu.name()
     }
-
-    /// Encode the underlying payload without wrapping it in static channel headers.
-    pub fn encode_payload(&self) -> EncodeResult<Vec<u8>> {
-        ironrdp_core::encode_vec(self.pdu.as_ref())
-    }
 }
 
 impl<T> From<T> for SvcMessage

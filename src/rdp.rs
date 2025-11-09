@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use ironrdp::cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
 use ironrdp::cliprdr::pdu::FileDescriptor;
 use ironrdp::cliprdr::pdu::{
@@ -17,7 +17,6 @@ use ironrdp::connector::{ConnectionResult, ConnectorResult};
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::graphics::pointer::DecodedPointer;
-use ironrdp::pdu::PduResult;
 use ironrdp::pdu::basic_output::orders::DrawingOrder;
 use ironrdp::pdu::geometry::Rectangle;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
@@ -25,10 +24,11 @@ use ironrdp::pdu::rdp::headers::BasicSecurityHeaderFlags;
 use ironrdp::pdu::rdp::multitransport::{
     InitiateMultitransportRequest, InitiateMultitransportResponse, MultitransportProtocol,
 };
+use ironrdp::pdu::PduResult;
 use ironrdp::session::desktop_composition::DesktopCompositionHandler;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
-    ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult, fast_path,
+    fast_path, ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult,
 };
 use ironrdp::svc::{SvcMessage, SvcProcessor};
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
@@ -38,11 +38,11 @@ use ironrdp_core::{Encode, IntoOwned, WriteBuf, WriteCursor};
 use ironrdp_pdu::nego;
 use ironrdp_rdpsnd_native::cpal;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
-use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
+use ironrdp_tokio::{single_sequence_step_read, split_tokio_framed, FramedWrite};
 use rdpdr::NoopRdpdrBackend;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpStream, lookup_host};
+use tokio::net::{lookup_host, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
@@ -1276,48 +1276,6 @@ impl Drop for ActiveUdpTunnel {
     }
 }
 
-fn try_send_udp_svc_messages(
-    tunnel: &mut ActiveUdpTunnel,
-    request_id: u32,
-    svc_messages: &[SvcMessage],
-) -> SessionResult<bool> {
-    let mut sent_any = false;
-
-    for (index, svc_msg) in svc_messages.iter().enumerate() {
-        let payload = svc_msg
-            .encode_payload()
-            .map_err(|e| session::custom_err!("encode svc payload", e))?;
-
-        if payload.is_empty() {
-            trace!(
-                request_id,
-                index, "Skipping empty DVC payload for UDP tunnel"
-            );
-            continue;
-        }
-
-        debug!(
-            request_id,
-            index,
-            payload_len = payload.len(),
-            pdu = svc_msg.pdu_name(),
-            "📤 Forwarding DVC payload via UDP tunnel"
-        );
-
-        tunnel
-            .command_tx
-            .send(UdpTransportCommand::SendDvcData {
-                request_id,
-                data: payload,
-            })
-            .map_err(|e| session::custom_err!("udp dvc send", e))?;
-
-        sent_any = true;
-    }
-
-    Ok(sent_any)
-}
-
 fn detect_multitransport_request(
     action: ironrdp::pdu::Action,
     payload: &[u8],
@@ -1654,8 +1612,7 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut pending_initial_resize: Option<(u16, u16, u32, Option<(u32, u32)>)> = None;
 
     // Track active UDP transport tunnel (currently only one tunnel is supported)
-    let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> =
-        std::collections::HashMap::new();
+    let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> = std::collections::HashMap::new();
 
     // **CRITICAL**: Automatically create UDP tunnel if multitransport was negotiated during connection
     // Per MS-RDPEMT spec, the InitiateMultitransportRequest is sent during CapabilitiesExchange,
@@ -1903,7 +1860,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         .values_mut()
                         .map(|tunnel| Box::pin(tunnel.event_rx.recv()))
                         .collect();
-
+                    
                     if futures.is_empty() {
                         pending::<Option<UdpTransportEvent>>().await
                     } else {
@@ -1932,7 +1889,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                             tunnel.tunnel_established_time = Some(std::time::Instant::now());
                         }
                         info!("🔐 UDP tunnel established (request_id={}, MS-RDPEMT)", request_id);
-
+                        
                         // NOW send MultitransportResponse on TCP channel (per MS-RDPBCGR spec)
                         // This must be sent AFTER the tunnel is fully established (TunnelCreateResponse received)
                         // Sending it too early (e.g., after TLS handshake) causes server-side RDP_SEC error 0x8007139F
@@ -1945,7 +1902,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 initiator_id: tunnel.initiator_id,
                                 channel_id: tunnel.channel_id,
                             };
-
+                            
                             match encode_multitransport_response_frame(request_info, message_channel_id) {
                                 Ok(frame) => {
                                     info!(
@@ -1964,7 +1921,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         } else {
                             warn!("⚠️  TunnelEstablished received but tunnel info not found for request_id={}", request_id);
                         }
-
+                        
                         info!("⏳ Awaiting Soft-Sync negotiation before switching graphics to UDP");
                         info!("   Note: Server has 10 seconds to send Soft-Sync request, otherwise traffic stays on TCP");
                     }
@@ -1995,7 +1952,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                         // Separate Create/Close responses from Data responses (GFX ACKs)
                                         // Per MS-RDPEDYC: Create/Close Response PDUs MUST use TCP to avoid race condition
                                         // But Data responses (GFX frame ACKs) MUST use UDP per MS-RDPEGFX spec
-
+                                        
                                         let (tcp_messages, udp_messages): (Vec<_>, Vec<_>) = response_messages
                                             .into_iter()
                                             .partition(|msg| {
@@ -2005,7 +1962,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                                 debug!("   📋 PDU '{}' → {} path", pdu_name, if is_tcp { "TCP" } else { "UDP" });
                                                 is_tcp
                                             });
-
+                                        
                                         // Send Create/Close responses via TCP
                                         if !tcp_messages.is_empty() {
                                             match active_stage.encode_dvc_messages(tcp_messages) {
@@ -2022,72 +1979,24 @@ async fn active_session<T: RdpEventSender + Clone>(
                                                 }
                                             }
                                         }
-
+                                        
                                         // Send Data responses (GFX ACKs) via UDP
                                         if !udp_messages.is_empty() {
-                                            let mut udp_messages = udp_messages;
-                                            let mut handled_over_udp = false;
-
-                                            if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
-                                                if tunnel.soft_sync_received {
-                                                    match try_send_udp_svc_messages(
-                                                        tunnel,
-                                                        request_id,
-                                                        &udp_messages,
-                                                    ) {
-                                                        Ok(true) => {
-                                                            handled_over_udp = true;
-                                                        }
-                                                        Ok(false) => {
-                                                            trace!(
-                                                                request_id,
-                                                                "DRDYNVC UDP responses yielded no non-empty payloads"
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            warn!(
-                                                                request_id,
-                                                                ?err,
-                                                                "Failed to send DRDYNVC payloads over UDP tunnel"
-                                                            );
-                                                        }
-                                                    }
-                                                } else {
-                                                    debug!(
-                                                        request_id,
-                                                        "Soft-Sync not complete yet; keeping DRDYNVC responses on TCP"
-                                                    );
-                                                }
-                                            } else {
-                                                warn!(
-                                                    request_id,
-                                                    "No UDP tunnel found for DRDYNVC responses; falling back to TCP"
-                                                );
-                                            }
-
-                                            if !handled_over_udp {
-                                                match active_stage.encode_dvc_messages(udp_messages) {
-                                                    Ok(frame) => {
-                                                        if !frame.is_empty() {
-                                                            let frame_len = frame.len();
-                                                            debug!(
-                                                                request_id,
-                                                                len = frame_len,
-                                                                "📤 Sending {} bytes Data response via TCP fallback",
-                                                                frame_len
-                                                            );
-                                                            if let Err(e) = writer.write_all(&frame).await {
-                                                                warn!(
-                                                                    request_id,
-                                                                    "Failed to write DVC UDP fallback response to TCP: {:?}",
-                                                                    e
-                                                                );
+                                            match active_stage.encode_dvc_messages(udp_messages) {
+                                                Ok(frame) => {
+                                                    if !frame.is_empty() {
+                                                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
+                                                            debug!("   📤 Sending {} bytes Data response (GFX ACKs) via UDP tunnel", frame.len());
+                                                            if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SendData(frame)) {
+                                                                warn!("Failed to send Data response via UDP: {:?}", e);
                                                             }
+                                                        } else {
+                                                            warn!("No UDP tunnel found for request_id={}", request_id);
                                                         }
                                                     }
-                                                    Err(e) => {
-                                                        warn!("Failed to encode DVC UDP fallback messages: {:?}", e);
-                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to encode DVC UDP messages: {:?}", e);
                                                 }
                                             }
                                         }
@@ -2103,12 +2012,12 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                     Some(UdpTransportEvent::SoftSyncCompleted { request_id, tunnel_type }) => {
                         info!("🔄 Received SoftSyncCompleted event for request_id={}, tunnel_type=0x{:08X}", request_id, tunnel_type);
-
+                        
                         // Mark that Soft-Sync was received
                         if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
                             tunnel.soft_sync_received = true;
                         }
-
+                        
                         // Enable UDP mode for the GFX channel
                         use crate::gfx_channel::GfxDvcProcessor;
                         if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
@@ -2129,83 +2038,19 @@ async fn active_session<T: RdpEventSender + Clone>(
                             if let Some(gfx) = channel.channel_processor_downcast_mut::<GfxDvcProcessor>() {
                                 match gfx.process_udp_data(&data) {
                                     Ok(messages) => {
-                                        if messages.is_empty() {
-                                            trace!("RDPEGFX UDP payload produced no outbound messages");
-                                        } else if let Some(channel_id) = channel.channel_id() {
-                                            let mut svc_messages = ironrdp_dvc::encode_dvc_messages(
-                                                channel_id,
-                                                messages,
-                                                ironrdp::svc::ChannelFlags::empty(),
-                                            )
-                                            .map_err(|e| session::custom_err!("DRDYNVC", e))?;
-
-                                            let mut handled_over_udp = false;
-
-                                            if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
-                                                if tunnel.soft_sync_received {
-                                                    match try_send_udp_svc_messages(
-                                                        tunnel,
-                                                        request_id,
-                                                        &svc_messages,
-                                                    ) {
-                                                        Ok(true) => {
-                                                            handled_over_udp = true;
-                                                        }
-                                                        Ok(false) => {
-                                                            trace!(
-                                                                request_id,
-                                                                "RDPEGFX UDP messages encoded to zero-length payloads"
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            warn!(
-                                                                request_id,
-                                                                ?err,
-                                                                "Failed to send RDPEGFX ACKs over UDP tunnel"
-                                                            );
-                                                        }
-                                                    }
-                                                } else {
-                                                    debug!(
-                                                        request_id,
-                                                        "Soft-Sync not complete; deferring RDPEGFX responses to TCP"
-                                                    );
-                                                }
+                                        if !messages.is_empty() {
+                                            if let Some(channel_id) = channel.channel_id() {
+                                                let svc_messages = ironrdp_dvc::encode_dvc_messages(
+                                                    channel_id,
+                                                    messages,
+                                                    ironrdp::svc::ChannelFlags::empty(),
+                                                )
+                                                .map_err(|e| session::custom_err!("DRDYNVC", e))?;
+                                                let frame = active_stage.encode_dvc_messages(svc_messages)?;
+                                                outputs.push(ActiveStageOutput::ResponseFrame(frame));
                                             } else {
-                                                warn!(
-                                                    request_id,
-                                                    "RDPEGFX UDP response has no matching tunnel; falling back to TCP"
-                                                );
+                                                warn!("GFX UDP data received before channel ID was assigned");
                                             }
-
-                                            if !handled_over_udp {
-                                                match active_stage.encode_dvc_messages(svc_messages) {
-                                                    Ok(frame) => {
-                                                        if frame.is_empty() {
-                                                            trace!(
-                                                                request_id,
-                                                                "Skipping empty RDPEGFX response frame after UDP processing"
-                                                            );
-                                                        } else {
-                                                            debug!(
-                                                                request_id,
-                                                                len = frame.len(),
-                                                                "📤 Sending RDPEGFX response via TCP fallback"
-                                                            );
-                                                            outputs.push(ActiveStageOutput::ResponseFrame(frame));
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        warn!(
-                                                            request_id,
-                                                            "Failed to encode RDPEGFX fallback messages: {:?}",
-                                                            e
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            warn!("GFX UDP data received before channel ID was assigned");
                                         }
                                     }
                                     Err(err) => {
@@ -2535,13 +2380,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                             .command_tx
                             .send(UdpTransportCommand::TunnelData(data.clone()))
                         {
-                            warn!(
-                                "Failed to forward tunnel data to UDP tunnel {}: {}",
-                                request_id, e
-                            );
+                            warn!("Failed to forward tunnel data to UDP tunnel {}: {}", request_id, e);
                         }
                     }
-
+                    
                     if udp_tunnels.is_empty() {
                         warn!("Received tunnel data but no UDP tunnels active");
                     }
@@ -2573,7 +2415,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         );
                     }
                 }
-
+                
                 if udp_tunnels.is_empty() {
                     warn!("Soft-Sync completed but no UDP tunnels active");
                 }
@@ -2583,15 +2425,16 @@ async fn active_session<T: RdpEventSender + Clone>(
         // Check for Soft-Sync timeout (per MS-RDPEDYC §3.1.5.3, servers MAY skip Soft-Sync)
         const SOFT_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         for (request_id, tunnel) in udp_tunnels.iter_mut() {
-            if tunnel.tunnel_established
-                && !tunnel.soft_sync_received
-                && tunnel.tunnel_established_time.is_some()
+            if tunnel.tunnel_established 
+               && !tunnel.soft_sync_received 
+               && tunnel.tunnel_established_time.is_some() 
             {
                 let elapsed = tunnel.tunnel_established_time.unwrap().elapsed();
                 if elapsed > SOFT_SYNC_TIMEOUT {
                     warn!(
                         "⏱️  Soft-Sync timeout for tunnel {}: Server did not send Soft-Sync request within {:?}",
-                        request_id, SOFT_SYNC_TIMEOUT
+                        request_id,
+                        SOFT_SYNC_TIMEOUT
                     );
                     info!(
                         "ℹ️  Per MS-RDPEDYC spec, this is allowed. Graphics traffic will remain on TCP."
