@@ -14,12 +14,15 @@ use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 /// Maximum surface dimension (8K resolution)
 const MAX_SURFACE_DIM: u16 = 8192;
 /// Maximum total surface pixels (8K × 8K)
 const MAX_SURFACE_PIXELS: usize = 8192 * 8192;
+
+const MAX_CACHE_ENTRIES: usize = 25600; // Matches FreeRDP normal cache
 
 use crate::rdp::{RdpEventSender, RdpOutputEvent};
 use core::num::NonZeroU16;
@@ -86,6 +89,7 @@ struct CachedBitmap {
     width: u16,
     height: u16,
     data: Vec<u8>,
+    last_used: Instant,  // For LRU eviction (Medium Priority #3)
 }
 
 #[derive(Debug, Clone)]
@@ -172,10 +176,15 @@ pub struct GfxState {
     active_codec_contexts: HashSet<(u16, u32)>,
     /// Bitmap cache entries indexed by slot
     bitmap_cache: HashMap<u16, CachedBitmap>,
+    /// Total cache size in bytes for eviction tracking
+    cache_size_bytes: usize,
     /// Event sender for UI updates
     event_sender: Box<dyn RdpEventSender>,
     /// Outgoing message buffer
     outgoing_buffer: Vec<Vec<u8>>,
+    /// Frame rate control (Medium Priority #4)
+    last_frame_time: Option<Instant>,
+    frame_count: u64,
 }
 
 impl GfxState {
@@ -211,8 +220,11 @@ impl GfxState {
             window_mappings: HashMap::new(),
             active_codec_contexts: HashSet::new(),
             bitmap_cache: HashMap::new(),
+            cache_size_bytes: 0,
             event_sender,
             outgoing_buffer: Vec::new(),
+            last_frame_time: None,
+            frame_count: 0,
         })
     }
 
@@ -316,6 +328,16 @@ impl GfxContext for GfxState {
             "GFX frame start frame_id={} timestamp={}",
             frame_id, timestamp
         );
+        
+        // Frame rate control (Medium Priority #4)
+        let now = Instant::now();
+        if let Some(last_time) = self.last_frame_time {
+            let frame_interval = now.duration_since(last_time);
+            trace!("Frame interval: {:?}", frame_interval);
+        }
+        self.last_frame_time = Some(now);
+        self.frame_count += 1;
+        
         Ok(())
     }
 
@@ -824,14 +846,42 @@ impl GfxContext for GfxState {
         Self::validate_rect_within_surface(surface, &source_rect)?;
         let data = Self::extract_surface_region(surface, &source_rect)?;
 
+        let data_size = data.len();
+        
+        // Remove old entry if slot is being reused (do this BEFORE eviction check)
+        let old_size = if let Some(old) = self.bitmap_cache.remove(&cache_slot) {
+            let size = old.data.len();
+            self.cache_size_bytes = self.cache_size_bytes.saturating_sub(size);
+            size
+        } else {
+            0
+        };
+
+        // Check if we need to evict (Medium Priority #3: Cache eviction)
+        // Only limit by entry count, matching FreeRDP behavior
+        if self.bitmap_cache.len() > MAX_CACHE_ENTRIES {
+            self.evict_cache_entries();
+        }
+
         let cached = CachedBitmap {
             key: cache_key,
             width: source_rect.width(),
             height: source_rect.height(),
             data,
+            last_used: Instant::now(),
         };
 
+        self.cache_size_bytes += data_size;
         self.bitmap_cache.insert(cache_slot, cached);
+        
+        debug!(
+            "Cache insert: slot={} size={}KB total_entries={} total_size={}MB",
+            cache_slot,
+            data_size / 1024,
+            self.bitmap_cache.len(),
+            self.cache_size_bytes / (1024 * 1024)
+        );
+        
         Ok(())
     }
 
@@ -850,6 +900,11 @@ impl GfxContext for GfxState {
 
         if dest_points.is_empty() {
             return Ok(());
+        }
+
+        // Update last used time for LRU eviction
+        if let Some(cached) = self.bitmap_cache.get_mut(&cache_slot) {
+            cached.last_used = Instant::now();
         }
 
         let cached = self
@@ -1591,6 +1646,47 @@ impl GfxState {
         Ok(())
     }
 
+    /// Evict cache entries using LRU strategy (Medium Priority #3)
+    /// Only evicts based on entry count, matching FreeRDP behavior
+    fn evict_cache_entries(&mut self) {
+        let target_entries = MAX_CACHE_ENTRIES.saturating_sub(1);
+        
+        // Collect entries with their last used time
+        let mut entries: Vec<(u16, Instant, usize)> = self.bitmap_cache
+            .iter()
+            .map(|(slot, cached)| (*slot, cached.last_used, cached.data.len()))
+            .collect();
+        
+        // Sort by last_used (oldest first)
+        entries.sort_by_key(|(_, last_used, _)| *last_used);
+        
+        let mut evicted_count = 0;
+        let mut freed_bytes = 0;
+        
+        // Evict oldest entries until we're under the entry limit
+        for (slot, _, size) in entries {
+            if self.bitmap_cache.len() <= target_entries {
+                break;
+            }
+            
+            if let Some(removed) = self.bitmap_cache.remove(&slot) {
+                freed_bytes += removed.data.len();
+                self.cache_size_bytes = self.cache_size_bytes.saturating_sub(removed.data.len());
+                evicted_count += 1;
+            }
+        }
+        
+        if evicted_count > 0 {
+            debug!(
+                "Cache eviction: removed {} entries, freed {}KB, remaining entries={}, size={}MB",
+                evicted_count,
+                freed_bytes / 1024,
+                self.bitmap_cache.len(),
+                self.cache_size_bytes / (1024 * 1024)
+            );
+        }
+    }
+
     /// Send a surface to the UI for rendering
     fn send_surface_to_ui(&mut self, surface_id: u16) -> Result<()> {
         let surface = self.surfaces.get_mut(&surface_id)
@@ -1640,13 +1736,8 @@ impl GfxState {
         let full_size = (width.get() as usize) * (height.get() as usize) * 4;
         let dirty_size = (region_width as usize) * (region_height as usize) * 4;
         
-        // If GTK still holds a reference, prefer full frame to avoid Arc::make_mut clones
-        let arc_refcount = Arc::strong_count(&surface.buffer);
-        let prefer_full_frame = arc_refcount > 1;
-        
-        // If dirty region is >50% of frame, send full frame (cheaper than extracting)
-        // Also send full frame if Arc has multiple references (GTK holding previous frame)
-        if dirty_size > (full_size / 2) || prefer_full_frame {
+        // If dirty region is >70% of frame, send full frame (cheaper than extracting)
+        if dirty_size > (full_size * 7 / 10) {
             let buffer = surface.buffer.clone();
             self.event_sender
                 .send_event(RdpOutputEvent::Image {
