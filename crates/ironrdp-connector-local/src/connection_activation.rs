@@ -163,26 +163,16 @@ impl Sequence for ConnectionActivationSequence {
                         multitransport_request.requested_protocol
                     );
 
-                    // Send InitiateMultitransportResponse
-                    // Per MS-RDPBCGR spec, the response MUST be sent on the MCS Message Channel
-                    let message_channel = self.message_channel_id.unwrap_or_else(|| {
-                        warn!(
-                            "No message_channel_id available for multitransport response, using io_channel_id as fallback"
-                        );
-                        io_channel_id
-                    });
-
-                    let written = legacy::encode_multitransport_response(
-                        user_channel_id,
-                        message_channel,
-                        multitransport_request.request_id,
-                        output,
-                    )?;
-
-                    debug!(
-                        "Sent InitiateMultitransportResponse: request_id={}, written={} bytes",
-                        multitransport_request.request_id, written
-                    );
+                    // **DO NOT** send InitiateMultitransportResponse here!
+                    // Per MS-RDPBCGR and MS-RDPEMT specs, the response MUST be sent 
+                    // AFTER the multitransport tunnel is created and authenticated.
+                    // Sending it prematurely causes Windows RDP servers to fail with 
+                    // error 0x800708CA (RPC_S_SERVER_UNAVAILABLE).
+                    //
+                    // The response will be sent later in rdp.rs after the UDP tunnel
+                    // completes its TLS/DTLS handshake and MS-RDPEMT Tunnel Create sequence.
+                    
+                    debug!("⏸️  Deferring InitiateMultitransportResponse until UDP tunnel is established");
 
                     // Stay in CapabilitiesExchange state to wait for ServerDemandActive
                     self.state = ConnectionActivationState::CapabilitiesExchange {
@@ -190,7 +180,8 @@ impl Sequence for ConnectionActivationSequence {
                         user_channel_id,
                     };
 
-                    return Ok(Written::from_size(written)?);
+                    // Return Written::Nothing since we didn't send a response yet
+                    return Ok(Written::Nothing);
                 }
 
                 // Not a multitransport request - decode as ShareControlHeader (normal capabilities exchange)
