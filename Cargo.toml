@@ -182,6 +182,7 @@ futures-util = "0.3"
 gtk = { version = "0.10.1", package = "gtk4", features = ["v4_18"] }
 inquire = "0.7"
 ironrdp = { path = "crates/ironrdp-local", features = ["connector", "dvc", "input", "cliprdr", "displaycontrol", "graphics", "session", "svc", "rdpdr", "rdpsnd"] }
+ironrdp-displaycontrol = { path = "crates/ironrdp-displaycontrol-local" }
 ironrdp-tokio = { path = "crates/ironrdp-tokio-local", features = ["reqwest"] }
 picky = "=7.0.0-rc.17"
 picky-krb = "=0.11.1"

@@ -536,7 +536,22 @@ impl DtlsUdpSocket {
                             EncryptionProtocol::Tls => "TLS",
                             EncryptionProtocol::Dtls => "DTLS",
                         };
-                        Err(anyhow!("{} SSL_read failed ({:?})", protocol_name, code))
+                        
+                        // Get detailed OpenSSL error from error queue
+                        let err = ffi::ERR_get_error();
+                        let error_details = if err == 0 {
+                            format!("{} SSL_read failed with {:?} but no OpenSSL error in queue", protocol_name, code)
+                        } else {
+                            let mut buf = vec![0u8; 256];
+                            ERR_error_string_n(err, buf.as_mut_ptr() as *mut i8, buf.len());
+                            let err_str = std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8)
+                                .to_string_lossy()
+                                .to_string();
+                            format!("{} SSL_read failed: {} (code {:?}, raw: 0x{:x})", 
+                                protocol_name, err_str, code, err)
+                        };
+                        
+                        Err(anyhow!("{}", error_details))
                     }
                 }
             }

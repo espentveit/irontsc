@@ -352,26 +352,28 @@ async fn connect(
         drdynvc = drdynvc.with_dynamic_channel(display_control);
     }
 
-    // Register stub handlers for channels we need to accept but don't process
-    // This prevents CreationStatus::NO_LISTENER errors that break the graphics pipeline
+    // Register proper DVC handlers for protocol compliance
+    // These channels MUST respond with success to CREATE requests or the graphics pipeline fails
     {
+        use crate::core_input_channel::CoreInputProcessor;
+        use crate::mouse_cursor_channel::MouseCursorProcessor;
         use crate::stub_dvc::StubDvcProcessor;
         
-        info!("Registering stub handlers for protocol compliance...");
+        info!("Registering DVC handlers for protocol compliance...");
         
-        // Input-related channels
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::CoreInput"));
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::MouseCursor"));
+        // Input-related channels with proper implementations
+        drdynvc = drdynvc.with_dynamic_channel(CoreInputProcessor::new());
+        drdynvc = drdynvc.with_dynamic_channel(MouseCursorProcessor::new());
+        
+        // Input-related channels - stubs for now (Microsoft::Windows::RDS::Input uses advanced input protocol MS-RDPEAI)
         drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
         drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
         
-        // Other protocol channels
+        // Other protocol channels - stubs (would need full protocol implementations)
         drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Notify"));
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("rdpdr"));
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("cliprdr"));
         drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("RDCamera_Device_Enumerator"));
         
-        info!("Stub handlers registered: CoreInput, MouseCursor, Input, TextInput, Notify, rdpdr, cliprdr, RDCamera");
+        info!("DVC handlers registered: CoreInput, MouseCursor, Input (stub), TextInput (stub), Notify (stub), RDCamera (stub)");
     }
 
     // TODO: DVC proxies not yet implemented
@@ -1333,10 +1335,10 @@ fn detect_multitransport_request(
     // causes false positives when random bytes match the security header pattern.
     if let Some(expected_channel) = message_channel_id {
         if channel_id != expected_channel {
-            debug!(
+            trace!(
                 channel_id,
                 expected_channel,
-                "Ignoring apparent multitransport request on wrong MCS channel (binary data false positive)"
+                "Skipping multitransport detection on non-message MCS channel (avoiding false positives from binary data)"
             );
             return None;
         }
@@ -1426,6 +1428,57 @@ fn detect_multitransport_request(
     None
 }
 
+/// Detect and decode auto-detect requests (RTT measure, bandwidth measure, etc.)
+fn detect_autodetect_request(
+    action: ironrdp::pdu::Action,
+    payload: &[u8],
+    message_channel_id: Option<u16>,
+) -> Option<Vec<u8>> {
+    use ironrdp::pdu::Action;
+    use ironrdp_core::{Decode, ReadCursor};
+
+    // Only check X224 frames
+    if action != Action::X224 {
+        return None;
+    }
+
+    // Decode the SendDataIndication envelope
+    let send_ctx = legacy::decode_send_data_indication(payload).ok()?;
+    let channel_id = send_ctx.channel_id;
+    let user_data = send_ctx.user_data;
+
+    // Auto-detect messages are sent on the MCS Message Channel
+    if let Some(expected_channel) = message_channel_id {
+        if channel_id != expected_channel {
+            return None;
+        }
+    }
+
+    // Look for security header with AUTODETECT_REQ flag
+    for offset in 0..user_data.len().saturating_sub(8) {
+        let mut cursor = ReadCursor::new(&user_data[offset..]);
+        
+        let flags_bits = cursor.read_u16();
+        let flags = BasicSecurityHeaderFlags::from_bits(flags_bits)?;
+        
+        if !flags.contains(BasicSecurityHeaderFlags::AUTODETECT_REQ) {
+            continue;
+        }
+        
+        let _security_flags_hi = cursor.read_u16();
+        
+        // The remaining data should be the auto-detect request PDU
+        let remaining = cursor.remaining();
+        if remaining.len() >= 6 {
+            // Minimum auto-detect header size
+            debug!("📊 Detected auto-detect request ({} bytes)", remaining.len());
+            return Some(remaining.to_vec());
+        }
+    }
+
+    None
+}
+
 fn encode_multitransport_response_frame(
     request: MultitransportRequestInfo,
     message_channel_id: Option<u16>,
@@ -1486,6 +1539,154 @@ fn encode_multitransport_response_frame(
     legacy::encode_send_data_request(request.initiator_id, channel_id, &response_pdu, &mut buf)?;
 
     Ok(buf.filled().to_vec())
+}
+
+/// Encode auto-detect response for sending
+fn encode_autodetect_response(
+    response: &ironrdp::pdu::rdp::auto_detect::AutoDetectResponse,
+    user_channel_id: u16,
+    message_channel_id: u16,
+) -> Option<Vec<u8>> {
+    use ironrdp::pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
+    use ironrdp_connector::legacy;
+    use ironrdp_core::{Encode, WriteBuf, WriteCursor};
+
+    // Step 1: Encode the auto-detect response PDU
+    let mut pdu_buffer = vec![0u8; response.size()];
+    let mut pdu_cursor = WriteCursor::new(&mut pdu_buffer);
+    if let Err(e) = response.encode(&mut pdu_cursor) {
+        warn!("Failed to encode auto-detect response PDU: {:?}", e);
+        return None;
+    }
+
+    // Step 2: Wrap in security header with AUTODETECT_RSP flag
+    let sec_header = BasicSecurityHeader {
+        flags: BasicSecurityHeaderFlags::AUTODETECT_RSP,
+    };
+
+    let header_size = sec_header.size();
+    let total_size = header_size + pdu_buffer.len();
+    let mut wrapped_pdu = vec![0u8; total_size];
+
+    let mut header_cursor = WriteCursor::new(&mut wrapped_pdu[..header_size]);
+    if let Err(e) = sec_header.encode(&mut header_cursor) {
+        warn!("Failed to encode auto-detect security header: {:?}", e);
+        return None;
+    }
+
+    wrapped_pdu[header_size..].copy_from_slice(&pdu_buffer);
+
+    // Step 3: Wrap in MCS Send Data Request
+    let mut buf = WriteBuf::new();
+    if let Err(e) = legacy::encode_send_data_request(
+        user_channel_id,
+        message_channel_id,
+        &wrapped_pdu,
+        &mut buf
+    ) {
+        warn!("Failed to encode auto-detect send data request: {:?}", e);
+        return None;
+    }
+
+    Some(buf.filled().to_vec())
+}
+
+/// Handle auto-detect request and generate response
+fn handle_autodetect_request(
+    request_data: &[u8],
+    bandwidth_start_time: &mut Option<std::time::Instant>,
+    bandwidth_byte_count: &mut u32,
+    bandwidth_sequence: &mut Option<u16>,
+    user_channel_id: u16,
+    message_channel_id: u16,
+) -> Option<Vec<u8>> {
+    use ironrdp::pdu::rdp::auto_detect::*;
+    use ironrdp_core::{Encode, WriteCursor};
+
+    // Decode the auto-detect request
+    let request = match AutoDetectRequest::decode_from_buffer(request_data) {
+        Ok(req) => req,
+        Err(e) => {
+            warn!("Failed to decode auto-detect request: {:?}", e);
+            return None;
+        }
+    };
+
+    match request {
+        AutoDetectRequest::RttMeasure(rtt_req) => {
+            info!("📊 Received RTT Measure Request (seq={})", rtt_req.sequence_number);
+            
+            // Respond immediately with RTT Measure Response
+            let response = AutoDetectResponse::RttMeasure(
+                RttMeasureResponse::new(rtt_req.sequence_number)
+            );
+            
+            info!("📤 Sending RTT Measure Response (seq={})", rtt_req.sequence_number);
+            encode_autodetect_response(&response, user_channel_id, message_channel_id)
+        }
+        
+        AutoDetectRequest::BandwidthMeasureStart(start_req) => {
+            info!("📊 Received Bandwidth Measure Start (seq={})", start_req.sequence_number);
+            
+            // Start bandwidth measurement
+            *bandwidth_start_time = Some(std::time::Instant::now());
+            *bandwidth_byte_count = 0;
+            *bandwidth_sequence = Some(start_req.sequence_number);
+            
+            // No immediate response needed
+            None
+        }
+        
+        AutoDetectRequest::BandwidthMeasureStop(stop_req) => {
+            info!("📊 Received Bandwidth Measure Stop (seq={}, type=0x{:04x}, payload_len={:?})", 
+                  stop_req.sequence_number, stop_req.request_type, stop_req.payload_length);
+            
+            // Calculate bandwidth and send results
+            if let Some(start_time) = *bandwidth_start_time {
+                let elapsed = start_time.elapsed();
+                let time_delta_ms = elapsed.as_millis() as u32;
+                
+                info!("📊 Bandwidth measurement: {} bytes in {}ms", 
+                      *bandwidth_byte_count, time_delta_ms);
+                
+                // Determine response type based on request type
+                let response_type = match stop_req.request_type {
+                    0x002B => AutoDetectResponseType::BandwidthMeasureResultsConnectTime as u16,
+                    0x0429 => AutoDetectResponseType::BandwidthMeasureResultsAfterConnect as u16,
+                    0x0629 => AutoDetectResponseType::BandwidthMeasureResultsAfterConnect as u16,
+                    _ => AutoDetectResponseType::BandwidthMeasureResultsAfterConnect as u16,
+                };
+                
+                let response = AutoDetectResponse::BandwidthMeasureResults(
+                    BandwidthMeasureResults::new(
+                        stop_req.sequence_number,
+                        response_type,
+                        time_delta_ms,
+                        *bandwidth_byte_count,
+                    )
+                );
+                
+                // Reset measurement state
+                *bandwidth_start_time = None;
+                *bandwidth_byte_count = 0;
+                *bandwidth_sequence = None;
+                
+                info!("📤 Sending Bandwidth Measure Results (seq={}, {}ms, {} bytes)", 
+                      stop_req.sequence_number, time_delta_ms, *bandwidth_byte_count);
+                encode_autodetect_response(&response, user_channel_id, message_channel_id)
+            } else {
+                warn!("Received Bandwidth Measure Stop without Start");
+                None
+            }
+        }
+        
+        AutoDetectRequest::NetworkCharacteristicsResult(result) => {
+            info!("📊 Received Network Characteristics Result: baseRTT={:?}ms, bandwidth={:?}kbps, avgRTT={:?}ms",
+                  result.base_rtt, result.bandwidth, result.average_rtt);
+            // This is informational from server, no response needed
+            None
+        }
+    }
 }
 
 async fn start_udp_tunnel(
@@ -1647,6 +1848,11 @@ async fn active_session<T: RdpEventSender + Clone>(
     // Track active UDP transport tunnel (currently only one tunnel is supported)
     let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> = std::collections::HashMap::new();
 
+    // Track bandwidth measurement state for auto-detect
+    let mut bandwidth_measure_start_time: Option<std::time::Instant> = None;
+    let mut bandwidth_measure_byte_count: u32 = 0;
+    let mut bandwidth_measure_sequence: Option<u16> = None;
+
     // **CRITICAL**: Automatically create UDP tunnel if multitransport was negotiated during connection
     // Per MS-RDPEMT spec, the InitiateMultitransportRequest is sent during CapabilitiesExchange,
     // and we responded with InitiateMultitransportResponse. Now we need to create the actual
@@ -1726,6 +1932,11 @@ async fn active_session<T: RdpEventSender + Clone>(
                 match frame {
                     Ok((action, payload)) => {
                         trace!(?action, frame_length = payload.len(), "Frame received");
+                        
+                        // Track bytes for bandwidth measurement if active
+                        if bandwidth_measure_start_time.is_some() {
+                            bandwidth_measure_byte_count += payload.len() as u32;
+                        }
 
                         let mut extra_outputs = Vec::new();
 
@@ -1834,6 +2045,23 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                 info!("✅ Multitransport request handled, awaiting UDP handshake events");
                 extra_outputs
+                } else if let Some(autodetect_data) = detect_autodetect_request(action, &payload, message_channel_id) {
+                    // Process auto-detect request
+                    let msg_ch_id = message_channel_id.unwrap_or(io_channel_id);
+                    if let Some(response_bytes) = handle_autodetect_request(
+                        &autodetect_data,
+                        &mut bandwidth_measure_start_time,
+                        &mut bandwidth_measure_byte_count,
+                        &mut bandwidth_measure_sequence,
+                        user_channel_id,
+                        msg_ch_id,
+                    ) {
+                        extra_outputs.push(ActiveStageOutput::ResponseFrame(response_bytes.into()));
+                        extra_outputs
+                    } else {
+                        // No response needed or error occurred
+                        vec![]
+                    }
                 } else {
                     // Not a multitransport request - process normally
                     match active_stage.process(&mut image, action, &payload) {
@@ -2040,7 +2268,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                                             Some(TransportContext::UdpTunnel(tunnel_id)) => {
                                                 // Send via UDP tunnel
                                                 info!("   📤 Routing {} response to UDP tunnel {}", msg.pdu_name(), tunnel_id);
-                                                debug!("   📤 Routing {} response to UDP tunnel {}", msg.pdu_name(), tunnel_id);
                                                 match active_stage.encode_dvc_messages(vec![msg]) {
                                                     Ok(frame) if !frame.is_empty() => {
                                                         if let Some(tunnel) = udp_tunnels.get_mut(&tunnel_id) {
