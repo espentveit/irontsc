@@ -55,6 +55,7 @@ impl Decompressor {
         }
     }
 
+    #[inline]
     fn handle_segment(
         &mut self,
         segment: &BulkEncodedData<'_>,

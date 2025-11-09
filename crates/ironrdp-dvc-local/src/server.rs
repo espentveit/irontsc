@@ -128,7 +128,7 @@ impl SvcProcessor for DrdynvcServer {
         Ok(alloc::vec![msg])
     }
 
-    fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>> {
+    fn process(&mut self, payload: &[u8], _transport: ironrdp_svc::TransportContext) -> PduResult<Vec<SvcMessage>> {
         let pdu = decode_dvc_message(payload).map_err(|e| decode_err!(e))?;
         let mut resp = Vec::new();
 

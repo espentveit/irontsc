@@ -29,7 +29,7 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{
     fast_path, ActiveStage, ActiveStageOutput, GracefulDisconnectReason, SessionResult,
 };
-use ironrdp::svc::{ChannelFlags, SvcMessage, TransportContext};
+use ironrdp::svc::{ChannelFlags, SvcMessage, SvcProcessor, TransportContext};
 use ironrdp::{cliprdr, connector, rdpdr, rdpsnd, session};
 use ironrdp_connector::legacy;
 use ironrdp_core::impl_as_any;
@@ -2243,7 +2243,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         // The processor will tag responses with the appropriate transport (TCP or UDP tunnel)
                         if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
                             info!("   📋 Feeding to DRDYNVC processor with {:?} transport context...", transport_context);
-                            match drdynvc.process_with_transport(&dvc_data, transport_context) {
+                            match drdynvc.process(&dvc_data, transport_context) {
                                 Ok(response_messages) => {
                                     info!("   ✅ DRDYNVC returned {} response messages", response_messages.len());
                                     
