@@ -1,5 +1,10 @@
 use ironrdp_pdu::utils::SplitTo as _;
 
+#[inline(always)]
+fn clamp_i16(value: i32) -> i16 {
+    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 pub fn encode(buffer: &mut [i16], temp_buffer: &mut [i16]) {
     encode_block::<32>(&mut *buffer, temp_buffer);
     encode_block::<16>(&mut buffer[3072..], temp_buffer);
@@ -22,24 +27,28 @@ fn dwt_vertical<const SUBBAND_WIDTH: usize>(buffer: &[i16], dwt: &mut [i16]) {
             let h_index = l_index + SUBBAND_WIDTH * total_width;
             let src_index = y * total_width + x;
 
-            dwt[h_index] = ((i32::from(buffer[src_index + total_width])
-                - ((i32::from(buffer[src_index])
-                    + i32::from(
-                        buffer[src_index
-                            + if n < SUBBAND_WIDTH - 1 {
-                                2 * total_width
-                            } else {
-                                0
-                            }],
-                    ))
-                    >> 1))
-                >> 1) as i16;
-            dwt[l_index] = (i32::from(buffer[src_index])
-                + if n == 0 {
-                    i32::from(dwt[h_index])
-                } else {
-                    (i32::from(dwt[h_index - total_width]) + i32::from(dwt[h_index])) >> 1
-                }) as i16;
+            dwt[h_index] = clamp_i16(
+                (i32::from(buffer[src_index + total_width])
+                    - ((i32::from(buffer[src_index])
+                        + i32::from(
+                            buffer[src_index
+                                + if n < SUBBAND_WIDTH - 1 {
+                                    2 * total_width
+                                } else {
+                                    0
+                                }],
+                        ))
+                        >> 1))
+                    >> 1,
+            );
+            dwt[l_index] = clamp_i16(
+                i32::from(buffer[src_index])
+                    + if n == 0 {
+                        i32::from(dwt[h_index])
+                    } else {
+                        (i32::from(dwt[h_index - total_width]) + i32::from(dwt[h_index])) >> 1
+                    },
+            );
         }
     }
 }
@@ -64,18 +73,22 @@ fn dwt_horizontal<const SUBBAND_WIDTH: usize>(mut buffer: &mut [i16], dwt: &[i16
             let x = n * 2;
 
             // HL
-            hl[n] = ((i32::from(l_src[x + 1])
-                - ((i32::from(l_src[x])
-                    + i32::from(l_src[if n < SUBBAND_WIDTH - 1 { x + 2 } else { x }]))
-                    >> 1))
-                >> 1) as i16;
+            hl[n] = clamp_i16(
+                (i32::from(l_src[x + 1])
+                    - ((i32::from(l_src[x])
+                        + i32::from(l_src[if n < SUBBAND_WIDTH - 1 { x + 2 } else { x }]))
+                        >> 1))
+                    >> 1,
+            );
             // LL
-            ll[n] = (i32::from(l_src[x])
-                + if n == 0 {
-                    i32::from(hl[n])
-                } else {
-                    (i32::from(hl[n - 1]) + i32::from(hl[n])) >> 1
-                }) as i16;
+            ll[n] = clamp_i16(
+                i32::from(l_src[x])
+                    + if n == 0 {
+                        i32::from(hl[n])
+                    } else {
+                        (i32::from(hl[n - 1]) + i32::from(hl[n])) >> 1
+                    },
+            );
         }
 
         // H
@@ -83,18 +96,22 @@ fn dwt_horizontal<const SUBBAND_WIDTH: usize>(mut buffer: &mut [i16], dwt: &[i16
             let x = n * 2;
 
             // HH
-            hh[n] = ((i32::from(h_src[x + 1])
-                - ((i32::from(h_src[x])
-                    + i32::from(h_src[if n < SUBBAND_WIDTH - 1 { x + 2 } else { x }]))
-                    >> 1))
-                >> 1) as i16;
+            hh[n] = clamp_i16(
+                (i32::from(h_src[x + 1])
+                    - ((i32::from(h_src[x])
+                        + i32::from(h_src[if n < SUBBAND_WIDTH - 1 { x + 2 } else { x }]))
+                        >> 1))
+                    >> 1,
+            );
             // LH
-            lh[n] = (i32::from(h_src[x])
-                + if n == 0 {
-                    i32::from(hh[n])
-                } else {
-                    (i32::from(hh[n - 1]) + i32::from(hh[n])) >> 1
-                }) as i16;
+            lh[n] = clamp_i16(
+                i32::from(h_src[x])
+                    + if n == 0 {
+                        i32::from(hh[n])
+                    } else {
+                        (i32::from(hh[n - 1]) + i32::from(hh[n])) >> 1
+                    },
+            );
         }
 
         hl = &mut hl[SUBBAND_WIDTH..];
@@ -119,11 +136,13 @@ pub fn decode_into(src: &[i16], dst: &mut [i16], temp_buffer: &mut [i16]) {
     decode_block_from(src, dst, temp_buffer, 32);
 }
 
+#[inline]
 fn decode_block(buffer: &mut [i16], temp_buffer: &mut [i16], subband_width: usize) {
     inverse_horizontal(buffer, temp_buffer, subband_width);
     inverse_vertical(buffer, temp_buffer, subband_width);
 }
 
+#[inline]
 fn decode_block_from(src: &[i16], dst: &mut [i16], temp_buffer: &mut [i16], subband_width: usize) {
     inverse_horizontal(src, temp_buffer, subband_width);
     inverse_vertical(dst, temp_buffer, subband_width);
@@ -133,6 +152,7 @@ fn decode_block_from(src: &[i16], dst: &mut [i16], temp_buffer: &mut [i16], subb
 // The 4 sub-bands are stored in HL(0), LH(1), HH(2), LL(3) order.
 // The lower part L uses LL(3) and HL(0).
 // The higher part H uses LH(1) and HH(2).
+#[inline]
 fn inverse_horizontal(mut buffer: &[i16], temp_buffer: &mut [i16], subband_width: usize) {
     let total_width = subband_width * 2;
     let squared_subband_width = subband_width.pow(2);
@@ -146,30 +166,28 @@ fn inverse_horizontal(mut buffer: &[i16], temp_buffer: &mut [i16], subband_width
 
     for _ in 0..subband_width {
         // Even coefficients
-        l_dst[0] = (i32::from(ll[0]) - ((i32::from(hl[0]) + i32::from(hl[0]) + 1) >> 1)) as i16;
-        h_dst[0] = (i32::from(lh[0]) - ((i32::from(hh[0]) + i32::from(hh[0]) + 1) >> 1)) as i16;
+        l_dst[0] = clamp_i16(i32::from(ll[0]) - ((i32::from(hl[0]) + i32::from(hl[0]) + 1) >> 1));
+        h_dst[0] = clamp_i16(i32::from(lh[0]) - ((i32::from(hh[0]) + i32::from(hh[0]) + 1) >> 1));
         for n in 1..subband_width {
             let x = n * 2;
-            l_dst[x] =
-                (i32::from(ll[n]) - ((i32::from(hl[n - 1]) + i32::from(hl[n]) + 1) >> 1)) as i16;
-            h_dst[x] =
-                (i32::from(lh[n]) - ((i32::from(hh[n - 1]) + i32::from(hh[n]) + 1) >> 1)) as i16;
+            l_dst[x] = clamp_i16(i32::from(ll[n]) - ((i32::from(hl[n - 1]) + i32::from(hl[n]) + 1) >> 1));
+            h_dst[x] = clamp_i16(i32::from(lh[n]) - ((i32::from(hh[n - 1]) + i32::from(hh[n]) + 1) >> 1));
         }
 
         // Odd coefficients
         for n in 0..subband_width - 1 {
             let x = n * 2;
-            l_dst[x + 1] = (i32::from(hl[n] << 1)
-                + ((i32::from(l_dst[x]) + i32::from(l_dst[x + 2])) >> 1))
-                as i16;
-            h_dst[x + 1] = (i32::from(hh[n] << 1)
-                + ((i32::from(h_dst[x]) + i32::from(h_dst[x + 2])) >> 1))
-                as i16;
+            l_dst[x + 1] = clamp_i16(
+                i32::from(hl[n] << 1) + ((i32::from(l_dst[x]) + i32::from(l_dst[x + 2])) >> 1),
+            );
+            h_dst[x + 1] = clamp_i16(
+                i32::from(hh[n] << 1) + ((i32::from(h_dst[x]) + i32::from(h_dst[x + 2])) >> 1),
+            );
         }
         let n = subband_width - 1;
         let x = n * 2;
-        l_dst[x + 1] = (i32::from(hl[n] << 1) + i32::from(l_dst[x])) as i16;
-        h_dst[x + 1] = (i32::from(hh[n] << 1) + i32::from(h_dst[x])) as i16;
+        l_dst[x + 1] = clamp_i16(i32::from(hl[n] << 1) + i32::from(l_dst[x]));
+        h_dst[x + 1] = clamp_i16(i32::from(hh[n] << 1) + i32::from(h_dst[x]));
 
         hl = &hl[subband_width..];
         lh = &lh[subband_width..];
@@ -181,13 +199,15 @@ fn inverse_horizontal(mut buffer: &[i16], temp_buffer: &mut [i16], subband_width
     }
 }
 
+#[inline]
 fn inverse_vertical(mut dst: &mut [i16], mut temp_buffer: &[i16], subband_width: usize) {
     let total_width = subband_width * 2;
 
     for _ in 0..total_width {
-        dst[0] = (i32::from(temp_buffer[0])
-            - ((i32::from(temp_buffer[subband_width * total_width]) * 2 + 1) >> 1))
-            as i16;
+        dst[0] = clamp_i16(
+            i32::from(temp_buffer[0])
+                - ((i32::from(temp_buffer[subband_width * total_width]) * 2 + 1) >> 1),
+        );
 
         let mut l = temp_buffer;
         let mut lh = &temp_buffer[(subband_width - 1) * total_width..];
@@ -201,19 +221,21 @@ fn inverse_vertical(mut dst: &mut [i16], mut temp_buffer: &[i16], subband_width:
 
             // Even coefficients
             dst_row[2 * total_width] =
-                (i32::from(l[0]) - ((i32::from(lh[0]) + i32::from(h[0]) + 1) >> 1)) as i16;
+                clamp_i16(i32::from(l[0]) - ((i32::from(lh[0]) + i32::from(h[0]) + 1) >> 1));
 
             // Odd coefficients
-            dst_row[total_width] = (i32::from(lh[0] << 1)
-                + ((i32::from(dst_row[0]) + i32::from(dst_row[2 * total_width])) >> 1))
-                as i16;
+            dst_row[total_width] = clamp_i16(
+                i32::from(lh[0] << 1)
+                    + ((i32::from(dst_row[0]) + i32::from(dst_row[2 * total_width])) >> 1),
+            );
 
             dst_row = &mut dst_row[2 * total_width..];
         }
 
-        dst_row[total_width] = (i32::from(lh[total_width] << 1)
-            + ((i32::from(dst_row[0]) + i32::from(dst_row[0])) >> 1))
-            as i16;
+        dst_row[total_width] = clamp_i16(
+            i32::from(lh[total_width] << 1)
+                + ((i32::from(dst_row[0]) + i32::from(dst_row[0])) >> 1),
+        );
 
         temp_buffer = &temp_buffer[1..];
         dst = &mut dst[1..];
