@@ -304,11 +304,7 @@ async fn connect(
 
         drdynvc = drdynvc.with_dynamic_channel(gfx_processor);
 
-        if cfg!(feature = "h264") {
-            info!("RDPEGFX channel registered with DRDYNVC (H.264 decoder ready)");
-        } else {
-            info!("RDPEGFX channel registered with DRDYNVC (progressive mode only)");
-        }
+        info!("📌 RDPEGFX channel registered (will reject CREATE until Soft-Sync completes)");
     }
 
     // Add Video Redirection channels if feature is enabled
@@ -1759,23 +1755,11 @@ async fn active_session<T: RdpEventSender + Clone>(
                     request_info.channel_id
                 );
 
-                // Send multitransport response acknowledging the request
-                match encode_multitransport_response_frame(request_info, message_channel_id) {
-                    Ok(frame) => {
-                        info!(
-                            "📨 Sending Initiate Multitransport Response (S_OK) for request_id={}",
-                            request_id
-                        );
-                        extra_outputs.push(ActiveStageOutput::ResponseFrame(frame));
-                    }
-                    Err(err) => {
-                        error!(
-                            "❌ Failed to encode InitiateMultitransportResponse for request_id={}: {:?}",
-                            request_id,
-                            err
-                        );
-                    }
-                }
+                // NOTE: MultitransportResponse will be sent AFTER TunnelEstablished event
+                // (see TunnelEstablished handler below)
+                // Per MS-RDPBCGR: Response must be sent after tunnel is fully established
+                // Sending it too early causes Windows RDP servers to send Demand Active prematurely
+                info!("⏸️  Deferring MultitransportResponse until tunnel is established");
 
                 let protocol_bits = request_info.protocol.as_u16();
                 let requested_reliable =
@@ -1910,8 +1894,19 @@ async fn active_session<T: RdpEventSender + Clone>(
                             // The tunnel type is based on the protocol (reliable UDP = 0x00000001)
                             let tunnel_type = 0x00000001; // TUNNELTYPE_UDPFECR (reliable UDP)
                             if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
-                                drdynvc.register_available_tunnel(tunnel_type);
-                                info!("   Registered tunnel_type=0x{:08X} as available for Soft-Sync", tunnel_type);
+                                match drdynvc.register_available_tunnel(tunnel_type) {
+                                    Ok(deferred_messages) => {
+                                        info!("   Registered tunnel_type=0x{:08X} as available for Soft-Sync", tunnel_type);
+                                        if !deferred_messages.is_empty() {
+                                            info!("   Processing {} deferred DVC message(s)", deferred_messages.len());
+                                            let frame = active_stage.encode_dvc_messages(deferred_messages)?;
+                                            outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to register available tunnel: {:?}", e);
+                                    }
+                                }
                             }
                         }
                         
@@ -2419,88 +2414,30 @@ async fn active_session<T: RdpEventSender + Clone>(
             active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>()
         {
             if let Some(tunnel_type) = drdynvc_client.soft_sync_completed() {
-                use crate::gfx_channel::GfxDvcProcessor;
-                
                 info!(
-                    "✅ Soft-Sync completed for tunnel_type=0x{:08X}, signaling UDP transport(s)",
+                    "✅ Soft-Sync completed for tunnel_type=0x{:08X}",
                     tunnel_type
                 );
+                info!("   GFX channel CREATE requests will now be accepted (over UDP transport)");
+                
                 // Clear the completion flag
                 drdynvc_client.clear_soft_sync_completed();
                 
-                // Get the GFX channel to re-send CAPS_ADVERTISE over UDP
-                if let Some(gfx_dvc) = drdynvc_client.get_dvc_by_type_id::<GfxDvcProcessor>() {
-                    if let Some(channel_id) = gfx_dvc.channel_id() {
-                        info!("📤 Re-sending RDPEGFX CAPS_ADVERTISE over UDP tunnel after Soft-Sync");
-                        
-                        // Generate and send CAPS_ADVERTISE directly
-                        if let Some(gfx_processor) = gfx_dvc.channel_processor_downcast_ref::<GfxDvcProcessor>() {
-                            // We need mutable access, so we need to get it again
-                            drop(gfx_dvc); // Drop the immutable reference
-                            drop(drdynvc_client); // Drop the mutable reference to drdynvc
-                            
-                            if let Some(drdynvc_mut) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
-                                if let Some(gfx_dvc_mut) = drdynvc_mut.get_dvc_by_type_id_mut::<GfxDvcProcessor>() {
-                                    if let Some(gfx_proc_mut) = gfx_dvc_mut.channel_processor_downcast_mut::<GfxDvcProcessor>() {
-                                        if let Err(e) = gfx_proc_mut.client.send_caps_advertise() {
-                                            warn!("Failed to generate CAPS_ADVERTISE: {:?}", e);
-                                        } else {
-                                            let messages = gfx_proc_mut.client.ctx.take_outgoing_messages();
-                                            info!("📤 Generated {} bytes of CAPS_ADVERTISE data", messages.iter().map(|m| m.len()).sum::<usize>());
-                                            
-                                            // Send via UDP tunnel
-                                            if let Some(tunnel) = udp_tunnels.get_mut(&tunnel_type) {
-                                                for msg_data in messages {
-                                                    // Wrap in DVC data message
-                                                    let dvc_msg = Box::new(crate::gfx_channel::GfxDvcMessage { data: msg_data });
-                                                    let svc_messages = vec![dvc_msg as Box<dyn ironrdp_dvc::DvcEncode>];
-                                                    
-                                                    match ironrdp_dvc::encode_dvc_messages(channel_id, svc_messages, ChannelFlags::empty()) {
-                                                        Ok(encoded) => {
-                                                            for encoded_msg in encoded {
-                                                                match active_stage.encode_dvc_messages(vec![encoded_msg]) {
-                                                                    Ok(frame) if !frame.is_empty() => {
-                                                                        if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SendData(frame)) {
-                                                                            warn!("Failed to send CAPS_ADVERTISE via UDP: {:?}", e);
-                                                                        }
-                                                                    }
-                                                                    Err(e) => warn!("Failed to encode CAPS_ADVERTISE for UDP: {:?}", e),
-                                                                    _ => {}
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e) => warn!("Failed to encode DVC message: {:?}", e),
-                                                    }
-                                                }
-                                            } else {
-                                                warn!("No UDP tunnel found for tunnel_type={}", tunnel_type);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                // Signal all active UDP transports that soft-sync is complete
+                for (request_id, tunnel) in &udp_tunnels {
+                    if let Err(e) = tunnel
+                        .command_tx
+                        .send(UdpTransportCommand::SoftSyncComplete { tunnel_type })
+                    {
+                        warn!(
+                            "Failed to send SoftSyncComplete to UDP tunnel {}: {}",
+                            request_id, e
+                        );
                     }
                 }
                 
-                // Get drdynvc again for the remaining code
-                if let Some(drdynvc_client) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
-                    // Signal all active UDP transports that soft-sync is complete
-                    for (request_id, tunnel) in &udp_tunnels {
-                        if let Err(e) = tunnel
-                            .command_tx
-                            .send(UdpTransportCommand::SoftSyncComplete { tunnel_type })
-                        {
-                            warn!(
-                                "Failed to send SoftSyncComplete to UDP tunnel {}: {}",
-                                request_id, e
-                            );
-                        }
-                    }
-                    
-                    if udp_tunnels.is_empty() {
-                        warn!("Soft-Sync completed but no UDP tunnels active");
-                    }
+                if udp_tunnels.is_empty() {
+                    warn!("Soft-Sync completed but no UDP tunnels active");
                 }
             }
         }
