@@ -216,18 +216,12 @@ impl DrdynvcClient {
                     .ok_or_else(|| pdu_other_err!("access to non existing DVC channel"))?
                     .process(data)?;
 
-                // Determine transport based on whether this channel was switched to UDP via Soft-Sync
-                // If the channel is in udp_channels map, use UDP tunnel; otherwise use TCP
-                let response_transport = if let Some(&tunnel_type) = self.udp_channels.get(&channel_id) {
-                    // This channel uses UDP - map tunnel_type to request_id
-                    // Note: In current implementation, tunnel_type == request_id for the UDP tunnel
-                    TransportContext::UdpTunnel(tunnel_type)
-                } else {
-                    // This channel stays on TCP (e.g., input, sound)
-                    TransportContext::Tcp
-                };
+                // Preserve the incoming transport context - this ensures responses go back
+                // on the same tunnel/connection that the request arrived on
+                // This is critical for UDP multitransport where request_id != tunnel_type
+                let response_transport = transport;
 
-                // Data messages use the transport assigned to this specific channel
+                // Data messages use the same transport as the incoming request
                 responses.extend(
                     encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
                         .map_err(|e| encode_err!(e))?
@@ -539,12 +533,16 @@ impl SvcProcessor for DrdynvcClient {
                     .ok_or_else(|| pdu_other_err!("access to non existing DVC channel"))?
                     .process(data)?;
 
-                // Determine transport based on whether this channel was switched to UDP via Soft-Sync
+                // In legacy SvcProcessor interface, we don't have transport context
+                // so we can't preserve the incoming transport. Default behavior:
+                // check if channel was switched to UDP via Soft-Sync
                 let encoded_messages = encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
                     .map_err(|e| encode_err!(e))?;
                 
                 if let Some(&tunnel_type) = self.udp_channels.get(&channel_id) {
                     // This channel uses UDP - tag messages with UDP transport
+                    // Note: This uses tunnel_type (0x00000001) not request_id, which may be incorrect
+                    // for multitransport. Use process_with_transport() for proper routing.
                     responses.extend(
                         encoded_messages
                             .into_iter()
