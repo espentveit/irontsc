@@ -1125,10 +1125,12 @@ const EXTRAPOLATE_SUBBANDS: [SubbandMeta; 10] = [
     },
 ];
 
+#[inline(always)]
 fn clamp_i16(value: i32) -> i16 {
     value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
+#[inline(always)]
 fn shift_block(data: &mut [i16], shift: i16) {
     if shift == 0 {
         return;

@@ -264,6 +264,7 @@ fn fill(buffer: &mut [i16], value: i16) {
     }
 }
 
+#[inline(always)]
 fn load_be_u32(s: &BitSlice<u8, Msb0>) -> u32 {
     if s.is_empty() {
         0

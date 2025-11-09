@@ -52,6 +52,13 @@ lazy_static = "1.4"
 num-derive = "0.4"
 num-traits = "0.2"
 
+[profile.optimized]
+inherits = "release"
+lto = "fat"           # Full link-time optimization (slower build, faster runtime)
+codegen-units = 1     # Maximum optimization opportunities
+opt-level = 3         # Maximum optimizations
+strip = true          # Strip symbols
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 invalid_reference_casting = "warn"
