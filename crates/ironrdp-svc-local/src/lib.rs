@@ -76,12 +76,24 @@ pub trait SvcEncode: Encode + Send {}
 // FIXME: legacy code
 impl SvcEncode for Vec<u8> {}
 
+/// Identifies which transport a message should be sent over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportContext {
+    /// Message should be sent over the main TCP connection
+    Tcp,
+    /// Message should be sent over a UDP tunnel with the specified request_id
+    UdpTunnel(u32),
+}
+
 /// Encodable PDU to be sent over a static virtual channel.
 ///
 /// Additional SVC header flags can be added via [`SvcMessage::with_flags`] method.
 pub struct SvcMessage {
     pdu: Box<dyn SvcEncode>,
     flags: ChannelFlags,
+    /// Optional transport context indicating where this message should be sent.
+    /// If None, the message will be sent over the default TCP transport.
+    transport: Option<TransportContext>,
 }
 
 impl fmt::Debug for SvcMessage {
@@ -89,6 +101,7 @@ impl fmt::Debug for SvcMessage {
         f.debug_struct("SvcMessage")
             .field("pdu", &self.pdu.name())
             .field("flags", &self.flags)
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -99,6 +112,18 @@ impl SvcMessage {
     pub fn with_flags(mut self, flags: ChannelFlags) -> Self {
         self.flags |= flags;
         self
+    }
+
+    /// Sets the transport context for this message.
+    #[must_use]
+    pub fn with_transport(mut self, transport: TransportContext) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// Returns the transport context for this message.
+    pub fn transport(&self) -> Option<TransportContext> {
+        self.transport
     }
 
     /// Returns the name of the PDU type
@@ -115,6 +140,7 @@ where
         Self {
             pdu: Box::new(pdu),
             flags: ChannelFlags::empty(),
+            transport: None,
         }
     }
 }
