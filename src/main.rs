@@ -1615,6 +1615,14 @@ fn create_remote_desktop_window(
     menu_button.add_css_class("circular");
     menu_button.set_focus_on_click(false);
 
+    // Minimize button
+    let minimize_button = Button::new();
+    minimize_button.set_icon_name("window-minimize-symbolic");
+    minimize_button.set_tooltip_text(Some("Minimize window"));
+    minimize_button.add_css_class("flat");
+    minimize_button.add_css_class("circular");
+    minimize_button.set_focus_on_click(false);
+
     // Close button
     let close_button = Button::new();
     close_button.set_icon_name("window-close-symbolic");
@@ -1623,10 +1631,11 @@ fn create_remote_desktop_window(
     close_button.add_css_class("circular");
     close_button.set_focus_on_click(false);
 
-    // Pack control bar with new order: connection_label, hotkey_button, pin, fullscreen, close
+    // Pack control bar with new order: connection_label, hotkey_button, pin, minimize, fullscreen, close
     control_bar.append(&connection_label);
     control_bar.append(&hotkey_button);
     control_bar.append(&pin_button);
+    control_bar.append(&minimize_button);
     control_bar.append(&menu_button);
     control_bar.append(&close_button);
 
@@ -2068,6 +2077,12 @@ fn create_remote_desktop_window(
         }
 
         rdp_focus_for_pin.grab_focus();
+    });
+
+    // Minimize button functionality
+    let rd_window_for_minimize = rd_window.clone();
+    minimize_button.connect_clicked(move |_| {
+        rd_window_for_minimize.minimize();
     });
 
     // Close button functionality
