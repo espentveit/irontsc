@@ -17,6 +17,24 @@ unsafe extern "C" {
     fn ERR_error_string_n(e: libc::c_ulong, buf: *mut libc::c_char, len: libc::size_t);
 }
 
+// SSL_CTX_ctrl constants for setting groups and signature algorithms
+const SSL_CTRL_SET_GROUPS_LIST: c_int = 92;
+const SSL_CTRL_SET_SIGALGS_LIST: c_int = 98;
+
+// Wrapper for SSL_CTX_ctrl (not directly exposed in openssl-sys)
+mod ffi_ext {
+    use super::*;
+    
+    pub unsafe fn SSL_CTX_ctrl_wrapper(
+        ctx: *mut ffi::SSL_CTX,
+        cmd: c_int,
+        larg: libc::c_long,
+        parg: *mut libc::c_void,
+    ) -> libc::c_long {
+        ffi::SSL_CTX_ctrl(ctx, cmd, larg, parg)
+    }
+}
+
 const MAX_DTLS_RECORD_SIZE: usize = 64 * 1024;
 const CLIENT_MTU: u32 = 1232;
 
@@ -78,14 +96,18 @@ impl DtlsUdpSocket {
         let mut ctx_builder = SslContext::builder(ssl_method)
             .with_context(|| format!("Failed to create {} context", protocol_name))?;
 
-        // Set version range to support TLS 1.0 through 1.3 (match FreeRDP)
-        // The working capture shows: TLS 1.3, 1.2, 1.1, 1.0 support
+        // Set version range - only TLS 1.2 and 1.3 to reduce ClientHello size
+        // Skip TLS 1.0/1.1 as they're deprecated and add to supported_versions extension
         ctx_builder
-            .set_min_proto_version(Some(SslVersion::TLS1))
+            .set_min_proto_version(Some(SslVersion::TLS1_2))
             .with_context(|| format!("Failed to set min {} version", protocol_name))?;
         ctx_builder
             .set_max_proto_version(Some(SslVersion::TLS1_3))
             .with_context(|| format!("Failed to set max {} version", protocol_name))?;
+
+        // Original (supports TLS 1.0-1.3, larger ClientHello):
+        // ctx_builder.set_min_proto_version(Some(SslVersion::TLS1))?;
+        // ctx_builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
 
         // Configure certificate verification
         if config.verify_certificate {
@@ -101,39 +123,20 @@ impl DtlsUdpSocket {
             ctx_builder.set_verify(SslVerifyMode::NONE);
         }
 
-        //Set TLS 1.3 cipher suites exactly matching FreeRDP
-        // FreeRDP uses only AES-GCM variants (no ChaCha20)
-        // OpenSSL 3.x tends to add ChaCha20 by default, so we need to be explicit
-        // Using a strict list without ChaCha20
+        //Set TLS 1.3 cipher suites - minimal to reduce ClientHello size
+        // Only advertise one cipher to minimize extension bloat
         ctx_builder
-            .set_ciphersuites(
-                "TLS_AES_256_GCM_SHA384:\
-                 TLS_AES_128_GCM_SHA256",
-            )
+            .set_ciphersuites("TLS_AES_256_GCM_SHA384")
             .context("Failed to set TLS 1.3 ciphersuites")?;
 
-        // TLS 1.0-1.2 cipher list matching FreeRDP exactly
-        // Note: OpenSSL naming differs from RFC naming (e.g., SHA384 vs CBC-SHA384)
+        // TLS 1.0-1.2 cipher list - minimal set to keep ClientHello under 1200 bytes
+        // Prioritize modern ECDHE-RSA and fallback to RSA-only
         ctx_builder
             .set_cipher_list(
-                "ECDHE-ECDSA-AES256-GCM-SHA384:\
-                 ECDHE-ECDSA-AES128-GCM-SHA256:\
-                 ECDHE-RSA-AES256-GCM-SHA384:\
+                "ECDHE-RSA-AES256-GCM-SHA384:\
                  ECDHE-RSA-AES128-GCM-SHA256:\
-                 ECDHE-ECDSA-AES256-SHA384:\
-                 ECDHE-ECDSA-AES128-SHA256:\
-                 ECDHE-RSA-AES256-SHA384:\
-                 ECDHE-RSA-AES128-SHA256:\
-                 ECDHE-ECDSA-AES256-SHA:\
-                 ECDHE-ECDSA-AES128-SHA:\
-                 ECDHE-RSA-AES256-SHA:\
-                 ECDHE-RSA-AES128-SHA:\
                  AES256-GCM-SHA384:\
-                 AES128-GCM-SHA256:\
-                 AES256-SHA256:\
-                 AES128-SHA256:\
-                 AES256-SHA:\
-                 AES128-SHA",
+                 AES128-GCM-SHA256",
             )
             .context("Failed to set cipher list")?;
 
@@ -147,6 +150,44 @@ impl DtlsUdpSocket {
         options |= SslOptions::ENABLE_MIDDLEBOX_COMPAT;
 
         ctx_builder.set_options(options);
+
+        // Limit supported elliptic curve groups to reduce key_share extension size
+        // X25519 only = 32-byte public key instead of 8 curves × ~100 bytes
+        // This is critical to keep ClientHello under 1200 bytes (UDP MTU constraint)
+        unsafe {
+            use std::ffi::CString;
+            let groups = CString::new("X25519").unwrap();
+            // SSL_CTX_set1_groups_list sets both supported_groups AND limits key_share
+            let result = ffi_ext::SSL_CTX_ctrl_wrapper(
+                ctx_builder.as_ptr(),
+                SSL_CTRL_SET_GROUPS_LIST,
+                0,
+                groups.as_ptr() as *mut libc::c_void,
+            );
+            if result != 1 {
+                warn!("⚠️  Failed to set supported groups to X25519 only - ClientHello may exceed MTU!");
+            } else {
+                info!("✓ Limited supported groups to X25519 only (reduces ClientHello by ~1200 bytes)");
+            }
+        }
+
+        // Limit signature algorithms to reduce signature_algorithms extension
+        // Only advertise what the RDP server typically uses (RSA with PSS/SHA256)
+        unsafe {
+            use std::ffi::CString;
+            let sigalgs = CString::new("rsa_pss_rsae_sha256:rsa_pkcs1_sha256").unwrap();
+            let result = ffi_ext::SSL_CTX_ctrl_wrapper(
+                ctx_builder.as_ptr(),
+                SSL_CTRL_SET_SIGALGS_LIST,
+                0,
+                sigalgs.as_ptr() as *mut libc::c_void,
+            );
+            if result != 1 {
+                debug!("Note: Could not restrict signature algorithms (may be OpenSSL version specific)");
+            } else {
+                info!("✓ Limited signature algorithms to reduce ClientHello size");
+            }
+        }
 
         // Protocol-specific options
         match config.protocol {
