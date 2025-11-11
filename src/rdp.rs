@@ -1865,13 +1865,8 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut last_frame_dimensions = (image.width(), image.height());
     let mut frame_ready = false;
 
-    // Track pending resize request (FIFO with one slot: only the latest resize is kept)
-    // This is sent once DisplayControl channel is ready and we're in a stable state
-    let mut pending_resize: Option<(u16, u16, u32, Option<(u32, u32)>)> = None;
-    
-    // Track if a resize is currently in flight (sent but not yet stable)
-    // We wait before sending the next resize to avoid server errors
-    let mut resize_in_flight = false;
+    // Track pending initial resize request (to be sent once DisplayControl channel is ready)
+    let mut pending_initial_resize: Option<(u16, u16, u32, Option<(u32, u32)>)> = None;
 
     // Track active UDP transport tunnel (currently only one tunnel is supported)
     let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> =
@@ -2183,21 +2178,18 @@ async fn active_session<T: RdpEventSender + Clone>(
                                             outputs.push(ActiveStageOutput::ResponseFrame(frame));
 
                                             // Check if we have a pending resize now that channels (like DisplayControl) may be ready
-                                            if !resize_in_flight {
-                                                if let Some((width, height, scale_factor, physical_size)) = pending_resize.take() {
-                                                    if let Some(result) = active_stage.encode_resize(
-                                                        width as u32,
-                                                        height as u32,
-                                                        Some(scale_factor),
-                                                        physical_size,
-                                                    ) {
-                                                        info!(width, height, scale_factor, "📐 Sending queued resize after deferred channel creation");
-                                                        resize_in_flight = true;
-                                                        outputs.push(ActiveStageOutput::ResponseFrame(result?));
-                                                    } else {
-                                                        // Still not available, put it back
-                                                        pending_resize = Some((width, height, scale_factor, physical_size));
-                                                    }
+                                            if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
+                                                if let Some(result) = active_stage.encode_resize(
+                                                    width as u32,
+                                                    height as u32,
+                                                    Some(scale_factor),
+                                                    physical_size,
+                                                ) {
+                                                    info!(width, height, scale_factor, "📐 Sending queued resize after deferred channel creation");
+                                                    outputs.push(ActiveStageOutput::ResponseFrame(result?));
+                                                } else {
+                                                    // Still not available, put it back
+                                                    pending_initial_resize = Some((width, height, scale_factor, physical_size));
                                                 }
                                             }
                                         }
@@ -2397,34 +2389,20 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                 match input_event {
                     RdpInputEvent::Resize { width, height, scale_factor, physical_size } => {
-                        info!(width, height, scale_factor, ?physical_size, "📐 Resize event received from GUI");
+                        info!(width, height, scale_factor, ?physical_size, "📐 Resize event received");
 
-                        // Store resize request (replace any pending one - we only keep the latest)
-                        pending_resize = Some((width, height, scale_factor, physical_size));
-
-                        // Attempt to send immediately if DisplayControl is ready and no resize is in flight
-                        if !resize_in_flight {
-                            if let Some((width, height, scale_factor, physical_size)) = pending_resize.take() {
-                                if let Some(result) = active_stage.encode_resize(
-                                    width as u32,
-                                    height as u32,
-                                    Some(scale_factor),
-                                    physical_size,
-                                ) {
-                                    info!(width, height, scale_factor, "📐 Sending resize request to server");
-                                    resize_in_flight = true;
-                                    vec![ActiveStageOutput::ResponseFrame(result?)]
-                                } else {
-                                    // Display Control channel not available yet - will be sent when ready
-                                    debug!("Resize queued - Display Control channel not available yet");
-                                    pending_resize = Some((width, height, scale_factor, physical_size));
-                                    vec![]
-                                }
-                            } else {
-                                vec![]
-                            }
+                        // Attempt to encode the resize request
+                        if let Some(result) = active_stage.encode_resize(
+                            width as u32,
+                            height as u32,
+                            Some(scale_factor),
+                            physical_size,
+                        ) {
+                            vec![ActiveStageOutput::ResponseFrame(result?)]
                         } else {
-                            debug!("Resize queued - previous resize still in flight");
+                            // Display Control channel not available yet - queue for later
+                            debug!("Resize requested but Display Control channel not available, queueing");
+                            pending_initial_resize = Some((width, height, scale_factor, physical_size));
                             vec![]
                         }
                     },
@@ -2784,43 +2762,33 @@ async fn active_session<T: RdpEventSender + Clone>(
             }
         }
 
-        // Check if we have a pending resize and DisplayControl is now available, and no resize in flight
-        if !resize_in_flight {
-            if let Some((width, height, scale_factor, physical_size)) = pending_resize.take() {
-                if let Some(result) = active_stage.encode_resize(
-                    width as u32,
-                    height as u32,
-                    Some(scale_factor),
-                    physical_size,
-                ) {
-                    info!(
-                        width,
-                        height, scale_factor, "📐 Sending queued resize request"
-                    );
-                    match result {
-                        Ok(frame) => {
-                            resize_in_flight = true;
-                            writer
-                                .write_all(&frame)
-                                .await
-                                .map_err(|e| session::custom_err!("write pending resize", e))?;
-                        }
-                        Err(e) => {
-                            warn!("Failed to encode queued resize: {}", e);
-                        }
+        // Check if we have a pending resize and DisplayControl is now available
+        if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
+            if let Some(result) = active_stage.encode_resize(
+                width as u32,
+                height as u32,
+                Some(scale_factor),
+                physical_size,
+            ) {
+                info!(
+                    width,
+                    height, scale_factor, "📐 Sending queued initial resize request"
+                );
+                match result {
+                    Ok(frame) => {
+                        writer
+                            .write_all(&frame)
+                            .await
+                            .map_err(|e| session::custom_err!("write pending resize", e))?;
                     }
-                } else {
-                    // Still not available, put it back
-                    pending_resize = Some((width, height, scale_factor, physical_size));
+                    Err(e) => {
+                        warn!("Failed to encode queued resize: {}", e);
+                    }
                 }
+            } else {
+                // Still not available, put it back
+                pending_initial_resize = Some((width, height, scale_factor, physical_size));
             }
-        }
-
-        // Clear resize_in_flight after a delay to allow server to process
-        // Since server doesn't send explicit ACK, we wait a bit before allowing next resize
-        if resize_in_flight {
-            // For now, clear it on next iteration. In future, could add timer-based logic
-            resize_in_flight = false;
         }
     };
 
