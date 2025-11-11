@@ -367,6 +367,8 @@ async fn connect(
 
         // Input-related channels - stubs for now (Microsoft::Windows::RDS::Input uses advanced input protocol MS-RDPEAI)
         drdynvc =
+            drdynvc.with_dynamic_channel(StubDvcProcessor::new("cliprdr"));
+        drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
         drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));

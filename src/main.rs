@@ -22,7 +22,6 @@ mod rdp;
 mod stub_dvc;
 mod udp_gfx;
 mod udp_transport;
-mod ws;
 
 // Video Redirection support (MS-RDPEVOR)
 #[cfg(feature = "video-redirection")]
