@@ -2181,17 +2181,17 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                                             // Check if we have a pending resize now that channels (like DisplayControl) may be ready
                                             if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
-                                                if let Some(result) = active_stage.encode_resize(
-                                                    width as u32,
-                                                    height as u32,
-                                                    Some(scale_factor),
-                                                    physical_size,
-                                                ) {
-                                                    info!(width, height, scale_factor, "📐 Sending queued resize after deferred channel creation");
-                                                    outputs.push(ActiveStageOutput::ResponseFrame(result?));
-                                                } else {
-                                                    // Still not available, put it back
-                                                    pending_initial_resize = Some((width, height, scale_factor, physical_size));
+                                                match active_stage.encode_resize(width as u32, height as u32, Some(scale_factor), physical_size) {
+                                                    Some(Ok(frame)) => {
+                                                        info!(width, height, scale_factor, "📐 Sending queued resize after channel creation");
+                                                        outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                                    }
+                                                    Some(Err(e)) => {
+                                                        warn!("Failed to encode queued resize: {}", e);
+                                                    }
+                                                    None => {
+                                                        pending_initial_resize = Some((width, height, scale_factor, physical_size));
+                                                    }
                                                 }
                                             }
                                         }
@@ -2339,6 +2339,20 @@ async fn active_session<T: RdpEventSender + Clone>(
                         } else {
                             warn!("SoftSyncCompleted received but GFX processor is unavailable");
                         }
+
+                        // Process any pending resize now that soft sync is complete
+                        if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
+                            match active_stage.encode_resize(width as u32, height as u32, Some(scale_factor), physical_size) {
+                                Some(Ok(frame)) if !frame.is_empty() => {
+                                    info!(width, height, scale_factor, "📐 Sending queued resize after soft-sync");
+                                    if let Err(e) = writer.write_all(&frame).await {
+                                        warn!("Failed to write queued resize: {}", e);
+                                    }
+                                }
+                                Some(Err(e)) => warn!("Failed to encode queued resize: {}", e),
+                                _ => info!("📐 Queued resize discarded: DisplayControl not ready"),
+                            }
+                        }
                     }
                     Some(UdpTransportEvent::DataReceived { request_id, data }) => {
                         debug!("📦 Received UDP data from tunnel request_id={} ({} bytes)", request_id, data.len());
@@ -2384,7 +2398,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
                 }
 
-                outputs
+                vec![]
             }
             input_event = input_event_receiver.recv() => {
                 let input_event = input_event.ok_or_else(|| session::general_err!("GUI is stopped"))?;
@@ -2393,8 +2407,17 @@ async fn active_session<T: RdpEventSender + Clone>(
                     RdpInputEvent::Resize { width, height, scale_factor, physical_size } => {
                         info!(width, height, scale_factor, ?physical_size, "📐 Resize event received");
 
-                        // Attempt to encode the resize request
-                        if let Some(result) = active_stage.encode_resize(
+                        // Check if we need to wait for soft sync on UDP connections
+                        let waiting_for_soft_sync = udp_tunnels.values().any(|t| 
+                            t.tunnel_established && !t.soft_sync_received
+                        );
+
+                        if waiting_for_soft_sync {
+                            // UDP tunnel is active but soft sync not complete yet - queue for later
+                            info!("📐 Resize deferred: waiting for UDP soft-sync to complete");
+                            pending_initial_resize = Some((width, height, scale_factor, physical_size));
+                            vec![]
+                        } else if let Some(result) = active_stage.encode_resize(
                             width as u32,
                             height as u32,
                             Some(scale_factor),
@@ -2766,30 +2789,18 @@ async fn active_session<T: RdpEventSender + Clone>(
 
         // Check if we have a pending resize and DisplayControl is now available
         if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
-            if let Some(result) = active_stage.encode_resize(
-                width as u32,
-                height as u32,
-                Some(scale_factor),
-                physical_size,
-            ) {
-                info!(
-                    width,
-                    height, scale_factor, "📐 Sending queued initial resize request"
-                );
-                match result {
-                    Ok(frame) => {
-                        writer
-                            .write_all(&frame)
-                            .await
-                            .map_err(|e| session::custom_err!("write pending resize", e))?;
-                    }
-                    Err(e) => {
-                        warn!("Failed to encode queued resize: {}", e);
-                    }
+            match active_stage.encode_resize(width as u32, height as u32, Some(scale_factor), physical_size) {
+                Some(Ok(frame)) => {
+                    info!(width, height, scale_factor, "📐 Sending queued initial resize");
+                    writer.write_all(&frame).await
+                        .map_err(|e| session::custom_err!("write pending resize", e))?;
                 }
-            } else {
-                // Still not available, put it back
-                pending_initial_resize = Some((width, height, scale_factor, physical_size));
+                Some(Err(e)) => {
+                    warn!("Failed to encode queued resize: {}", e);
+                }
+                None => {
+                    pending_initial_resize = Some((width, height, scale_factor, physical_size));
+                }
             }
         }
     };
