@@ -17,6 +17,7 @@ const GUID_H264: [u8; 16] = [
 
 const CODEC_ID_H264: u8 = 4;
 const AVC444_SUPPORT: u8 = 0x02;
+const AVC420_ONLY: u8 = 0x00;
 
 /// Create a BitmapConfig tailored for RDPEGFX/H.264 sessions.
 ///
@@ -25,6 +26,8 @@ const AVC444_SUPPORT: u8 = 0x02;
 pub fn create_bitmap_config_with_h264(
     lossy_compression: bool,
     color_depth: u32,
+    disable_avc420: bool,
+    disable_avc444: bool,
 ) -> anyhow::Result<ironrdp::connector::BitmapConfig> {
     use ironrdp_pdu::rdp::capability_sets::{Codec, CodecProperty, client_codecs_capabilities};
 
@@ -34,13 +37,33 @@ pub fn create_bitmap_config_with_h264(
     let mut codecs = client_codecs_capabilities(&[])
         .map_err(|e| anyhow::anyhow!("Failed to get bitmap codecs: {}", e))?;
 
-    // Advertise H.264/AVC444 capability to match mstsc/FreeRDP behaviour.
-    codecs.0.push(Codec {
-        id: CODEC_ID_H264,
-        property: CodecProperty::H264(AVC444_SUPPORT),
-    });
+    // Advertise H.264 capability based on user preferences
+    // - If both AVC420 and AVC444 are disabled, don't advertise H.264 at all
+    // - If only AVC444 is disabled, advertise AVC420 only (support flags = 0x00)
+    // - If only AVC420 is disabled, advertise AVC444 only (support flags = 0x02)
+    // - If neither is disabled, advertise AVC444 support (support flags = 0x02, which includes AVC420)
+    if !disable_avc420 || !disable_avc444 {
+        let support_flags = if disable_avc444 {
+            AVC420_ONLY // Only AVC420
+        } else {
+            AVC444_SUPPORT // AVC444 (includes AVC420)
+        };
 
-    info!("✅ Bitmap codecs configured for RDPEGFX (RemoteFX + H.264 advertised)");
+        codecs.0.push(Codec {
+            id: CODEC_ID_H264,
+            property: CodecProperty::H264(support_flags),
+        });
+
+        if disable_avc420 {
+            info!("✅ Bitmap codecs configured for RDPEGFX (H.264 AVC444 only)");
+        } else if disable_avc444 {
+            info!("✅ Bitmap codecs configured for RDPEGFX (H.264 AVC420 only)");
+        } else {
+            info!("✅ Bitmap codecs configured for RDPEGFX (H.264 AVC420 + AVC444)");
+        }
+    } else {
+        info!("✅ Bitmap codecs configured for RDPEGFX (H.264 disabled by user)");
+    }
 
     Ok(ironrdp::connector::BitmapConfig {
         lossy_compression,
