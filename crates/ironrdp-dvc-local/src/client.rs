@@ -233,6 +233,24 @@ impl DrdynvcClient {
                 tunnel.channel_ids.len()
             );
             for &channel_id in &tunnel.channel_ids {
+                // Check if this is the clipboard channel - skip it per FreeRDP behavior
+                // Clipboard should remain on SVC (TCP), not switch to UDP DVC
+                let is_cliprdr = self.dynamic_channels
+                    .get_by_channel_id(channel_id)
+                    .map(|ch| {
+                        let name = ch.channel_name();
+                        name.as_bytes().starts_with(b"cliprdr")
+                    })
+                    .unwrap_or(false);
+                
+                if is_cliprdr {
+                    debug!(
+                        "   ⏭️  Skipping clipboard channel_id={} - keeping on SVC/TCP",
+                        channel_id
+                    );
+                    continue;
+                }
+
                 // Mark this channel as using UDP with this tunnel type
                 debug!(
                     "   Marking channel_id={} for UDP tunnel 0x{:08X} ({})",
