@@ -2820,5 +2820,25 @@ async fn active_session<T: RdpEventSender + Clone>(
 
     };
 
+    // Explicitly shut down UDP tunnels before closing main connection
+    // Per MS-RDPEMT: "There is no explicit connection-termination protocol over a multitransport connection.
+    // The client and server terminate the multitransport connection and disconnect the underlying transports
+    // when the main RDP connection is disconnected."
+    // We send shutdown commands and wait a bit for cleanup before closing the main connection.
+    info!("🧹 Cleaning up {} UDP tunnel(s) before connection close", udp_tunnels.len());
+    for (request_id, tunnel) in udp_tunnels.iter() {
+        info!("📤 Sending shutdown to UDP tunnel request_id={}", request_id);
+        if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::Shutdown) {
+            debug!("Failed to send shutdown to tunnel {}: {} (may already be closed)", request_id, e);
+        }
+    }
+    
+    // Give tunnels a moment to process shutdown cleanly
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    
+    // Drop all tunnels explicitly
+    udp_tunnels.clear();
+    info!("✅ UDP tunnels cleaned up");
+
     Ok(RdpControlFlow::TerminatedGracefully(disconnect_reason))
 }
