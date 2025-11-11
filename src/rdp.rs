@@ -2182,23 +2182,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                                             let frame = active_stage.encode_dvc_messages(deferred_messages)?;
                                             outputs.push(ActiveStageOutput::ResponseFrame(frame));
 
-                                            // Check if we have a pending resize now that channels (like DisplayControl) may be ready
-                                            if !resize_in_flight {
-                                                if let Some((width, height, scale_factor, physical_size)) = pending_resize.take() {
-                                                    if let Some(result) = active_stage.encode_resize(
-                                                        width as u32,
-                                                        height as u32,
-                                                        Some(scale_factor),
-                                                        physical_size,
-                                                    ) {
-                                                        info!(width, height, scale_factor, "📐 Sending queued resize after deferred channel creation");
-                                                        resize_in_flight = true;
-                                                        outputs.push(ActiveStageOutput::ResponseFrame(result?));
-                                                    } else {
-                                                        // Still not available, put it back
-                                                        pending_resize = Some((width, height, scale_factor, physical_size));
-                                                    }
-                                                }
+                                            // Don't send resize yet - wait for soft-sync to complete for stability
+                                            // The pending_resize will be sent after soft-sync completion
+                                            if pending_resize.is_some() {
+                                                debug!("Resize queued - waiting for soft-sync completion before sending");
                                             }
                                         }
                                     }
@@ -2333,6 +2320,32 @@ async fn active_session<T: RdpEventSender + Clone>(
                             tunnel.soft_sync_received = true;
                         }
 
+                        // Clear resize_in_flight flag now that soft-sync is complete
+                        // This indicates the server has processed everything and is ready for new commands
+                        if resize_in_flight {
+                            info!("✅ Clearing resize_in_flight flag after soft-sync completion");
+                            resize_in_flight = false;
+                        }
+
+                        // Now send any pending resize since we're in a stable state
+                        if !resize_in_flight {
+                            if let Some((width, height, scale_factor, physical_size)) = pending_resize.take() {
+                                if let Some(result) = active_stage.encode_resize(
+                                    width as u32,
+                                    height as u32,
+                                    Some(scale_factor),
+                                    physical_size,
+                                ) {
+                                    info!(width, height, scale_factor, "📐 Sending queued resize after soft-sync completion");
+                                    resize_in_flight = true;
+                                    outputs.push(ActiveStageOutput::ResponseFrame(result?));
+                                } else {
+                                    debug!("Resize queued - Display Control channel not available yet");
+                                    pending_resize = Some((width, height, scale_factor, physical_size));
+                                }
+                            }
+                        }
+
                         // Enable UDP mode for the GFX channel
                         use crate::gfx_channel::GfxDvcProcessor;
                         if let Some(channel) = active_stage.get_dvc_mut::<GfxDvcProcessor>() {
@@ -2400,33 +2413,11 @@ async fn active_session<T: RdpEventSender + Clone>(
                         info!(width, height, scale_factor, ?physical_size, "📐 Resize event received from GUI");
 
                         // Store resize request (replace any pending one - we only keep the latest)
+                        // Don't send immediately - wait for stable state (after soft-sync)
                         pending_resize = Some((width, height, scale_factor, physical_size));
+                        debug!("Resize queued - will be sent after soft-sync completion for stability");
 
-                        // Attempt to send immediately if DisplayControl is ready and no resize is in flight
-                        if !resize_in_flight {
-                            if let Some((width, height, scale_factor, physical_size)) = pending_resize.take() {
-                                if let Some(result) = active_stage.encode_resize(
-                                    width as u32,
-                                    height as u32,
-                                    Some(scale_factor),
-                                    physical_size,
-                                ) {
-                                    info!(width, height, scale_factor, "📐 Sending resize request to server");
-                                    resize_in_flight = true;
-                                    vec![ActiveStageOutput::ResponseFrame(result?)]
-                                } else {
-                                    // Display Control channel not available yet - will be sent when ready
-                                    debug!("Resize queued - Display Control channel not available yet");
-                                    pending_resize = Some((width, height, scale_factor, physical_size));
-                                    vec![]
-                                }
-                            } else {
-                                vec![]
-                            }
-                        } else {
-                            debug!("Resize queued - previous resize still in flight");
-                            vec![]
-                        }
+                        vec![]
                     },
                     RdpInputEvent::FastPath(events) => {
                         trace!(?events);
@@ -2780,12 +2771,25 @@ async fn active_session<T: RdpEventSender + Clone>(
                     tunnel.soft_sync_received = true;
                     // Clear the timestamp to avoid repeated warnings
                     tunnel.tunnel_established_time = None;
+                    
+                    // Since soft-sync timed out, clear resize_in_flight to allow pending resize to be sent
+                    if resize_in_flight {
+                        info!("✅ Clearing resize_in_flight flag after soft-sync timeout (TCP fallback)");
+                        resize_in_flight = false;
+                    }
                 }
             }
         }
 
-        // Check if we have a pending resize and DisplayControl is now available, and no resize in flight
-        if !resize_in_flight {
+        // Send pending resize if:
+        // 1. No UDP tunnel active (multitransport disabled), OR
+        // 2. Soft-sync timed out and we're using TCP fallback, OR  
+        // 3. Soft-sync completed and resize_in_flight was cleared
+        let has_active_udp = !udp_tunnels.is_empty();
+        let should_send_resize = !resize_in_flight && pending_resize.is_some() && (!has_active_udp || 
+            udp_tunnels.values().any(|t| t.soft_sync_received));
+            
+        if should_send_resize {
             if let Some((width, height, scale_factor, physical_size)) = pending_resize.take() {
                 if let Some(result) = active_stage.encode_resize(
                     width as u32,
@@ -2793,10 +2797,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                     Some(scale_factor),
                     physical_size,
                 ) {
-                    info!(
-                        width,
-                        height, scale_factor, "📐 Sending queued resize request"
-                    );
+                    info!(width, height, scale_factor, "📐 Sending queued resize (no UDP or post soft-sync)");
                     match result {
                         Ok(frame) => {
                             resize_in_flight = true;
@@ -2810,18 +2811,13 @@ async fn active_session<T: RdpEventSender + Clone>(
                         }
                     }
                 } else {
-                    // Still not available, put it back
+                    // DisplayControl not available yet, put it back
                     pending_resize = Some((width, height, scale_factor, physical_size));
                 }
             }
         }
 
-        // Clear resize_in_flight after a delay to allow server to process
-        // Since server doesn't send explicit ACK, we wait a bit before allowing next resize
-        if resize_in_flight {
-            // For now, clear it on next iteration. In future, could add timer-based logic
-            resize_in_flight = false;
-        }
+
     };
 
     Ok(RdpControlFlow::TerminatedGracefully(disconnect_reason))
