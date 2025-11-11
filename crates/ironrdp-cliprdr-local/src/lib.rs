@@ -321,9 +321,7 @@ impl<R: Role> SvcProcessor for Cliprdr<R> {
         if R::is_server() {
             Ok(vec![self.capabilities()?, self.monitor_ready()?])
         } else {
-            // Client must initiate handshake per MS-RDPECLIP and FreeRDP behavior
-            // Send Capabilities first, then wait for server's Capabilities/MonitorReady
-            Ok(vec![self.capabilities()?])
+            Ok(Vec::new())
         }
     }
 
