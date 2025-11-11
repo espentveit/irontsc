@@ -279,7 +279,12 @@ fn create_rdp_config(
             #[cfg(feature = "h264")]
             {
                 // Inject H.264/AVC444 codec support for RDPEGFX hardware encoding
-                match crate::h264_codec_caps::create_bitmap_config_with_h264(false, 32) {
+                match crate::h264_codec_caps::create_bitmap_config_with_h264(
+                    false,
+                    32,
+                    rdp_settings.get_disable_avc420(),
+                    rdp_settings.get_disable_avc444(),
+                ) {
                     Ok(config) => Some(config),
                     Err(e) => {
                         tracing::warn!("Failed to create H.264 bitmap config: {}", e);
@@ -313,6 +318,9 @@ fn create_rdp_config(
         rdcleanpath: None,
         dvc_pipe_proxies: Vec::new(),
         h264_hw_accel: rdp_settings.get_h264_hw_accel(),
+        disable_avc420: rdp_settings.get_disable_avc420(),
+        disable_avc444: rdp_settings.get_disable_avc444(),
+        disable_udp: rdp_settings.get_disable_udp(),
     }
 }
 
@@ -494,6 +502,14 @@ struct RdpSettings {
     dpi_scaling: Option<u32>,
     #[serde(default)]
     h264_hw_accel: bool,
+    #[serde(default)]
+    disable_avc420: bool,
+    #[serde(default)]
+    disable_avc444: bool,
+    #[serde(default)]
+    disable_udp: bool,
+    #[serde(default)]
+    show_codec_grid: bool,
 }
 
 fn default_width() -> u16 {
@@ -520,6 +536,10 @@ impl Default for RdpSettings {
             full_screen: false,
             dpi_scaling: None,
             h264_hw_accel: false, // Default to software decoding for compatibility
+            disable_avc420: false,
+            disable_avc444: false,
+            disable_udp: false,
+            show_codec_grid: false,
         }
     }
 }
@@ -600,6 +620,26 @@ impl RdpSettings {
                         settings.h264_hw_accel = val != 0;
                     }
                 }
+                "irontsc:disable_avc420" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.disable_avc420 = val != 0;
+                    }
+                }
+                "irontsc:disable_avc444" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.disable_avc444 = val != 0;
+                    }
+                }
+                "irontsc:disable_udp" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.disable_udp = val != 0;
+                    }
+                }
+                "irontsc:show_codec_grid" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.show_codec_grid = val != 0;
+                    }
+                }
                 _ => {}
             }
         }
@@ -677,6 +717,22 @@ impl RdpSettings {
             "irontsc:h264_hw_accel:i:{}",
             if self.h264_hw_accel { 1 } else { 0 }
         ));
+        lines.push(format!(
+            "irontsc:disable_avc420:i:{}",
+            if self.disable_avc420 { 1 } else { 0 }
+        ));
+        lines.push(format!(
+            "irontsc:disable_avc444:i:{}",
+            if self.disable_avc444 { 1 } else { 0 }
+        ));
+        lines.push(format!(
+            "irontsc:disable_udp:i:{}",
+            if self.disable_udp { 1 } else { 0 }
+        ));
+        lines.push(format!(
+            "irontsc:show_codec_grid:i:{}",
+            if self.show_codec_grid { 1 } else { 0 }
+        ));
 
         lines.join("\n")
     }
@@ -745,6 +801,38 @@ impl RdpSettings {
 
     fn set_h264_hw_accel(&mut self, enabled: bool) {
         self.h264_hw_accel = enabled;
+    }
+
+    fn get_disable_avc420(&self) -> bool {
+        self.disable_avc420
+    }
+
+    fn set_disable_avc420(&mut self, disabled: bool) {
+        self.disable_avc420 = disabled;
+    }
+
+    fn get_disable_avc444(&self) -> bool {
+        self.disable_avc444
+    }
+
+    fn set_disable_avc444(&mut self, disabled: bool) {
+        self.disable_avc444 = disabled;
+    }
+
+    fn get_disable_udp(&self) -> bool {
+        self.disable_udp
+    }
+
+    fn set_disable_udp(&mut self, disabled: bool) {
+        self.disable_udp = disabled;
+    }
+
+    fn get_show_codec_grid(&self) -> bool {
+        self.show_codec_grid
+    }
+
+    fn set_show_codec_grid(&mut self, enabled: bool) {
+        self.show_codec_grid = enabled;
     }
 }
 
@@ -1630,10 +1718,19 @@ fn create_remote_desktop_window(
     close_button.add_css_class("circular");
     close_button.set_focus_on_click(false);
 
-    // Pack control bar with new order: connection_label, hotkey_button, pin, minimize, fullscreen, close
+    // Info button
+    let info_button = Button::new();
+    info_button.set_icon_name("dialog-information-symbolic");
+    info_button.set_tooltip_text(Some("Connection information"));
+    info_button.add_css_class("flat");
+    info_button.add_css_class("circular");
+    info_button.set_focus_on_click(false);
+
+    // Pack control bar with new order: connection_label, hotkey_button, pin, info, minimize, fullscreen, close
     control_bar.append(&connection_label);
     control_bar.append(&hotkey_button);
     control_bar.append(&pin_button);
+    control_bar.append(&info_button);
     control_bar.append(&minimize_button);
     control_bar.append(&menu_button);
     control_bar.append(&close_button);
@@ -1755,6 +1852,95 @@ fn create_remote_desktop_window(
     let last_frame_size = Rc::new(RefCell::new((0u16, 0u16)));
     let last_frame_size_clone = last_frame_size.clone();
 
+    // Shared connection statistics for info dialog
+    use std::collections::VecDeque;
+    #[derive(Clone)]
+    struct StatsHistory {
+        bandwidth_sent: VecDeque<(f64, u64)>,     // (time, bytes)
+        bandwidth_received: VecDeque<(f64, u64)>, // (time, bytes)
+        rtt_history: VecDeque<(f64, u32)>,         // (time, ms)
+        frame_times: VecDeque<f64>,                // frame timestamps
+        protocol: String,
+        start_time: std::time::Instant,
+        last_bytes_sent: u64,
+        last_bytes_received: u64,
+        last_frame_time: Option<std::time::Instant>,
+    }
+    
+    impl StatsHistory {
+        fn new() -> Self {
+            Self {
+                bandwidth_sent: VecDeque::with_capacity(240),     // 120 seconds at 0.5s intervals
+                bandwidth_received: VecDeque::with_capacity(240),
+                rtt_history: VecDeque::with_capacity(240),
+                frame_times: VecDeque::with_capacity(1000),       // Keep last 1000 frames (~16s at 60fps)
+                protocol: "Connecting...".to_string(),
+                start_time: std::time::Instant::now(),
+                last_bytes_sent: 0,
+                last_bytes_received: 0,
+                last_frame_time: None,
+            }
+        }
+        
+        fn update(&mut self, stats: &rdp::ConnectionStats) {
+            let elapsed = self.start_time.elapsed().as_secs_f64();
+            
+            // Add bandwidth samples (keep 2 minutes)
+            if self.bandwidth_sent.len() >= 240 {
+                self.bandwidth_sent.pop_front();
+            }
+            self.bandwidth_sent.push_back((elapsed, stats.bytes_sent));
+            
+            if self.bandwidth_received.len() >= 240 {
+                self.bandwidth_received.pop_front();
+            }
+            self.bandwidth_received.push_back((elapsed, stats.bytes_received));
+            
+            // Add RTT sample if available
+            if let Some(rtt) = stats.roundtrip_time_ms {
+                if self.rtt_history.len() >= 240 {
+                    self.rtt_history.pop_front();
+                }
+                self.rtt_history.push_back((elapsed, rtt));
+            }
+            
+            self.protocol = stats.transport_protocol.clone();
+            self.last_bytes_sent = stats.bytes_sent;
+            self.last_bytes_received = stats.bytes_received;
+        }
+        
+        fn record_frame(&mut self) {
+            let now = std::time::Instant::now();
+            let elapsed = self.start_time.elapsed().as_secs_f64();
+            
+            if self.frame_times.len() >= 1000 {
+                self.frame_times.pop_front();
+            }
+            self.frame_times.push_back(elapsed);
+            self.last_frame_time = Some(now);
+        }
+        
+        fn get_fps(&self) -> f64 {
+            if self.frame_times.len() < 2 {
+                return 0.0;
+            }
+            
+            // Calculate FPS from last second of frames
+            let current_time = self.start_time.elapsed().as_secs_f64();
+            let one_sec_ago = current_time - 1.0;
+            
+            let recent_frames = self.frame_times.iter()
+                .filter(|&&t| t >= one_sec_ago)
+                .count();
+            
+            recent_frames as f64
+        }
+    }
+
+    let stats_history = Rc::new(RefCell::new(StatsHistory::new()));
+    let stats_history_for_events = stats_history.clone();
+    let stats_history_for_frames = stats_history.clone();
+
     // Bridge tokio channel to GTK main thread
     let close_intent_for_events = close_intent.clone();
 
@@ -1775,6 +1961,10 @@ fn create_remote_desktop_window(
                         region
                     );
                     rdp_widget_events.update_image(buffer, width.get(), height.get(), region);
+                    
+                    // Track frame for FPS calculation
+                    stats_history_for_frames.borrow_mut().record_frame();
+                    
                     let mut last_size = last_frame_size_clone.borrow_mut();
                     let new_size = (width.get(), height.get());
                     if *last_size != new_size {
@@ -1830,6 +2020,9 @@ fn create_remote_desktop_window(
                 }
                 RdpOutputEvent::PointerBitmap(pointer) => {
                     rdp_widget_events.set_cursor_from_bitmap(pointer);
+                }
+                RdpOutputEvent::ConnectionStats(stats) => {
+                    stats_history_for_events.borrow_mut().update(&stats);
                 }
             }
         }
@@ -2091,6 +2284,428 @@ fn create_remote_desktop_window(
         close_intent_for_button.set(CloseIntent::User);
         rd_window_for_close.close();
     });
+
+    // Info button functionality - show connection info dialog
+    let rd_window_for_info = rd_window.clone();
+    let server_for_info = server.clone();
+    let username_for_info = username.clone();
+    let domain_for_info = domain.clone();
+    let stats_history_for_info = stats_history.clone();
+    info_button.connect_clicked(move |_| {
+        let dialog = gtk::Window::builder()
+            .transient_for(&rd_window_for_info)
+            .modal(false)
+            .title("Connection Information")
+            .default_width(600)
+            .default_height(500)
+            .resizable(true)
+            .build();
+
+        let dialog_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        dialog_box.set_margin_top(20);
+        dialog_box.set_margin_bottom(20);
+        dialog_box.set_margin_start(20);
+        dialog_box.set_margin_end(20);
+
+        // Connection details section
+        let details_frame = gtk::Frame::new(Some("Connection Details"));
+        let details_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        details_box.set_margin_top(5);
+        details_box.set_margin_bottom(5);
+        details_box.set_margin_start(10);
+        details_box.set_margin_end(10);
+
+        // Server info
+        let server_label = gtk::Label::new(None);
+        server_label.set_markup(&format!("<b>Server:</b> {}", server_for_info));
+        server_label.set_xalign(0.0);
+        details_box.append(&server_label);
+
+        // Username info
+        let username_label = gtk::Label::new(None);
+        let username_text = if domain_for_info.is_empty() {
+            username_for_info.clone()
+        } else {
+            format!("{}\\{}", domain_for_info, username_for_info)
+        };
+        username_label.set_markup(&format!("<b>User:</b> {}", username_text));
+        username_label.set_xalign(0.0);
+        details_box.append(&username_label);
+
+        // Resolution info
+        let resolution_label = gtk::Label::new(None);
+        resolution_label.set_markup(&format!(
+            "<b>Resolution:</b> {}×{}",
+            logical_config_width, logical_config_height
+        ));
+        resolution_label.set_xalign(0.0);
+        details_box.append(&resolution_label);
+
+        // Scale info
+        let scale_label = gtk::Label::new(None);
+        scale_label.set_markup(&format!(
+            "<b>DPI Scale:</b> {}%",
+            initial_scale_percent
+        ));
+        scale_label.set_xalign(0.0);
+        details_box.append(&scale_label);
+
+        details_frame.set_child(Some(&details_box));
+        dialog_box.append(&details_frame);
+
+        // Live statistics section
+        let stats_frame = gtk::Frame::new(Some("Live Statistics"));
+        let stats_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        stats_box.set_margin_top(5);
+        stats_box.set_margin_bottom(5);
+        stats_box.set_margin_start(10);
+        stats_box.set_margin_end(10);
+
+        // Protocol label
+        let protocol_label = gtk::Label::new(None);
+        protocol_label.set_xalign(0.0);
+        stats_box.append(&protocol_label);
+
+        // Bandwidth labels
+        let bandwidth_sent_label = gtk::Label::new(None);
+        bandwidth_sent_label.set_xalign(0.0);
+        stats_box.append(&bandwidth_sent_label);
+
+        let bandwidth_recv_label = gtk::Label::new(None);
+        bandwidth_recv_label.set_xalign(0.0);
+        stats_box.append(&bandwidth_recv_label);
+
+        // RTT label
+        let rtt_label = gtk::Label::new(None);
+        rtt_label.set_xalign(0.0);
+        stats_box.append(&rtt_label);
+
+        // FPS label
+        let fps_label = gtk::Label::new(None);
+        fps_label.set_xalign(0.0);
+        stats_box.append(&fps_label);
+
+        // Simple text-based graphs (using block characters)
+        let bandwidth_sent_graph_label = gtk::Label::new(None);
+        bandwidth_sent_graph_label.set_xalign(0.0);
+        bandwidth_sent_graph_label.set_use_markup(true);
+        bandwidth_sent_graph_label.set_wrap(false);
+        bandwidth_sent_graph_label.set_selectable(false);
+        stats_box.append(&bandwidth_sent_graph_label);
+
+        let bandwidth_recv_graph_label = gtk::Label::new(None);
+        bandwidth_recv_graph_label.set_xalign(0.0);
+        bandwidth_recv_graph_label.set_use_markup(true);
+        bandwidth_recv_graph_label.set_wrap(false);
+        bandwidth_recv_graph_label.set_selectable(false);
+        stats_box.append(&bandwidth_recv_graph_label);
+
+        let rtt_graph_label = gtk::Label::new(None);
+        rtt_graph_label.set_xalign(0.0);
+        rtt_graph_label.set_use_markup(true);
+        rtt_graph_label.set_wrap(false);
+        stats_box.append(&rtt_graph_label);
+
+        stats_frame.set_child(Some(&stats_box));
+        dialog_box.append(&stats_frame);
+
+        // Close button for dialog
+        let close_btn = Button::builder()
+            .label("Close")
+            .halign(gtk::Align::End)
+            .build();
+        let dialog_for_close = dialog.clone();
+        close_btn.connect_clicked(move |_| {
+            dialog_for_close.close();
+        });
+        dialog_box.append(&close_btn);
+
+        dialog.set_child(Some(&dialog_box));
+
+        // Update timer for live stats
+        let protocol_label_update = protocol_label.clone();
+        let bandwidth_sent_label_update = bandwidth_sent_label.clone();
+        let bandwidth_recv_label_update = bandwidth_recv_label.clone();
+        let rtt_label_update = rtt_label.clone();
+        let fps_label_update = fps_label.clone();
+        let bandwidth_sent_graph_label_update = bandwidth_sent_graph_label.clone();
+        let bandwidth_recv_graph_label_update = bandwidth_recv_graph_label.clone();
+        let rtt_graph_label_update = rtt_graph_label.clone();
+        let stats_history_update = stats_history_for_info.clone();
+
+        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            let stats = stats_history_update.borrow();
+            
+            // Update protocol
+            protocol_label_update.set_markup(&format!("<b>Protocol:</b> {}", stats.protocol));
+            
+            // Calculate bandwidth rates
+            let (tx_rate, rx_rate) = if stats.bandwidth_sent.len() >= 2 {
+                let recent = &stats.bandwidth_sent[stats.bandwidth_sent.len() - 1];
+                let prev = &stats.bandwidth_sent[stats.bandwidth_sent.len() - 2];
+                let time_diff = recent.0 - prev.0;
+                let tx_diff = recent.1.saturating_sub(prev.1);
+                
+                let recent_rx = &stats.bandwidth_received[stats.bandwidth_received.len() - 1];
+                let prev_rx = &stats.bandwidth_received[stats.bandwidth_received.len() - 2];
+                let rx_diff = recent_rx.1.saturating_sub(prev_rx.1);
+                
+                if time_diff > 0.0 {
+                    let tx = (tx_diff as f64 / time_diff / 1024.0) as u64; // KB/s
+                    let rx = (rx_diff as f64 / time_diff / 1024.0) as u64;
+                    (tx, rx)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            };
+            
+            bandwidth_sent_label_update.set_markup(&format!(
+                "<b>Sent:</b> {} KB/s ({} MB total)",
+                tx_rate,
+                stats.last_bytes_sent / 1024 / 1024
+            ));
+            bandwidth_recv_label_update.set_markup(&format!(
+                "<b>Received:</b> {} KB/s ({} MB total)",
+                rx_rate,
+                stats.last_bytes_received / 1024 / 1024
+            ));
+            
+            // Update RTT
+            if let Some(last_rtt) = stats.rtt_history.back() {
+                rtt_label_update.set_markup(&format!("<b>Response Time:</b> {} ms", last_rtt.1));
+            } else {
+                rtt_label_update.set_markup("<b>Response Time:</b> N/A");
+            }
+            
+            // Update FPS
+            let fps = stats.get_fps();
+            fps_label_update.set_markup(&format!("<b>Frame Rate:</b> {:.1} FPS", fps));
+            
+            // Create simple text-based graphs with colors - show last 2 minutes with narrow segments
+            // Convert bandwidth from cumulative bytes to KB/s rate
+            let bandwidth_sent_graph = create_bandwidth_graph(
+                &stats.bandwidth_sent,
+                "Bandwidth Sent (KB/s)",
+                80,  // Reduced from 120 for narrower segments
+                "#f66151" // red
+            );
+            bandwidth_sent_graph_label_update.set_markup(&bandwidth_sent_graph);
+            
+            let bandwidth_recv_graph = create_bandwidth_graph(
+                &stats.bandwidth_received,
+                "Bandwidth Received (KB/s)",
+                80,  // Reduced from 120 for narrower segments
+                "#2ec27e" // green
+            );
+            bandwidth_recv_graph_label_update.set_markup(&bandwidth_recv_graph);
+            
+            let rtt_graph = create_text_graph_u32(
+                &stats.rtt_history,
+                "Response Time (ms)",
+                80,  // Reduced from 120 for narrower segments
+                "#1c71d8" // blue
+            );
+            rtt_graph_label_update.set_markup(&rtt_graph);
+            
+            glib::ControlFlow::Continue
+        });
+
+        dialog.present();
+    });
+
+    // Helper function to create bandwidth graph (converts from cumulative bytes to KB/s rate)
+    fn create_bandwidth_graph(
+        data: &VecDeque<(f64, u64)>,
+        title: &str,
+        max_points: usize,
+        color: &str,
+    ) -> String {
+        if data.len() < 2 {
+            return format!("<span font_family='monospace'>\n{}: <span foreground='dim'>No data yet</span></span>", title);
+        }
+        
+        // Calculate rates from cumulative bytes
+        let mut rates = Vec::new();
+        for i in 1..data.len() {
+            let (time_prev, bytes_prev) = data[i - 1];
+            let (time_curr, bytes_curr) = data[i];
+            let time_diff = time_curr - time_prev;
+            if time_diff > 0.0 {
+                let bytes_diff = bytes_curr.saturating_sub(bytes_prev);
+                let rate_kbps = bytes_diff as f64 / time_diff / 1024.0; // KB/s
+                rates.push(rate_kbps);
+            }
+        }
+        
+        if rates.is_empty() {
+            return format!("<span font_family='monospace'>\n{}: <span foreground='dim'>No activity</span></span>", title);
+        }
+        
+        // Take only the last max_points
+        let start_idx = if rates.len() > max_points { rates.len() - max_points } else { 0 };
+        let values: Vec<f64> = rates.iter().skip(start_idx).copied().collect();
+        
+        let max_val = values.iter().cloned().fold(0.0f64, f64::max);
+        
+        if max_val == 0.0 {
+            return format!("<span font_family='monospace'>\n{}: <span foreground='dim'>No activity</span></span>", title);
+        }
+        
+        // Create multi-line graph for more height
+        let bars = " ▁▂▃▄▅▆▇█";
+        let num_lines = 3;  // Number of vertical lines for the graph
+        
+        // Build graph lines from top to bottom
+        let mut lines = vec![String::new(); num_lines];
+        
+        for v in values.iter() {
+            let normalized = (v / max_val * (bars.len() - 1) as f64 * num_lines as f64).round() as usize;
+            
+            // Distribute the height across multiple lines
+            for line_idx in 0..num_lines {
+                let line_threshold = (num_lines - line_idx) * (bars.len() - 1);
+                let line_value = if normalized >= line_threshold {
+                    let overflow = normalized - line_threshold + 1;
+                    overflow.min(bars.len() - 1)
+                } else if line_idx == num_lines - 1 {
+                    // Bottom line shows at least the base level
+                    normalized.min(bars.len() - 1)
+                } else {
+                    0
+                };
+                
+                let bar = bars.chars().nth(line_value).unwrap_or(' ');
+                lines[line_idx].push(bar);
+            }
+        }
+        
+        // Pad lines with spaces if less than max_points
+        for line in lines.iter_mut() {
+            for _ in 0..(max_points.saturating_sub(values.len())) {
+                line.push(' ');
+            }
+        }
+        
+        // Join lines with newlines
+        let graph = lines.join("\n");
+        
+        format!(
+            "<span font_family='monospace'>\n{} (max: {:.0} KB/s)\n<span foreground='{}'>{}</span></span>",
+            title, max_val, color, graph
+        )
+    }
+
+    // Helper function to create text-based graphs (unused now, keeping for reference)
+    #[allow(dead_code)]
+    fn create_text_graph(
+        data: &VecDeque<(f64, u64)>,
+        title: &str,
+        transform: impl Fn(u64) -> f64,
+        max_points: usize,
+        color: &str,
+    ) -> String {
+        if data.is_empty() {
+            return format!("<span font_family='monospace'>\n{}: <span foreground='dim'>No data yet</span></span>", title);
+        }
+        
+        // Take only the last max_points
+        let start_idx = if data.len() > max_points { data.len() - max_points } else { 0 };
+        let values: Vec<f64> = data.iter()
+            .skip(start_idx)
+            .map(|(_, v)| transform(*v))
+            .collect();
+        
+        let max_val = values.iter().cloned().fold(0.0f64, f64::max);
+        
+        if max_val == 0.0 {
+            return format!("<span font_family='monospace'>\n{}: <span foreground='dim'>No activity</span></span>", title);
+        }
+        
+        let bars = "▁▂▃▄▅▆▇█";
+        
+        // Pad to fixed width if needed
+        let mut graph = String::new();
+        for v in values.iter() {
+            let normalized = (v / max_val * 7.0).round() as usize;
+            let bar = bars.chars().nth(normalized.min(7)).unwrap_or('▁');
+            graph.push(bar);
+        }
+        
+        // Pad with spaces if less than max_points
+        for _ in 0..(max_points.saturating_sub(values.len())) {
+            graph.push(' ');
+        }
+        
+        format!(
+            "<span font_family='monospace'>\n{} (max: {:.1} MB)\n<span foreground='{}'>{}</span></span>",
+            title, max_val, color, graph
+        )
+    }
+
+    fn create_text_graph_u32(
+        data: &VecDeque<(f64, u32)>,
+        title: &str,
+        max_points: usize,
+        color: &str,
+    ) -> String {
+        if data.is_empty() {
+            return format!("<span font_family='monospace'>\n{}: <span foreground='dim'>No data yet</span></span>", title);
+        }
+        
+        // Take only the last max_points
+        let start_idx = if data.len() > max_points { data.len() - max_points } else { 0 };
+        let values: Vec<u32> = data.iter()
+            .skip(start_idx)
+            .map(|(_, v)| *v)
+            .collect();
+        
+        let max_val = values.iter().cloned().max().unwrap_or(1);
+        
+        // Create multi-line graph for more height
+        let bars = " ▁▂▃▄▅▆▇█";
+        let num_lines = 3;  // Number of vertical lines for the graph
+        
+        // Build graph lines from top to bottom
+        let mut lines = vec![String::new(); num_lines];
+        
+        for v in values.iter() {
+            let normalized = (*v as f64 / max_val as f64 * (bars.len() - 1) as f64 * num_lines as f64).round() as usize;
+            
+            // Distribute the height across multiple lines
+            for line_idx in 0..num_lines {
+                let line_threshold = (num_lines - line_idx) * (bars.len() - 1);
+                let line_value = if normalized >= line_threshold {
+                    let overflow = normalized - line_threshold + 1;
+                    overflow.min(bars.len() - 1)
+                } else if line_idx == num_lines - 1 {
+                    // Bottom line shows at least the base level
+                    normalized.min(bars.len() - 1)
+                } else {
+                    0
+                };
+                
+                let bar = bars.chars().nth(line_value).unwrap_or(' ');
+                lines[line_idx].push(bar);
+            }
+        }
+        
+        // Pad lines with spaces if less than max_points
+        for line in lines.iter_mut() {
+            for _ in 0..(max_points.saturating_sub(values.len())) {
+                line.push(' ');
+            }
+        }
+        
+        // Join lines with newlines
+        let graph = lines.join("\n");
+        
+        format!(
+            "<span font_family='monospace'>\n{} (max: {} ms)\n<span foreground='{}'>{}</span></span>",
+            title, max_val, color, graph
+        )
+    }
 
     // Toggle fullscreen button
     let rd_window_for_menu = rd_window.clone();
@@ -3082,43 +3697,216 @@ fn build_ui(app: &Application, autologon: bool) {
     dpi_frame.set_child(Some(&dpi_box));
     display_page.append(&dpi_frame);
 
+    notebook.append_page(&display_page, Some(&gtk::Label::new(Some("Display"))));
+
+    // === Codecs Page ===
+    let codecs_page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    codecs_page.set_margin_top(10);
+    codecs_page.set_margin_bottom(10);
+    codecs_page.set_margin_start(10);
+    codecs_page.set_margin_end(10);
+
     // H.264 Hardware Acceleration
-    let h264_frame = gtk::Frame::new(Some("Video Codec"));
-    let h264_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    h264_box.set_margin_top(5);
-    h264_box.set_margin_bottom(5);
-    h264_box.set_margin_start(5);
-    h264_box.set_margin_end(5);
+    let h264_accel_frame = gtk::Frame::new(Some("H.264 Hardware Acceleration"));
+    let h264_accel_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    h264_accel_box.set_margin_top(5);
+    h264_accel_box.set_margin_bottom(5);
+    h264_accel_box.set_margin_start(5);
+    h264_accel_box.set_margin_end(5);
 
-    let h264_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let h264_accel_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let h264_accel_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let h264_accel_label = gtk::Label::new(Some("Enable H.264 hardware acceleration"));
+    h264_accel_label.set_xalign(0.0);
+    h264_accel_label_box.append(&h264_accel_label);
 
-    let h264_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    let h264_label = gtk::Label::new(Some("Enable H.264 hardware acceleration"));
-    h264_label.set_xalign(0.0);
-    h264_label_box.append(&h264_label);
-
-    let h264_description = gtk::Label::new(Some(
+    let h264_accel_description = gtk::Label::new(Some(
         "Use GPU for H.264 video decoding (may not work on all systems)",
     ));
-    h264_description.set_xalign(0.0);
-    h264_description.add_css_class("dim-label");
-    h264_description.add_css_class("caption");
-    h264_label_box.append(&h264_description);
+    h264_accel_description.set_xalign(0.0);
+    h264_accel_description.add_css_class("dim-label");
+    h264_accel_description.add_css_class("caption");
+    h264_accel_label_box.append(&h264_accel_description);
 
     let h264_switch = gtk::Switch::new();
     h264_switch.set_active(settings_for_ui.get_h264_hw_accel());
     h264_switch.set_valign(gtk::Align::Center);
 
-    h264_row.append(&h264_label_box);
-    h264_row.append(&h264_switch);
-    h264_row.set_hexpand(true);
-    h264_label_box.set_hexpand(true);
+    h264_accel_row.append(&h264_accel_label_box);
+    h264_accel_row.append(&h264_switch);
+    h264_accel_row.set_hexpand(true);
+    h264_accel_label_box.set_hexpand(true);
 
-    h264_box.append(&h264_row);
-    h264_frame.set_child(Some(&h264_box));
-    display_page.append(&h264_frame);
+    h264_accel_box.append(&h264_accel_row);
+    h264_accel_frame.set_child(Some(&h264_accel_box));
+    codecs_page.append(&h264_accel_frame);
 
-    notebook.append_page(&display_page, Some(&gtk::Label::new(Some("Display"))));
+    // Codec Options
+    let codec_options_frame = gtk::Frame::new(Some("Codec Options"));
+    let codec_options_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    codec_options_box.set_margin_top(5);
+    codec_options_box.set_margin_bottom(5);
+    codec_options_box.set_margin_start(5);
+    codec_options_box.set_margin_end(5);
+
+    // Info text about codecs
+    let codec_info = gtk::Label::new(Some(
+        "AVC420 uses 4:2:0 chroma subsampling for partial screen updates (dirty regions). \
+         AVC444 uses 4:4:4 full chroma for higher quality full-screen rendering. \
+         Note: AVC444 must be enabled on the server via group policy to be available."
+    ));
+    codec_info.set_xalign(0.0);
+    codec_info.set_wrap(true);
+    codec_info.set_wrap_mode(gtk::pango::WrapMode::Word);
+    codec_info.add_css_class("dim-label");
+    codec_info.add_css_class("caption");
+    codec_info.set_margin_bottom(10);
+    codec_options_box.append(&codec_info);
+
+    // Disable AVC420
+    let avc420_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let avc420_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let avc420_label = gtk::Label::new(Some("Disable H.264 AVC420"));
+    avc420_label.set_xalign(0.0);
+    avc420_label_box.append(&avc420_label);
+
+    let avc420_description = gtk::Label::new(Some(
+        "Disable AVC420 codec (4:2:0 chroma subsampling)",
+    ));
+    avc420_description.set_xalign(0.0);
+    avc420_description.add_css_class("dim-label");
+    avc420_description.add_css_class("caption");
+    avc420_label_box.append(&avc420_description);
+
+    let avc420_switch = gtk::Switch::new();
+    avc420_switch.set_active(settings_for_ui.get_disable_avc420());
+    avc420_switch.set_valign(gtk::Align::Center);
+
+    avc420_row.append(&avc420_label_box);
+    avc420_row.append(&avc420_switch);
+    avc420_row.set_hexpand(true);
+    avc420_label_box.set_hexpand(true);
+
+    codec_options_box.append(&avc420_row);
+
+    // Disable AVC444
+    let avc444_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let avc444_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let avc444_label = gtk::Label::new(Some("Disable H.264 AVC444"));
+    avc444_label.set_xalign(0.0);
+    avc444_label_box.append(&avc444_label);
+
+    let avc444_description = gtk::Label::new(Some(
+        "Disable AVC444 codec (4:4:4 chroma subsampling, higher quality)",
+    ));
+    avc444_description.set_xalign(0.0);
+    avc444_description.add_css_class("dim-label");
+    avc444_description.add_css_class("caption");
+    avc444_label_box.append(&avc444_description);
+
+    let avc444_switch = gtk::Switch::new();
+    avc444_switch.set_active(settings_for_ui.get_disable_avc444());
+    avc444_switch.set_valign(gtk::Align::Center);
+
+    avc444_row.append(&avc444_label_box);
+    avc444_row.append(&avc444_switch);
+    avc444_row.set_hexpand(true);
+    avc444_label_box.set_hexpand(true);
+
+    codec_options_box.append(&avc444_row);
+    codec_options_frame.set_child(Some(&codec_options_box));
+    codecs_page.append(&codec_options_frame);
+
+    notebook.append_page(&codecs_page, Some(&gtk::Label::new(Some("Codecs"))));
+
+    // === Network Page ===
+    let network_page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    network_page.set_margin_top(10);
+    network_page.set_margin_bottom(10);
+    network_page.set_margin_start(10);
+    network_page.set_margin_end(10);
+
+    // UDP Transport
+    let udp_frame = gtk::Frame::new(Some("UDP Transport"));
+    let udp_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    udp_box.set_margin_top(5);
+    udp_box.set_margin_bottom(5);
+    udp_box.set_margin_start(5);
+    udp_box.set_margin_end(5);
+
+    let udp_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let udp_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let udp_label = gtk::Label::new(Some("Disable UDP"));
+    udp_label.set_xalign(0.0);
+    udp_label_box.append(&udp_label);
+
+    let udp_description = gtk::Label::new(Some(
+        "Force TCP-only mode (disable UDP multitransport for graphics)",
+    ));
+    udp_description.set_xalign(0.0);
+    udp_description.add_css_class("dim-label");
+    udp_description.add_css_class("caption");
+    udp_label_box.append(&udp_description);
+
+    let udp_switch = gtk::Switch::new();
+    udp_switch.set_active(settings_for_ui.get_disable_udp());
+    udp_switch.set_valign(gtk::Align::Center);
+
+    udp_row.append(&udp_label_box);
+    udp_row.append(&udp_switch);
+    udp_row.set_hexpand(true);
+    udp_label_box.set_hexpand(true);
+
+    udp_box.append(&udp_row);
+    udp_frame.set_child(Some(&udp_box));
+    network_page.append(&udp_frame);
+
+    notebook.append_page(&network_page, Some(&gtk::Label::new(Some("Network"))));
+
+    // === Debug Page ===
+    let debug_page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    debug_page.set_margin_top(10);
+    debug_page.set_margin_bottom(10);
+    debug_page.set_margin_start(10);
+    debug_page.set_margin_end(10);
+
+    // Visualization Options
+    let viz_frame = gtk::Frame::new(Some("Visualization"));
+    let viz_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    viz_box.set_margin_top(5);
+    viz_box.set_margin_bottom(5);
+    viz_box.set_margin_start(5);
+    viz_box.set_margin_end(5);
+
+    // Codec Grid
+    let grid_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let grid_label_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let grid_label = gtk::Label::new(Some("Show grid indicating codec in use for cell"));
+    grid_label.set_xalign(0.0);
+    grid_label_box.append(&grid_label);
+
+    let grid_description = gtk::Label::new(Some(
+        "Display a colored grid overlay showing which codec is being used for each region",
+    ));
+    grid_description.set_xalign(0.0);
+    grid_description.add_css_class("dim-label");
+    grid_description.add_css_class("caption");
+    grid_label_box.append(&grid_description);
+
+    let grid_switch = gtk::Switch::new();
+    grid_switch.set_active(settings_for_ui.get_show_codec_grid());
+    grid_switch.set_valign(gtk::Align::Center);
+
+    grid_row.append(&grid_label_box);
+    grid_row.append(&grid_switch);
+    grid_row.set_hexpand(true);
+    grid_label_box.set_hexpand(true);
+
+    viz_box.append(&grid_row);
+    viz_frame.set_child(Some(&viz_box));
+    debug_page.append(&viz_frame);
+
+    notebook.append_page(&debug_page, Some(&gtk::Label::new(Some("Debug"))));
 
     // Show/Hide options button
     let options_button = Button::new();
@@ -3226,6 +4014,42 @@ fn build_ui(app: &Application, autologon: bool) {
         rdp_settings_for_h264
             .borrow_mut()
             .set_h264_hw_accel(enabled);
+        glib::Propagation::Proceed
+    });
+
+    // AVC420 disable switch handler
+    let rdp_settings_for_avc420 = rdp_settings.clone();
+    avc420_switch.connect_state_set(move |_switch, enabled| {
+        rdp_settings_for_avc420
+            .borrow_mut()
+            .set_disable_avc420(enabled);
+        glib::Propagation::Proceed
+    });
+
+    // AVC444 disable switch handler
+    let rdp_settings_for_avc444 = rdp_settings.clone();
+    avc444_switch.connect_state_set(move |_switch, enabled| {
+        rdp_settings_for_avc444
+            .borrow_mut()
+            .set_disable_avc444(enabled);
+        glib::Propagation::Proceed
+    });
+
+    // UDP disable switch handler
+    let rdp_settings_for_udp = rdp_settings.clone();
+    udp_switch.connect_state_set(move |_switch, enabled| {
+        rdp_settings_for_udp
+            .borrow_mut()
+            .set_disable_udp(enabled);
+        glib::Propagation::Proceed
+    });
+
+    // Codec grid switch handler
+    let rdp_settings_for_grid = rdp_settings.clone();
+    grid_switch.connect_state_set(move |_switch, enabled| {
+        rdp_settings_for_grid
+            .borrow_mut()
+            .set_show_codec_grid(enabled);
         glib::Propagation::Proceed
     });
 

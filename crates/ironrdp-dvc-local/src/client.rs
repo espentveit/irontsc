@@ -10,7 +10,7 @@ use ironrdp_svc::{
 };
 use pdu::gcc::ChannelName;
 use pdu::PduResult;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::pdu::{
     CapabilitiesResponsePdu, CapsVersion, ClosePdu, CreateResponsePdu, CreationStatus,
@@ -210,7 +210,7 @@ impl DrdynvcClient {
         responses: &mut Vec<SvcMessage>,
         transport: Option<ironrdp_svc::TransportContext>,
     ) -> PduResult<()> {
-        debug!(
+        info!(
             "📥 Received Soft-Sync Request from server: {} tunnel(s)",
             request.tunnels.len()
         );
@@ -226,7 +226,7 @@ impl DrdynvcClient {
         }
 
         for tunnel in &request.tunnels {
-            debug!(
+            info!(
                 "   Tunnel type=0x{:08X} ({}), {} channel(s)",
                 tunnel.tunnel_type,
                 tunnel_type_name(tunnel.tunnel_type),
@@ -234,7 +234,7 @@ impl DrdynvcClient {
             );
             for &channel_id in &tunnel.channel_ids {
                 // Mark this channel as using UDP with this tunnel type
-                debug!(
+                info!(
                     "   Marking channel_id={} for UDP tunnel 0x{:08X} ({})",
                     channel_id,
                     tunnel.tunnel_type,
@@ -246,7 +246,7 @@ impl DrdynvcClient {
                     // Notify channel that it's being switched to UDP
                     let _ = channel.on_soft_sync(tunnel.tunnel_type);
                 } else {
-                    debug!(
+                    info!(
                         "SoftSync tunnel references unknown channel_id={channel_id} (tunnel_type=0x{:08X} / {})",
                         tunnel.tunnel_type,
                         tunnel_type_name(tunnel.tunnel_type)
@@ -263,12 +263,12 @@ impl DrdynvcClient {
         let response = DrdynvcClientPdu::SoftSyncResponse(
             SoftSyncResponsePdu::from_request_with_available(request, &self.available_udp_tunnels),
         );
-        debug!("📤 Sending DVC SoftSync Response PDU: {response:?}");
+        info!("📤 Sending DVC SoftSync Response PDU: {response:?}");
 
         // Per MS-RDPEDYC: Soft-Sync responses MUST go over TCP
         // This is the transition message that signals switching to UDP is complete
         // The response itself uses TCP, but signals that subsequent Data PDUs can use UDP
-        let mut msg = SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp);
+        let msg = SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp);
 
         responses.push(msg);
         Ok(())

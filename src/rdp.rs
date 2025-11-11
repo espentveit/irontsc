@@ -78,6 +78,14 @@ pub struct ImageRegion {
     pub height: NonZeroU16,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConnectionStats {
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub roundtrip_time_ms: Option<u32>,
+    pub transport_protocol: String, // "TCP", "UDP", "TCP+UDP"
+}
+
 #[derive(Debug)]
 pub enum RdpOutputEvent {
     Image {
@@ -95,6 +103,7 @@ pub enum RdpOutputEvent {
     },
     PointerBitmap(Arc<DecodedPointer>),
     Terminated(SessionResult<GracefulDisconnectReason>),
+    ConnectionStats(ConnectionStats),
 }
 
 #[derive(Debug)]
@@ -191,6 +200,7 @@ impl<T: RdpEventSender + Clone> RdpClient<T> {
                 &mut self.input_event_receiver,
                 self.config.destination.clone(),
                 client_addr,
+                self.config.disable_udp,
             )
             .await
             {
@@ -1607,6 +1617,7 @@ fn handle_autodetect_request(
     bandwidth_start_time: &mut Option<std::time::Instant>,
     bandwidth_byte_count: &mut u32,
     bandwidth_sequence: &mut Option<u16>,
+    last_rtt_ms: &mut Option<u32>,
     user_channel_id: u16,
     message_channel_id: u16,
 ) -> Option<Vec<u8>> {
@@ -1665,6 +1676,9 @@ fn handle_autodetect_request(
             if let Some(start_time) = *bandwidth_start_time {
                 let elapsed = start_time.elapsed();
                 let time_delta_ms = elapsed.as_millis() as u32;
+
+                // Estimate RTT from bandwidth measurement timing (rough approximation)
+                *last_rtt_ms = Some(time_delta_ms);
 
                 trace!(
                     "📊 Bandwidth measurement: {} bytes in {}ms",
@@ -1820,6 +1834,7 @@ async fn active_session<T: RdpEventSender + Clone>(
     input_event_receiver: &mut mpsc::UnboundedReceiver<RdpInputEvent>,
     destination: Destination,
     client_addr: SocketAddr,
+    disable_udp: bool,
 ) -> SessionResult<RdpControlFlow> {
     let (mut reader, mut writer) = split_tokio_framed(framed);
     let mut image = DecodedImage::new(
@@ -1879,11 +1894,20 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut bandwidth_measure_byte_count: u32 = 0;
     let mut bandwidth_measure_sequence: Option<u16> = None;
 
+    // Track connection statistics for UI
+    let mut total_bytes_sent: u64 = 0;
+    let mut total_bytes_received: u64 = 0;
+    let mut last_rtt_ms: Option<u32> = None;
+    let mut stats_timer = tokio::time::interval(tokio::time::Duration::from_millis(500));
+    stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // **CRITICAL**: Automatically create UDP tunnel if multitransport was negotiated during connection
     // Per MS-RDPEMT spec, the InitiateMultitransportRequest is sent during CapabilitiesExchange,
     // and we responded with InitiateMultitransportResponse. Now we need to create the actual
     // UDP tunnel and send the Tunnel Create Request PDU.
-    if let (Some(request_id), Some(security_cookie), Some(protocol)) = (
+    if disable_udp {
+        info!("🚫 UDP transport disabled by user configuration");
+    } else if let (Some(request_id), Some(security_cookie), Some(protocol)) = (
         multitransport_request_id,
         multitransport_security_cookie,
         multitransport_protocol,
@@ -1964,6 +1988,9 @@ async fn active_session<T: RdpEventSender + Clone>(
                             bandwidth_measure_byte_count += payload.len() as u32;
                         }
 
+                        // Track total bytes received
+                        total_bytes_received += payload.len() as u64;
+
                         let mut extra_outputs = Vec::new();
 
                 // Check for multitransport request before processing
@@ -2036,7 +2063,12 @@ async fn active_session<T: RdpEventSender + Clone>(
                 }
 
                 // Start UDP transport if supported
-                if udp_tunnels.contains_key(&request_id) {
+                if disable_udp {
+                    info!(
+                        "🚫 Multitransport request ignored: UDP disabled by user (request_id={})",
+                        request_id
+                    );
+                } else if udp_tunnels.contains_key(&request_id) {
                     warn!(
                         "⚠️  Duplicate multitransport request (id={}) received; ignoring",
                         request_id
@@ -2079,6 +2111,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                         &mut bandwidth_measure_start_time,
                         &mut bandwidth_measure_byte_count,
                         &mut bandwidth_measure_sequence,
+                        &mut last_rtt_ms,
                         user_channel_id,
                         msg_ch_id,
                     ) {
@@ -2400,6 +2433,26 @@ async fn active_session<T: RdpEventSender + Clone>(
 
                 vec![]
             }
+            _ = stats_timer.tick() => {
+                // Send periodic connection statistics to UI
+                let transport_protocol = if udp_tunnels.is_empty() {
+                    "TCP".to_string()
+                } else if udp_tunnels.values().any(|t| t.soft_sync_received) {
+                    "TCP+UDP".to_string()
+                } else {
+                    "TCP+UDP (negotiating)".to_string()
+                };
+
+                let stats = ConnectionStats {
+                    bytes_sent: total_bytes_sent,
+                    bytes_received: total_bytes_received,
+                    roundtrip_time_ms: last_rtt_ms,
+                    transport_protocol,
+                };
+
+                let _ = event_loop_proxy.send_event(RdpOutputEvent::ConnectionStats(stats));
+                vec![]
+            }
             input_event = input_event_receiver.recv() => {
                 let input_event = input_event.ok_or_else(|| session::general_err!("GUI is stopped"))?;
 
@@ -2504,6 +2557,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                             "📡 RDP: Writing {} bytes response frame to server",
                             frame.len()
                         );
+                        total_bytes_sent += frame.len() as u64;
                     }
                     writer
                         .write_all(&frame)
