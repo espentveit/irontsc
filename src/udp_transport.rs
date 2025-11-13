@@ -1015,6 +1015,20 @@ impl UdpTransportManager {
                         // We CANNOT inspect payload[0] to determine type - it's encrypted!
                         // The TLS library will handle retransmissions internally via SSL_read
 
+                        // However, sometimes the UDP layer delivers duplicate handshake packets
+                        // after handshake is complete. Skip them to avoid decrypt errors.
+                        if payload.len() > 5 && payload[0] == 0x16 && payload[1] == 0x03 && payload[2] == 0x03 {
+                            // This looks like a TLS handshake record (type=0x16, version=0x0303)
+                            // Check if it's a ServerHello (content type 0x02) at position 5
+                            if payload.len() > 6 && payload[5] == 0x02 {
+                                debug!(
+                                    "⏭️  Skipping duplicate TLS ServerHello packet ({} bytes) after handshake complete",
+                                    payload.len()
+                                );
+                                continue;
+                            }
+                        }
+
                         debug!(
                             "🔐 Attempting TLS decrypt on {} byte payload (first bytes: {:02x?})",
                             payload.len(),
@@ -1027,6 +1041,9 @@ impl UdpTransportManager {
                                     "✅ TLS decrypt succeeded, got {} decrypted payload(s)",
                                     decrypted_payloads.len()
                                 );
+                                if decrypted_payloads.is_empty() {
+                                    info!("   No decrypted payloads (TLS buffering, waiting for more data)");
+                                }
                                 for (i, decrypted) in decrypted_payloads.iter().enumerate() {
                                     info!(
                                         "   Decrypted[{}]: {} bytes (first: {:02x?})",
@@ -1041,8 +1058,8 @@ impl UdpTransportManager {
                             }
                             Err(e) => {
                                 // ErrorCode(1) often means SSL_ERROR_WANT_READ - just means we need more data, not a fatal error
-                                debug!(
-                                    "TLS decrypt failed: {} (payload len={}, first bytes: {:02x?})",
+                                info!(
+                                    "⚠️  TLS decrypt failed: {} (payload len={}, first bytes: {:02x?})",
                                     e,
                                     payload.len(),
                                     &payload[..payload.len().min(16)]
@@ -1072,6 +1089,23 @@ impl UdpTransportManager {
                         self.handle_tunnel_pdu_or_data(&payload).await?;
                     }
                 }
+
+                // Send ACK immediately after processing data packets
+                let mut conn = self.connection.lock().await;
+                if conn.has_pending_ack() {
+                    if let Ok(ack_packet) = conn.create_ack() {
+                        drop(conn);
+                        if let Err(e) = self.send_over_udp(&ack_packet).await {
+                            warn!("Failed to send ACK: {}", e);
+                        } else {
+                            debug!("✅ Sent ACK for received UDP DATA packet");
+                        }
+                    } else {
+                        drop(conn);
+                    }
+                } else {
+                    drop(conn);
+                }
             }
             Ok(_) => {
                 // No payloads yet (buffered or out of sequence)
@@ -1095,24 +1129,6 @@ impl UdpTransportManager {
                     debug!("✓ Processed UDP ACK packet");
                 }
             }
-        }
-
-        // After processing any received packet, check if we have pending ACKs
-        // This ensures DUMMY packets and other received data get acknowledged promptly
-        let mut conn = self.connection.lock().await;
-        if conn.has_pending_ack() {
-            if let Ok(ack_packet) = conn.create_ack() {
-                drop(conn);
-                if let Err(e) = self.send_over_udp(&ack_packet).await {
-                    warn!("Failed to send pending ACK: {}", e);
-                } else {
-                    trace!("✓ Sent immediate ACK for received packet");
-                }
-            } else {
-                drop(conn);
-            }
-        } else {
-            drop(conn);
         }
 
         Ok(())

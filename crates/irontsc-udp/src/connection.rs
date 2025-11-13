@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use log::debug;
+use log::{debug, info};
 
 use crate::error::{Result, UdpError};
 use crate::rdpudp_v1_packet;
@@ -690,7 +690,7 @@ impl UdpConnection {
 
             if let Some(body) = packet.data_body {
                 // Standard packet with actual data
-                debug!(
+                info!(
                     "📥 V3 DATA packet: seq={} (expected={}), data_len={}",
                     sequence,
                     self.v3_expected_sequence,
@@ -704,6 +704,19 @@ impl UdpConnection {
                         sequence
                     );
                     self.v3_expected_sequence = sequence;
+                }
+
+                // Check for duplicate packet (already processed)
+                // Sequence numbers wrap around, but if seq < expected and not a huge wrap, it's a duplicate
+                let seq_diff = sequence.wrapping_sub(self.v3_expected_sequence);
+                if seq_diff > 0x8000 {
+                    // This is an old packet (seq < expected), more than halfway around the u16 space
+                    info!(
+                        "⏭️  V3: Skipping duplicate/old DATA packet seq={} (already processed, expected={})",
+                        sequence, self.v3_expected_sequence
+                    );
+                    // Don't ACK duplicates - this can cause issues with TLS
+                    return Ok(Vec::new());
                 }
 
                 self.v3_receive_buffer.insert(sequence, body.data);

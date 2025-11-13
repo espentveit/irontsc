@@ -34,4 +34,9 @@ impl DvcProcessor for StubDvcProcessor {
         // Silently ignore all data - we're just a stub
         Ok(Vec::new())
     }
+
+    fn supports_udp_transport(&self) -> bool {
+        // Stubs should stay on TCP to avoid protocol issues
+        false
+    }
 }

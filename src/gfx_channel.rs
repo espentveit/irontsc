@@ -18,6 +18,13 @@ pub struct GfxDvcMessage {
     pub data: Vec<u8>,
 }
 
+impl GfxDvcMessage {
+    /// Create a new GFX DVC message
+    fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+}
+
 impl ironrdp_core::Encode for GfxDvcMessage {
     fn encode(&self, dst: &mut ironrdp_core::WriteCursor<'_>) -> ironrdp_core::EncodeResult<()> {
         dst.write_slice(&self.data);
@@ -120,7 +127,7 @@ impl GfxDvcProcessor {
 
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| Box::new(GfxDvcMessage::new(data)) as DvcMessage)
             .collect())
     }
 }
@@ -166,7 +173,7 @@ impl DvcProcessor for GfxDvcProcessor {
         }
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| Box::new(GfxDvcMessage::new(data)) as DvcMessage)
             .collect())
     }
 
@@ -256,7 +263,7 @@ impl DvcProcessor for GfxDvcProcessor {
         }
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| Box::new(GfxDvcMessage::new(data)) as DvcMessage)
             .collect())
     }
 
