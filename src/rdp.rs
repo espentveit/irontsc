@@ -376,17 +376,17 @@ async fn connect(
         drdynvc = drdynvc.with_dynamic_channel(MouseCursorProcessor::new());
 
         // Input-related channels - stubs for now (Microsoft::Windows::RDS::Input uses advanced input protocol MS-RDPEAI)
-        drdynvc =
-            drdynvc.with_dynamic_channel(StubDvcProcessor::new("cliprdr"));
-        drdynvc =
-            drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
-        drdynvc =
-            drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
+        // drdynvc =
+        //     drdynvc.with_dynamic_channel(StubDvcProcessor::new("cliprdr"));
+        // drdynvc =
+        //     drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
+        // drdynvc =
+        //     drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
 
-        // Other protocol channels - stubs (would need full protocol implementations)
-        drdynvc =
-            drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Notify"));
-        drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("RDCamera_Device_Enumerator"));
+        // // Other protocol channels - stubs (would need full protocol implementations)
+        // drdynvc =
+        //     drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Notify"));
+        // drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("RDCamera_Device_Enumerator"));
 
         info!(
             "DVC handlers registered: CoreInput, MouseCursor, Input (stub), TextInput (stub), Notify (stub), RDCamera (stub)"
@@ -1955,6 +1955,32 @@ async fn active_session<T: RdpEventSender + Clone>(
                         request_id
                     );
                     udp_tunnels.insert(request_id, handle);
+                    
+                    // CRITICAL: Send MultitransportResponse immediately BEFORE TunnelCreateRequest
+                    // Per MS-RDPBCGR §1.3.6.2, client MUST respond to InitiateMultitransportRequest
+                    // The server will not send TunnelCreateResponse until it receives this response
+                    info!("📨 Encoding MultitransportResponse for stored request (required by MS-RDPBCGR)");
+                    match encode_multitransport_response_frame(request_info, message_channel_id) {
+                        Ok(frame) => {
+                            info!(
+                                "✅ Sending MultitransportResponse (S_OK) immediately for request_id={} BEFORE TunnelCreateRequest",
+                                request_id
+                            );
+                            // Send immediately - this must happen BEFORE the UDP transport sends TunnelCreateRequest
+                            total_bytes_sent += frame.len() as u64;
+                            if let Err(e) = writer.write_all(&frame).await {
+                                error!("❌ Failed to send MultitransportResponse: {:?}", e);
+                            } else {
+                                info!("📤 MultitransportResponse sent successfully ({} bytes)", frame.len());
+                            }
+                        }
+                        Err(err) => {
+                            error!(
+                                "❌ Failed to encode MultitransportResponse for request_id={}: {:?}",
+                                request_id, err
+                            );
+                        }
+                    }
                 }
                 Err(err) => {
                     error!(
@@ -2192,48 +2218,47 @@ async fn active_session<T: RdpEventSender + Clone>(
                         // This is critical - we must wait for TunnelCreateResponse before sending MultitransportResponse
                     }
                     Some(UdpTransportEvent::TunnelEstablished { request_id }) => {
-                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
-                            tunnel.tunnel_established = true;
-                            tunnel.tunnel_established_time = Some(std::time::Instant::now());
-                        }
                         info!("🔐 UDP tunnel established (request_id={}, MS-RDPEMT)", request_id);
-
-                        // Register the available tunnel with DVC client for Soft-Sync
+                        
+                        // Register the available tunnel with DVC client for Soft-Sync IMMEDIATELY
+                        // This MUST happen before processing any incoming DVC messages (like Soft-Sync Request)
                         // Per MS-RDPEDYC §3.2.5.3.2: Client should only confirm tunnels it has successfully established
-                        if let Some(tunnel) = udp_tunnels.get(&request_id) {
-                            // The tunnel type is based on the protocol (reliable UDP = 0x00000001)
-                            let tunnel_type = 0x00000001; // TUNNELTYPE_UDPFECR (reliable UDP)
-                            if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
-                                match drdynvc.register_available_tunnel(tunnel_type) {
-                                    Ok(deferred_messages) => {
-                                        info!("   Registered tunnel_type=0x{:08X} as available for Soft-Sync", tunnel_type);
-                                        if !deferred_messages.is_empty() {
-                                            info!("   Processing {} deferred DVC message(s)", deferred_messages.len());
-                                            let frame = active_stage.encode_dvc_messages(deferred_messages)?;
-                                            outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                        let tunnel_type = 0x00000001; // TUNNELTYPE_UDPFECR (reliable UDP)
+                        if let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() {
+                            match drdynvc.register_available_tunnel(tunnel_type) {
+                                Ok(deferred_messages) => {
+                                    info!("   Registered tunnel_type=0x{:08X} as available for Soft-Sync", tunnel_type);
+                                    if !deferred_messages.is_empty() {
+                                        info!("   Processing {} deferred DVC message(s)", deferred_messages.len());
+                                        let frame = active_stage.encode_dvc_messages(deferred_messages)?;
+                                        outputs.push(ActiveStageOutput::ResponseFrame(frame));
 
-                                            // Check if we have a pending resize now that channels (like DisplayControl) may be ready
-                                            if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
-                                                match active_stage.encode_resize(width as u32, height as u32, Some(scale_factor), physical_size) {
-                                                    Some(Ok(frame)) => {
-                                                        info!(width, height, scale_factor, "📐 Sending queued resize after channel creation");
-                                                        outputs.push(ActiveStageOutput::ResponseFrame(frame));
-                                                    }
-                                                    Some(Err(e)) => {
-                                                        warn!("Failed to encode queued resize: {}", e);
-                                                    }
-                                                    None => {
-                                                        pending_initial_resize = Some((width, height, scale_factor, physical_size));
-                                                    }
+                                        // Check if we have a pending resize now that channels (like DisplayControl) may be ready
+                                        if let Some((width, height, scale_factor, physical_size)) = pending_initial_resize.take() {
+                                            match active_stage.encode_resize(width as u32, height as u32, Some(scale_factor), physical_size) {
+                                                Some(Ok(frame)) => {
+                                                    info!(width, height, scale_factor, "📐 Sending queued resize after channel creation");
+                                                    outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                                                }
+                                                Some(Err(e)) => {
+                                                    warn!("Failed to encode queued resize: {}", e);
+                                                }
+                                                None => {
+                                                    pending_initial_resize = Some((width, height, scale_factor, physical_size));
                                                 }
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        error!("Failed to register available tunnel: {:?}", e);
-                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to register available tunnel: {:?}", e);
                                 }
                             }
+                        }
+
+                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
+                            tunnel.tunnel_established = true;
+                            tunnel.tunnel_established_time = Some(std::time::Instant::now());
                         }
 
                         // NOW send MultitransportResponse on TCP channel (per MS-RDPBCGR spec)
