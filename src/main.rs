@@ -20,6 +20,7 @@ mod h264_codec_caps;
 mod mouse_cursor_channel;
 mod rdp;
 mod stub_dvc;
+mod transport_rules;
 mod udp_gfx;
 mod udp_transport;
 
