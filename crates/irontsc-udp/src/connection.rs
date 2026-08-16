@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use log::debug;
+use log::{debug, warn};
 
 use crate::error::{Result, UdpError};
 use crate::rdpudp_v1_packet;
@@ -28,6 +28,11 @@ const V3_INITIAL_SEQUENCE: u16 = 100;
 /// Number of sequence numbers we are willing to hold while waiting for a gap to be filled.
 /// Anything further ahead than this is treated as bogus rather than buffered.
 const V3_RECEIVE_WINDOW: u16 = 4096;
+
+/// How long chunks may pile up behind a missing channel sequence before it is reported. The
+/// transport keeps acknowledging normally while this happens, so without a warning the stream
+/// simply stops and the session looks frozen for no visible reason.
+const CHANNEL_STALL_WARN: Duration = Duration::from_millis(1500);
 
 /// Largest ACK vector we will build, in bytes (the wire field is 7 bits wide).
 const V3_MAX_ACKVEC_BYTES: usize = 0x7f;
@@ -193,6 +198,11 @@ pub struct UdpConnection {
     v3_channel_buffer: HashMap<u16, Vec<u8>>,
     /// Next channel sequence number to hand upwards.
     v3_next_channel_delivery: Option<u16>,
+    /// When chunks first started piling up behind a channel sequence that has not arrived.
+    v3_channel_stalled_since: Option<Instant>,
+    /// Whether the current stall has already been reported, so it is logged once and not once
+    /// per packet.
+    v3_channel_stall_reported: bool,
     /// False until the first v3 DATA packet tells us where the peer's sequence space starts.
     v3_base_established: bool,
     /// Highest v3 sequence number seen so far, used to size the ACK vector.
@@ -237,6 +247,8 @@ impl UdpConnection {
             v3_received_dseq: HashSet::new(),
             v3_channel_buffer: HashMap::new(),
             v3_next_channel_delivery: None,
+            v3_channel_stalled_since: None,
+            v3_channel_stall_reported: false,
             v3_base_established: false,
             v3_highest_received: 0,
             v3_sender_base: 0,
@@ -371,6 +383,8 @@ impl UdpConnection {
                 self.v3_received_dseq.clear();
                 self.v3_channel_buffer.clear();
                 self.v3_next_channel_delivery = None;
+                self.v3_channel_stalled_since = None;
+                self.v3_channel_stall_reported = false;
 
                 // Windows starts both directions of the RDP-UDP2 sequence space at 100 and
                 // announces that base in the AckOfAcks payload of its first DATA packet.
@@ -863,6 +877,7 @@ impl UdpConnection {
         self.arm_pending_ack();
         self.advance_dseq_window();
         delivered.extend(self.take_ready_channel_data());
+        self.check_channel_stall();
         Ok(delivered)
     }
 
@@ -871,7 +886,11 @@ impl UdpConnection {
         match self.v3_next_channel_delivery {
             None => self.v3_next_channel_delivery = Some(channel_sequence),
             Some(next) if channel_sequence != next && !seq_gt(channel_sequence, next) => {
-                debug!("⏭️  V3: dropping already-delivered channel sequence {channel_sequence}");
+                debug!(
+                    "⏭️  V3: dropping channel sequence {channel_sequence} as already delivered \
+                     (awaiting {next}, {} buffered)",
+                    self.v3_channel_buffer.len()
+                );
                 return;
             }
             Some(_) => {}
@@ -893,6 +912,7 @@ impl UdpConnection {
         let Some(mut next) = self.v3_next_channel_delivery else {
             return result;
         };
+        let started_at = next;
         while let Some(data) = self.v3_channel_buffer.remove(&next) {
             if !data.is_empty() {
                 result.push(data);
@@ -900,7 +920,62 @@ impl UdpConnection {
             next = next.wrapping_add(1);
         }
         self.v3_next_channel_delivery = Some(next);
+
+        if next != started_at {
+            // The stream moved, so any pile-up has cleared.
+            self.v3_channel_stalled_since = None;
+            self.v3_channel_stall_reported = false;
+        }
         result
+    }
+
+    /// Reports, once, that the stream has stopped moving while chunks pile up behind a channel
+    /// sequence that never arrives. Everything else stays healthy in that state -- the transport
+    /// keeps acknowledging and the peer keeps sending -- so the session just appears to freeze.
+    fn check_channel_stall(&mut self) {
+        if self.v3_channel_buffer.is_empty() {
+            self.v3_channel_stalled_since = None;
+            self.v3_channel_stall_reported = false;
+            return;
+        }
+
+        let now = Instant::now();
+        let since = *self.v3_channel_stalled_since.get_or_insert(now);
+        if self.v3_channel_stall_reported || now.duration_since(since) < CHANNEL_STALL_WARN {
+            return;
+        }
+        self.v3_channel_stall_reported = true;
+
+        let awaited = self.v3_next_channel_delivery;
+        // Describe the buffered chunks relative to what is awaited, so the log says how far the
+        // stream has run ahead of the hole rather than just printing wrapped raw numbers.
+        let (nearest, furthest) = awaited.map_or((None, None), |next| {
+            let mut nearest: Option<u16> = None;
+            let mut furthest: Option<u16> = None;
+            for &cs in self.v3_channel_buffer.keys() {
+                let ahead = cs.wrapping_sub(next);
+                if nearest.is_none_or(|best| ahead < best.wrapping_sub(next)) {
+                    nearest = Some(cs);
+                }
+                if furthest.is_none_or(|worst| ahead > worst.wrapping_sub(next)) {
+                    furthest = Some(cs);
+                }
+            }
+            (nearest, furthest)
+        });
+
+        warn!(
+            "🧊 V3 stream stalled for {:?}: awaiting channel sequence {:?}, {} chunks buffered \
+             (nearest {:?}, furthest {:?}); transport is healthy at dseq {} with {} out of order, \
+             so nothing will unstick this on its own",
+            now.duration_since(since),
+            awaited,
+            self.v3_channel_buffer.len(),
+            nearest,
+            furthest,
+            self.v3_expected_sequence,
+            self.v3_received_dseq.len()
+        );
     }
 
     /// Records that an acknowledgement is owed for everything received so far.
