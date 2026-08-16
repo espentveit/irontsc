@@ -2433,7 +2433,21 @@ async fn active_session<T: RdpEventSender + Clone>(
                                     }
                                 }
                                 Some(Err(e)) => warn!("Failed to encode queued resize: {}", e),
-                                _ => info!("📐 Queued resize discarded: DisplayControl not ready"),
+                                _ => {
+                                    // DisplayControl is not up yet. Dropping the resize here is
+                                    // what left the session at the wrong DPI: the scale is only
+                                    // discovered once the window has a surface, so this queued
+                                    // resize is the only thing carrying it, and nothing produces
+                                    // another until the user resizes by hand.
+                                    info!(
+                                        width,
+                                        height,
+                                        scale_factor,
+                                        "📐 DisplayControl not ready, keeping resize queued"
+                                    );
+                                    pending_initial_resize =
+                                        Some((width, height, scale_factor, physical_size));
+                                }
                             }
                         }
                     }
