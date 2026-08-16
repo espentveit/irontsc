@@ -3181,6 +3181,56 @@ fn create_remote_desktop_window(
         }
     });
 
+    // The window has no surface until it is presented, and a monitor's fractional scale is not
+    // known before then, so the size negotiated when the session starts is computed at 100% and
+    // the desktop comes up at the wrong DPI until something else triggers a resize. Re-send the
+    // size as soon as the compositor reports the real scale.
+    if let Some(surface) = rd_window.surface() {
+        let window_weak = rd_window.downgrade();
+        let area_weak = rdp_widget.size_probe().downgrade();
+        let sender_scale = input_sender_resize.clone();
+        let compute_resize_scale = compute_resize.clone();
+        let last_sent_scale = last_sent_resize.clone();
+
+        surface.connect_scale_notify(move |surface| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(area) = area_weak.upgrade() else {
+                return;
+            };
+
+            let width = area.width();
+            let height = area.height();
+            let Some((width_u16, height_u16, scale_factor_percent, width_pixels, height_pixels)) =
+                compute_resize_scale(&window, &area, width, height)
+            else {
+                return;
+            };
+
+            let mut last_sent = last_sent_scale.borrow_mut();
+            if last_sent.as_ref() == Some(&(width_u16, height_u16, scale_factor_percent)) {
+                return;
+            }
+
+            tracing::info!(
+                surface_scale = surface.scale(),
+                width_pixels,
+                height_pixels,
+                scale_factor_percent,
+                "Surface scale became known, re-sending desktop size"
+            );
+
+            let _ = sender_scale.send(RdpInputEvent::Resize {
+                width: width_u16,
+                height: height_u16,
+                scale_factor: scale_factor_percent,
+                physical_size: None,
+            });
+            *last_sent = Some((width_u16, height_u16, scale_factor_percent));
+        });
+    }
+
     // Center the control bar after the window is fully presented and laid out
     let control_bar_for_timeout_center = control_bar.clone();
     let overlay_for_timeout_center = overlay.clone();
