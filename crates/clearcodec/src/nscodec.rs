@@ -225,11 +225,13 @@ impl NsCodec {
                 let co_val = signed_chroma(self.co_plane[co_index], shift);
                 let cg_val = signed_chroma(self.cg_plane[cg_index], shift);
 
-                // Reversible YCoCg-R inverse transform (match spec)
-                let tmp = y_val - (cg_val >> 1);
-                let g_val = tmp + cg_val;
-                let b_val = tmp - (co_val >> 1);
-                let r_val = b_val + co_val;
+                // [MS-RDPNSC] uses plain YCoCg, not the reversible YCoCg-R lifting form. The
+                // lifting version expands to y + cg/2 and y +/- co/2, which contributes exactly
+                // half the chroma on every channel and decodes the whole image at half
+                // saturation.
+                let r_val = y_val + co_val - cg_val;
+                let g_val = y_val + cg_val;
+                let b_val = y_val - co_val - cg_val;
                 let a_val = self.alpha_plane[alpha_index];
 
                 let dst = y * tile_stride + x * 4;
