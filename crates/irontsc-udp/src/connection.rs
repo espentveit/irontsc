@@ -41,6 +41,17 @@ const V3_MAX_ACKVEC_BYTES: usize = 0x7f;
 /// advertising a small window here throttles the server's sender window for no benefit.
 const V3_LOG_WINDOW_SIZE: u8 = 15;
 
+/// Advances a channel sequence number. These are 1-based: the peer wraps 65535 -> 1 and never
+/// sends 0, so a plain wrapping add leaves the receiver waiting for a chunk that will never
+/// arrive, stalling the stream permanently.
+#[inline]
+fn next_channel_sequence(sequence: u16) -> u16 {
+    match sequence.checked_add(1) {
+        Some(next) => next,
+        None => 1,
+    }
+}
+
 /// True when `a` is strictly newer than `b` in a wrapping 16-bit sequence space.
 #[inline]
 fn seq_gt(a: u16, b: u16) -> bool {
@@ -917,7 +928,7 @@ impl UdpConnection {
             if !data.is_empty() {
                 result.push(data);
             }
-            next = next.wrapping_add(1);
+            next = next_channel_sequence(next);
         }
         self.v3_next_channel_delivery = Some(next);
 
@@ -1370,6 +1381,34 @@ mod tests {
         let delivered = conn.process_source_packet(&v3_data(100, Some(b"first"))).expect("dup");
         assert!(delivered.is_empty(), "already-delivered data is not delivered twice");
         assert!(conn.has_pending_ack(), "a retransmit must be re-acknowledged");
+    }
+
+    /// The channel sequence space is 1-based and wraps 65535 -> 1, skipping 0. Advancing with a
+    /// plain wrapping add leaves the receiver waiting for a chunk 0 that the peer never sends,
+    /// which stalls the stream for the rest of the connection while the transport stays healthy.
+    #[test]
+    fn channel_sequence_wraps_past_zero() {
+        let mut conn = connected_v3();
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(100, 65535, Some(b"a")))
+                .expect("65535"),
+            vec![b"a".to_vec()]
+        );
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(101, 1, Some(b"b")))
+                .expect("1"),
+            vec![b"b".to_vec()],
+            "the chunk after 65535 is 1, not 0"
+        );
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(102, 2, Some(b"c")))
+                .expect("2"),
+            vec![b"c".to_vec()]
+        );
+        assert!(
+            conn.v3_channel_buffer.is_empty(),
+            "nothing should be left waiting behind a sequence that is never sent"
+        );
     }
 
     /// A retransmission carries a *new* data sequence number but repeats an earlier channel

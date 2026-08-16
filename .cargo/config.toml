@@ -1,0 +1,7 @@
+# The codecs are scalar loops with no hand-written SIMD, so auto-vectorisation is the only
+# lever available and the baseline x86-64 target caps it at SSE2. Build for the host instead;
+# this machine has AVX2 and AVX-512.
+#
+# Note this makes the binary non-portable: it will fault on a CPU older than the build host.
+[build]
+rustflags = ["-C", "target-cpu=native"]
