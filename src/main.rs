@@ -946,6 +946,25 @@ impl GtkRdpWidget {
 
         self.root.add_controller(key_controller);
 
+        // GTK delivers no key-release once the view loses focus, so anything held at that moment
+        // -- the Alt of an Alt-Tab, or a modifier held when a resize drag takes over -- stays
+        // latched down on the server and corrupts every keystroke that follows. Release
+        // everything the server believes is held whenever focus leaves.
+        let focus_controller = gtk::EventControllerFocus::new();
+        let widget_for_leave = self.clone();
+        focus_controller.connect_leave(move |_| {
+            widget_for_leave.release_all_input("focus left the session view");
+        });
+        // Also start from a clean slate on the way back in. Focus can return with the server
+        // still holding a key we never got the release for -- after a resize drag, or after the
+        // deactivate/reactivate sequence a resize triggers -- and this costs nothing when
+        // nothing is held.
+        let widget_for_enter = self.clone();
+        focus_controller.connect_enter(move |_| {
+            widget_for_enter.release_all_input("focus returned to the session view");
+        });
+        self.root.add_controller(focus_controller);
+
         // Mouse events - configure to handle all mouse buttons
         let click_controller = gtk::GestureClick::new();
         click_controller.set_button(0); // 0 means listen to all mouse buttons
@@ -1090,6 +1109,18 @@ impl GtkRdpWidget {
         });
 
         self.root.add_controller(scroll_controller);
+    }
+
+    /// Releases every key and mouse button the server currently believes is held down.
+    ///
+    /// Safe to call at any time: the input database only emits events for what is actually
+    /// pressed, so this is a no-op when nothing is held.
+    fn release_all_input(&self, reason: &str) {
+        let events = self.input_database.borrow_mut().release_all();
+        if !events.is_empty() {
+            tracing::debug!("⌨️  Releasing {} held input(s): {}", events.len(), reason);
+            Self::send_fast_path_events(&self.input_event_sender, events);
+        }
     }
 
     fn keycode_to_scancode(keycode: u32) -> Option<ironrdp::input::Scancode> {
@@ -1837,6 +1868,18 @@ fn create_remote_desktop_window(
         });
 
         rd_window.add_controller(focus_ctrl);
+    }
+
+    // 2b) The compositor can take focus away without the view ever seeing a focus-leave, for
+    // instance on alt-tab or while a resize or move drag is in progress. Watch the toplevel's
+    // active state as well so held keys cannot survive those transitions.
+    {
+        let rdp_widget_for_active = rdp_widget.clone();
+        rd_window.connect_is_active_notify(move |win| {
+            if !win.is_active() {
+                rdp_widget_for_active.release_all_input("toplevel became inactive");
+            }
+        });
     }
 
     // 3) Safety: always restore before closing
