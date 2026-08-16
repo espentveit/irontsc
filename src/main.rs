@@ -1682,6 +1682,25 @@ fn create_remote_desktop_window(
     control_bar.set_margin_top(0);
     control_bar.set_margin_bottom(4);
     control_bar.add_css_class("osd"); // Overlay style
+
+    // Give the floating controls a defined edge so they read as a distinct surface instead of
+    // blending into whatever the remote desktop is showing behind them.
+    let island_css = gtk::CssProvider::new();
+    island_css.load_from_string(
+        ".session-island {\
+             border: 1px solid alpha(#ffffff, 0.22);\
+             border-radius: 14px;\
+             box-shadow: 0 2px 6px alpha(#000000, 0.35);\
+         }",
+    );
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &island_css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+    control_bar.add_css_class("session-island");
     control_bar.set_halign(gtk::Align::Start); // Always start from left, we'll position with margin
     control_bar.set_valign(gtk::Align::Start);
 
@@ -2779,19 +2798,55 @@ fn create_remote_desktop_window(
     let is_dragging_for_motion = is_dragging.clone(); // Add dragging state check
     let apply_toolbar_position_for_show_hide = apply_toolbar_position.clone();
 
+    // In fullscreen the controls used to appear the instant the pointer crossed the top edge,
+    // which meant merely passing through the area summoned them and they swallowed a click the
+    // user had aimed at the remote desktop. Require the pointer to settle there first.
+    const FULLSCREEN_REVEAL_DELAY_MS: u64 = 400;
+    let pending_reveal: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
+
     motion_controller_show_hide.connect_motion(move |_, _x, y| {
         let pinned = *is_pinned_for_motion.borrow();
         let fullscreen = *is_fullscreen_for_motion.borrow();
         let dragging = *is_dragging_for_motion.borrow();
 
-        // In windowed mode or when pinned, always show controls
-        // In fullscreen mode when not pinned, show only when mouse is near top OR when dragging
-        if !fullscreen || pinned || dragging || (fullscreen && y < 50.0) {
+        let cancel_pending = || {
+            if let Some(source) = pending_reveal.borrow_mut().take() {
+                source.remove();
+            }
+        };
+
+        // Windowed, pinned or mid-drag: the controls are always available.
+        if !fullscreen || pinned || dragging {
+            cancel_pending();
             control_bar_for_motion_show_hide.set_visible(true);
             apply_toolbar_position_for_show_hide(None);
-        } else if fullscreen && !pinned && !dragging && y >= 50.0 {
-            control_bar_for_motion_show_hide.set_visible(false);
+            return;
         }
+
+        if y >= 50.0 {
+            cancel_pending();
+            control_bar_for_motion_show_hide.set_visible(false);
+            return;
+        }
+
+        // Near the top edge in fullscreen. Reveal only if the pointer is still there when the
+        // delay expires, so a pass-through leaves the desktop clickable.
+        if control_bar_for_motion_show_hide.is_visible() || pending_reveal.borrow().is_some() {
+            return;
+        }
+
+        let control_bar_delayed = control_bar_for_motion_show_hide.clone();
+        let apply_position_delayed = apply_toolbar_position_for_show_hide.clone();
+        let pending_reveal_inner = pending_reveal.clone();
+        let source = gtk::glib::timeout_add_local_once(
+            std::time::Duration::from_millis(FULLSCREEN_REVEAL_DELAY_MS),
+            move || {
+                pending_reveal_inner.borrow_mut().take();
+                control_bar_delayed.set_visible(true);
+                apply_position_delayed(None);
+            },
+        );
+        *pending_reveal.borrow_mut() = Some(source);
     });
     rd_window.add_controller(motion_controller_show_hide);
 
