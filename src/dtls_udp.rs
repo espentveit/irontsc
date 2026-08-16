@@ -684,10 +684,28 @@ impl DtlsUdpSocket {
                 return Err(anyhow!("DTLS read BIO not present"));
             }
 
-            let written = ffi::BIO_write(rbio, data.as_ptr() as *const c_void, data.len() as c_int);
+            // BIO_write is allowed to accept fewer bytes than it was offered. Taking the return
+            // value as "done" drops the remainder, and for TLS on the reliable tunnel that is a
+            // hole in the middle of a record stream: every record from that point on fails its
+            // MAC check and the tunnel is dead. Keep writing until the whole buffer is in.
+            let mut offset = 0usize;
+            while offset < data.len() {
+                let remaining = &data[offset..];
+                let written = ffi::BIO_write(
+                    rbio,
+                    remaining.as_ptr() as *const c_void,
+                    remaining.len() as c_int,
+                );
 
-            if written <= 0 {
-                return Err(anyhow!("Failed to feed ciphertext into DTLS BIO"));
+                if written <= 0 {
+                    return Err(anyhow!(
+                        "Failed to feed ciphertext into DTLS BIO ({} of {} bytes written)",
+                        offset,
+                        data.len()
+                    ));
+                }
+
+                offset += written as usize;
             }
         }
 

@@ -130,6 +130,18 @@ impl SvcMessage {
     pub fn pdu_name(&self) -> &'static str {
         self.pdu.name()
     }
+
+    /// Encodes only the PDU itself, without any static virtual channel framing.
+    ///
+    /// The TCP path wraps a message in CHANNEL_PDU_HEADER, MCS and X.224 layers. An MS-RDPEMT
+    /// tunnel instead carries the bare channel PDU inside its own tunnel header, matching the
+    /// receive direction where tunnel payloads are handed straight to the channel processor.
+    pub fn to_pdu_bytes(&self) -> EncodeResult<Vec<u8>> {
+        let mut buf = vec![0u8; self.pdu.size()];
+        let mut cursor = WriteCursor::new(&mut buf);
+        self.pdu.encode(&mut cursor)?;
+        Ok(buf)
+    }
 }
 
 impl<T> From<T> for SvcMessage

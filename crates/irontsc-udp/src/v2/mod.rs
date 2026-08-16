@@ -18,6 +18,10 @@ bitflags! {
         const AOA = 0x010;
         const OVERHEADSIZE = 0x040;
         const DELAYACKINFO = 0x100;
+        /// Not described in [MS-RDPEUDP2] 2.2.1.1, but set by both Windows endpoints on every
+        /// DATA packet that does not also carry an ACK payload. It carries no payload of its
+        /// own; it is decoded so that it survives a decode/encode round trip.
+        const NOACK = 0x200;
     }
 }
 
@@ -156,7 +160,10 @@ impl EncodeInto for AckPayload {
         out.extend_from_slice(&self.sequence_number.to_le_bytes());
         write_u24_le(self.received_timestamp, out);
         out.push(self.send_ack_time_gap_ms);
-        out.push(((self.num_delayed_acks & 0x0f) << 4) | (self.delay_ack_time_scale & 0x0f));
+        // numDelayedAcks occupies the low nibble and delayAckTimeScale the high one. Getting
+        // these the wrong way round makes the payload the wrong length whenever the peer
+        // aggregates acknowledgements, which silently shifts every payload that follows.
+        out.push(((self.delay_ack_time_scale & 0x0f) << 4) | (self.num_delayed_acks & 0x0f));
         out.extend_from_slice(&self.delay_ack_time_additions);
     }
 }
@@ -168,8 +175,8 @@ impl<'a> DecodeFrom<'a> for AckPayload {
         let received_timestamp = read_u24_le(&input[2..5]);
         let send_ack_time_gap_ms = input[5];
         let nibble = input[6];
-        let num_delayed_acks = (nibble >> 4) & 0x0f;
-        let delay_ack_time_scale = nibble & 0x0f;
+        let num_delayed_acks = nibble & 0x0f;
+        let delay_ack_time_scale = (nibble >> 4) & 0x0f;
         let mut rest = &input[7..];
         ensure_min_length(rest, num_delayed_acks as usize)?;
         let delay_ack_time_additions = rest[..num_delayed_acks as usize].to_vec();
@@ -486,7 +493,9 @@ impl Packet {
         if self.data_header.is_some() {
             expected |= HeaderFlags::DATA;
         }
-        if expected != self.header.flags {
+        // NOACK is informational and has no associated payload, so it never participates in the
+        // payload-presence check.
+        if expected != self.header.flags.difference(HeaderFlags::NOACK) {
             return Err(UdpError::InvalidField("header.flags_mismatch"));
         }
         Ok(())
@@ -592,45 +601,58 @@ impl Packet {
         } else {
             None
         };
-        // Dummy packets have simpler DATA structure: just 2-byte sequence number
-        // Standard packets have full structure: 2-byte data_header + (2-byte channel_seq + payload)
-        let (data_header, data_body) = if header.flags.contains(HeaderFlags::DATA) {
-            if is_dummy {
-                // Dummy packet: just read 2-byte sequence number
+        // Per MS-RDPEUDP2 2.2.1, the on-wire payload order is
+        //   ACK, OverheadSize, DelayAckInfo, AckOfAcks, DataHeader, ACKVEC, DataBody.
+        // DataBody is length-implicit (it runs to the end of the packet), so ACKVEC has to be
+        // taken off the wire *before* it -- otherwise a piggybacked DATA+ACKVEC packet is
+        // unparseable and the data it carries is lost.
+        let (data_header, ack_vector, data_body) = if header.flags.contains(HeaderFlags::DATA) {
+            let (dh, is_body_bearing) = if is_dummy {
+                // Dummy packet: the DataHeader is followed by a body that higher layers must
+                // ignore ([MS-RDPEUDP2] 3.1.1.1.5.1). It still occupies a sequence number.
                 ensure_min_length(rest, 2)?;
                 let sequence = u16::from_le_bytes([rest[0], rest[1]]);
                 rest = &rest[2..];
-                // Create data_header with the sequence, but no data_body (dummy packets carry no data)
                 (
-                    Some(DataHeaderPayload {
+                    DataHeaderPayload {
                         data_sequence_number: sequence,
-                    }),
-                    None,
+                    },
+                    false,
                 )
             } else {
-                // Standard packet: read full header + body
                 let (dh, tail) = DataHeaderPayload::decode_from(rest)?;
                 rest = tail;
+                (dh, true)
+            };
+            let ack_vec = if header.flags.contains(HeaderFlags::ACKVEC) {
+                let (ack_vec, tail) = AckVectorPayload::decode_from(rest)?;
+                rest = tail;
+                Some(ack_vec)
+            } else {
+                None
+            };
+            let body = if is_body_bearing {
                 let (body, tail) = DataBodyPayload::decode_from(rest)?;
                 rest = tail;
-                (Some(dh), Some(body))
-            }
+                Some(body)
+            } else {
+                None
+            };
+            (Some(dh), ack_vec, body)
         } else {
-            (None, None)
+            let ack_vec = if header.flags.contains(HeaderFlags::ACKVEC) {
+                let (ack_vec, tail) = AckVectorPayload::decode_from(rest)?;
+                rest = tail;
+                Some(ack_vec)
+            } else {
+                None
+            };
+            (None, ack_vec, None)
         };
-        let ack_vector = if header.flags.contains(HeaderFlags::ACKVEC) {
-            let (ack_vec, tail) = AckVectorPayload::decode_from(rest)?;
-            rest = tail;
-            Some(ack_vec)
-        } else {
-            None
-        };
-        // Dummy packets (and potentially all packets) can have trailing padding bytes.
-        // The packet boundary is already enforced by the short_length field or overall packet length,
-        // so we don't need to reject packets with trailing bytes.
-        // if !rest.is_empty() {
-        //     return Err(UdpError::InvalidField("packet.trailing_bytes"));
-        // }
+        // Dummy packets (and potentially all packets) can have trailing padding bytes, and the
+        // packet boundary is already enforced by short_length / the datagram length, so trailing
+        // bytes are tolerated rather than rejected.
+        let _ = rest;
         let packet = Self {
             header,
             ack,
@@ -695,6 +717,49 @@ mod tests {
             ack.delay_ack_time_additions
         );
         assert_eq!(decoded.data_body.unwrap().data, data_body.data);
+    }
+
+    /// Bytes captured from a Windows server: an ACK for our sequence 102 that aggregates one
+    /// delayed acknowledgement, piggybacked on DATA sequence 224 carrying a TLS record. The
+    /// trailing delayAckTimeAdditions byte only appears if numDelayedAcks is read from the low
+    /// nibble; reading the high nibble shifts DataHeader by one byte and loses the payload.
+    #[test]
+    fn real_server_ack_with_delayed_acks_and_data() {
+        let raw: [u8; 24] = [
+            0x00, 0x45, 0xf0, 0x66, 0x00, 0x03, 0x22, 0xe0, 0x00, 0x01, 0x54, 0x08, 0xe0, 0x00,
+            0x02, 0x00, 0x17, 0x03, 0x03, 0x00, 0x62, 0x56, 0x2c, 0x9f,
+        ];
+        let packet = Packet::decode_on_wire(&raw).expect("decode");
+        assert_eq!(packet.header.log_window_size, 15);
+
+        let ack = packet.ack.as_ref().expect("ack payload");
+        assert_eq!(ack.sequence_number, 102);
+        assert_eq!(ack.num_delayed_acks, 1);
+        assert_eq!(ack.delay_ack_time_additions, vec![0x54]);
+        assert_eq!(ack.delay_ack_time_scale, 0);
+
+        assert_eq!(
+            packet.overhead_size.as_ref().expect("overhead").overhead_size,
+            8
+        );
+        assert_eq!(
+            packet
+                .data_header
+                .as_ref()
+                .expect("data header")
+                .data_sequence_number,
+            224,
+            "the data sequence must survive a variable-length ACK payload"
+        );
+        let body = packet.data_body.as_ref().expect("data body");
+        assert_eq!(body.channel_sequence_number, 2);
+        assert_eq!(&body.data[..5], &[0x17, 0x03, 0x03, 0x00, 0x62]);
+
+        // And the same bytes come back out.
+        let reencoded = packet
+            .encode_on_wire(PacketPrefixByte::TYPE_STANDARD)
+            .expect("encode");
+        assert_eq!(&reencoded[..], &raw[..]);
     }
 
     #[test]

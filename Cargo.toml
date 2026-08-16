@@ -239,7 +239,9 @@ foreign-types = "0.3"
 libc = "0.2"
 
 [features]
-default = ["gfx", "video-redirection", "h264"]
+# h264 (and video-redirection, which pulls it in) require ffmpeg-sys-next, which needs the
+# pre-FFmpeg-8 headers. Opt in with --features h264 on a machine that has them.
+default = ["gfx"]
 gfx = []
 h264 = ["ironrdp-h264", "ironrdp-gfx/h264"]
 video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264", "ironrdp-gfx/h264"]

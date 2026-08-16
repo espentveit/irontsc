@@ -2364,20 +2364,28 @@ async fn active_session<T: RdpEventSender + Clone>(
                                                 }
                                             }
                                             Some(TransportContext::UdpTunnel(tunnel_id)) => {
-                                                // Send via UDP tunnel
+                                                // Send via UDP tunnel. The tunnel carries the bare
+                                                // channel PDU wrapped in an MS-RDPEMT tunnel header and
+                                                // encrypted with the tunnel's TLS session, so the
+                                                // TCP-framed encoding must not be used here, and the
+                                                // payload must not be sent as raw UDP data.
                                                 info!("   📤 Routing {} response to UDP tunnel {}", msg.pdu_name(), tunnel_id);
-                                                match active_stage.encode_dvc_messages(vec![msg]) {
-                                                    Ok(frame) if !frame.is_empty() => {
+                                                match msg.to_pdu_bytes() {
+                                                    Ok(dvc_pdu) if !dvc_pdu.is_empty() => {
                                                         if let Some(tunnel) = udp_tunnels.get_mut(&tunnel_id) {
-                                                            if let Err(e) = tunnel.command_tx.send(UdpTransportCommand::SendData(frame)) {
+                                                            let command = UdpTransportCommand::SendDvcData {
+                                                                request_id: tunnel_id,
+                                                                data: dvc_pdu,
+                                                            };
+                                                            if let Err(e) = tunnel.command_tx.send(command) {
                                                                 warn!("Failed to send response via UDP: {:?}", e);
                                                             }
                                                         } else {
                                                             warn!("No UDP tunnel found for tunnel_id={}", tunnel_id);
                                                         }
                                                     }
+                                                    Ok(_) => warn!("Encoded an empty {} PDU for UDP tunnel {}", msg.pdu_name(), tunnel_id),
                                                     Err(e) => warn!("Failed to encode DVC UDP message: {:?}", e),
-                                                    _ => {}
                                                 }
                                             }
                                         }

@@ -395,9 +395,10 @@ impl SynDataExPayload {
             if !is_known {
                 return Err(UdpError::InvalidField("syn_ex.udp_version_value"));
             }
-            if requires_cookie && self.cookie_hash.is_none() {
-                return Err(UdpError::InvalidField("syn_ex.cookie_hash"));
-            }
+            // The cookie hash is only mandatory in a client SYN ([MS-RDPEUDP] 2.2.2.9); a
+            // server's SYN+ACK advertising version 3 never carries one, so its absence must not
+            // make an otherwise valid payload unparseable.
+            let _ = requires_cookie;
         }
         Ok(())
     }
@@ -426,10 +427,13 @@ impl<'a> DecodeFrom<'a> for SynDataExPayload {
         let flags = SynExFlags::from_bits(flag_bits).ok_or(UdpError::InvalidFlags(flag_bits))?;
         let udp_version = UdpVersionFlags::from_bits(version_bits);
         let mut rest = &input[4..];
+        // Only a SYN carries the cookie hash. A SYN+ACK advertising version 3 does not, and it
+        // may or may not be zero-padded, so the field is read only when the bytes are actually
+        // there instead of failing the whole decode.
         let cookie_hash = if flags.contains(SynExFlags::VERSION_INFO_VALID)
-            && udp_version.map_or(false, |v| v.contains(UdpVersionFlags::VERSION_3))
+            && udp_version.is_some_and(|v| v.contains(UdpVersionFlags::VERSION_3))
+            && rest.len() >= 32
         {
-            ensure_min_length(rest, 32)?;
             let mut cookie = [0u8; 32];
             cookie.copy_from_slice(&rest[..32]);
             rest = &rest[32..];

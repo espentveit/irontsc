@@ -594,6 +594,27 @@ impl UdpTransportManager {
         Ok(())
     }
 
+    /// Sends an acknowledgement if the connection owes one.
+    async fn flush_pending_ack(&mut self) {
+        let mut conn = self.connection.lock().await;
+        if !conn.has_pending_ack() {
+            return;
+        }
+        let ack_packet = match conn.create_ack() {
+            Ok(packet) => packet,
+            Err(err) => {
+                warn!("Failed to build ACK: {}", err);
+                return;
+            }
+        };
+        drop(conn);
+        if let Err(e) = self.send_over_udp(&ack_packet).await {
+            warn!("Failed to send ACK: {}", e);
+        } else {
+            debug!("✅ Sent ACK ({} bytes)", ack_packet.len());
+        }
+    }
+
     async fn send_over_udp(&mut self, payload: &[u8]) -> Result<()> {
         // RDP UDP protocol packets (SYN, ACK, DATA with headers) are NEVER encrypted
         // Only the payload INSIDE DATA packets gets encrypted via send_data() -> send_tunnel_pdu()
@@ -1090,26 +1111,16 @@ impl UdpTransportManager {
                     }
                 }
 
-                // Send ACK immediately after processing data packets
-                let mut conn = self.connection.lock().await;
-                if conn.has_pending_ack() {
-                    if let Ok(ack_packet) = conn.create_ack() {
-                        drop(conn);
-                        if let Err(e) = self.send_over_udp(&ack_packet).await {
-                            warn!("Failed to send ACK: {}", e);
-                        } else {
-                            debug!("✅ Sent ACK for received UDP DATA packet");
-                        }
-                    } else {
-                        drop(conn);
-                    }
-                } else {
-                    drop(conn);
-                }
+                self.flush_pending_ack().await;
             }
             Ok(_) => {
-                // No payloads yet (buffered or out of sequence)
-                debug!("📦 UDP packet buffered (out of sequence or no data yet)");
+                // Nothing was delivered upwards, but the packet may still owe an
+                // acknowledgement: dummy (bandwidth-probe) packets, out-of-order packets and
+                // retransmits of already-delivered data all land here. The server opens the
+                // RDP-UDP2 data phase with a burst of dummy packets, so staying silent here
+                // makes it see the whole probe as lost.
+                debug!("📦 UDP packet carried no payload for the layer above (dummy, buffered or duplicate)");
+                self.flush_pending_ack().await;
             }
             Err(e) => {
                 // Not a source packet, try as ACK packet
@@ -1374,31 +1385,26 @@ impl UdpTransportManager {
             return Ok(());
         }
 
-        // Create TunnelData PDU: MS-RDPEMT §2.2.1.1 RDP_TUNNEL_HEADER structure
-        // HeaderLength (2 bytes) - Total header size (10 bytes for basic header)
-        // HeaderVersion (2 bytes) - Version (1)
-        // Action (2 bytes) - 0x0003 for DATA
-        // Flags (2 bytes) - 0x0000 for now
-        // PayloadLength (2 bytes) - Size of DVC payload
-        // [DVC payload data...]
+        // RDP_TUNNEL_DATA, using the same encoder the tunnel create request goes through.
+        // The header is Action(4 bits) | Flags(4 bits), PayloadLength (2 bytes) and
+        // HeaderLength (1 byte) -- four bytes in total, with RDPTUNNEL_ACTION_DATA = 0x2
+        // ([MS-RDPEMT] 2.2.1.1).
+        let payload_len = dvc_data.len();
+        if payload_len > u16::MAX as usize {
+            warn!("⚠️ DVC payload of {payload_len} bytes does not fit in a tunnel PDU, dropping");
+            return Ok(());
+        }
 
-        let header_length: u16 = 10; // Basic tunnel header with no subheaders
-        let header_version: u16 = 1;
-        let action: u16 = 0x0003; // DATA
-        let flags: u16 = 0x0000;
-        let payload_length = dvc_data.len() as u16;
-
-        let mut tunnel_pdu = Vec::with_capacity(header_length as usize + dvc_data.len());
-        tunnel_pdu.extend_from_slice(&header_length.to_le_bytes());
-        tunnel_pdu.extend_from_slice(&header_version.to_le_bytes());
-        tunnel_pdu.extend_from_slice(&action.to_le_bytes());
-        tunnel_pdu.extend_from_slice(&flags.to_le_bytes());
-        tunnel_pdu.extend_from_slice(&payload_length.to_le_bytes());
-        tunnel_pdu.extend_from_slice(&dvc_data);
+        let data_pdu = TunnelPdu::data(dvc_data);
+        let mut tunnel_pdu = vec![0u8; data_pdu.size()];
+        let mut cursor = WriteCursor::new(&mut tunnel_pdu);
+        data_pdu
+            .encode(&mut cursor)
+            .context("Failed to encode RDP_TUNNEL_DATA")?;
 
         debug!(
             "📤 Sending {} bytes of DVC data through UDP tunnel ({} bytes total with header)",
-            dvc_data.len(),
+            payload_len,
             tunnel_pdu.len()
         );
 

@@ -9,7 +9,11 @@ Cargo.lock
 .vscode/
 .idea/
 
-# Generated files
-samples/*-w11.pcapng
-samples/*-w11.keys
-samples/*-w11.log
+# Test artifacts: captures, TLS keylogs and trace logs produced by ./test.sh
+samples/*.pcap
+samples/*.pcapng
+samples/*.keys
+samples/*.log
+*.pcap
+*.pcapng
+*.keys

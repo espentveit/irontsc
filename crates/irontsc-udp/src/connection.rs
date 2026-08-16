@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use log::{debug, info};
+use log::debug;
 
 use crate::error::{Result, UdpError};
 use crate::rdpudp_v1_packet;
@@ -18,9 +18,35 @@ use crate::v1::{
     SourcePayloadHeader, SynDataPayload, TransportMode, UdpVersionFlags, VectorElementState,
 };
 use crate::v2::{
-    AckPayload as V2AckPayload, DataBodyPayload, DataHeaderPayload, HeaderFlags as V2HeaderFlags,
-    Packet as V2Packet, PacketHeader as V2PacketHeader,
+    AckPayload as V2AckPayload, AckVecEntry, AckVectorPayload, DataBodyPayload, DataHeaderPayload,
+    Packet as V2Packet, PacketHeader as V2PacketHeader, TimestampInfo,
 };
+
+/// Sequence number both Windows endpoints use to start the RDP-UDP2 data sequence space.
+const V3_INITIAL_SEQUENCE: u16 = 100;
+
+/// Number of sequence numbers we are willing to hold while waiting for a gap to be filled.
+/// Anything further ahead than this is treated as bogus rather than buffered.
+const V3_RECEIVE_WINDOW: u16 = 4096;
+
+/// Largest ACK vector we will build, in bytes (the wire field is 7 bits wide).
+const V3_MAX_ACKVEC_BYTES: usize = 0x7f;
+
+/// [MS-RDPEUDP2] 2.2.1.1 LogWindowSize. Windows always advertises the maximum (2^15 * MTU);
+/// advertising a small window here throttles the server's sender window for no benefit.
+const V3_LOG_WINDOW_SIZE: u8 = 15;
+
+/// True when `a` is strictly newer than `b` in a wrapping 16-bit sequence space.
+#[inline]
+fn seq_gt(a: u16, b: u16) -> bool {
+    a != b && a.wrapping_sub(b) < 0x8000
+}
+
+/// True when `a` is strictly newer than `b` in a wrapping 32-bit sequence space.
+#[inline]
+fn seq_gt32(a: u32, b: u32) -> bool {
+    a != b && a.wrapping_sub(b) < 0x8000_0000
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -123,6 +149,14 @@ enum PendingKey {
     V3(u16),
 }
 
+/// A buffered v3 payload. `channel_sequence` is `None` for dummy packets, which hold their
+/// place in the sequence space but carry nothing for the layer above.
+#[derive(Debug, Clone)]
+struct V3Payload {
+    channel_sequence: Option<u16>,
+    data: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 struct SourceRecord {
     sequence: u32,
@@ -132,7 +166,9 @@ struct SourceRecord {
 #[derive(Debug, Clone, Copy)]
 enum PendingAck {
     V1 { run_length: u8 },
-    V3 { sequence: u16 },
+    /// A v3 acknowledgement is owed; the sequence to report is derived from the receive window
+    /// when the packet is actually built.
+    V3,
 }
 
 pub struct UdpConnection {
@@ -155,12 +191,32 @@ pub struct UdpConnection {
 
     pending_packets: HashMap<PendingKey, PendingPacket>,
     receive_buffer: HashMap<u32, Vec<u8>>,
-    v3_receive_buffer: HashMap<u16, Vec<u8>>,
+    /// Buffered v3 payloads keyed by data sequence number. Dummy packets are stored with no
+    /// channel sequence so that they occupy their slot without being delivered upwards.
+    v3_receive_buffer: HashMap<u16, V3Payload>,
+    /// Highest channel sequence number already handed upwards. The data sequence number always
+    /// advances, including on a retransmission, so only the channel sequence identifies which
+    /// bytes of the stream a packet carries.
+    v3_last_channel_sequence: Option<u16>,
+    /// False until the first v3 DATA packet tells us where the peer's sequence space starts.
+    v3_base_established: bool,
+    /// Highest v3 sequence number seen so far, used to size the ACK vector.
+    v3_highest_received: u16,
+    /// Lowest v3 sequence number of ours that the peer has not acknowledged yet.
+    v3_sender_base: u16,
+    /// Last AckOfAcks value we put on the wire, so we only repeat it when it changes.
+    v3_announced_aoa: Option<u16>,
+    /// Highest cumulative acknowledgement received from the peer for our own v3 data.
+    v3_remote_acked: Option<u16>,
     source_block: Vec<SourceRecord>,
     fec_index: u8,
 
     pending_ack: Option<PendingAck>,
 
+    /// Reference point for the 24-bit, 4-microsecond ACK timestamps of [MS-RDPEUDP2] 3.1.1.1.4.
+    epoch: Instant,
+    /// Arrival time of the most recent DATA packet, for SendAckTimeGapInMs.
+    last_data_arrival: Option<Instant>,
     last_activity: Instant,
     last_keepalive: Instant,
 }
@@ -184,9 +240,17 @@ impl UdpConnection {
             pending_packets: HashMap::new(),
             receive_buffer: HashMap::new(),
             v3_receive_buffer: HashMap::new(),
+            v3_last_channel_sequence: None,
+            v3_base_established: false,
+            v3_highest_received: 0,
+            v3_sender_base: 0,
+            v3_announced_aoa: None,
+            v3_remote_acked: None,
             source_block: Vec::new(),
             fec_index: 0,
             pending_ack: None,
+            epoch: now,
+            last_data_arrival: None,
             last_activity: now,
             last_keepalive: now,
         }
@@ -256,13 +320,20 @@ impl UdpConnection {
             None
         };
 
-        let syn_bytes = rdpudp_v1_syn_packet_bytes!(
+        let mut syn_bytes = rdpudp_v1_syn_packet_bytes!(
             self.config.receive_window_size,
             self.config.mode == TransportMode::Lossy,
             syn_data,
             correlation = correlation_payload,
             syn_ex = syn_data_ex_payload
         )?;
+
+        // [MS-RDPEUDP] 3.1.5.1.1: the SYN datagram MUST be zero-padded up to the smaller of the
+        // upstream and downstream MTU, which is how the path MTU gets validated.
+        let padded = usize::from(self.config.mtu);
+        if syn_bytes.len() < padded {
+            syn_bytes.resize(padded, 0);
+        }
 
         self.state = ConnectionState::SynSent;
         Ok(syn_bytes)
@@ -296,15 +367,21 @@ impl UdpConnection {
                 );
             }
             UdpProtocolVersion::V3 => {
-                // For V3, the 32-bit Initial SequenceNumber in SYN/SYN+ACK appears to be
-                // for V1/V2 compatibility only. The actual V3 16-bit DATA sequence space
-                // starts from a different value that we learn from the first DATA packet.
-                // Initialize to 0 and let the first packet set the expected sequence.
+                // For V3, the 32-bit Initial SequenceNumber in SYN/SYN+ACK is for V1/V2
+                // compatibility only. The 16-bit RDP-UDP2 sequence space is separate and is
+                // learned from the first DATA packet the peer sends.
                 self.v3_expected_sequence = 0;
+                self.v3_base_established = false;
+                self.v3_receive_buffer.clear();
+                self.v3_last_channel_sequence = None;
 
-                // Our initial sequence (what we send to server) - lower 16 bits of our config
-                let our_seq16 = self.config.initial_sequence_number as u16;
-                self.v3_next_data_sequence = our_seq16.wrapping_add(1);
+                // Windows starts both directions of the RDP-UDP2 sequence space at 100 and
+                // announces that base in the AckOfAcks payload of its first DATA packet.
+                let our_seq16 = V3_INITIAL_SEQUENCE;
+                self.v3_next_data_sequence = our_seq16;
+                self.v3_sender_base = our_seq16;
+                self.v3_announced_aoa = None;
+                self.v3_remote_acked = None;
 
                 // Channel sequence is independent and starts from 1 (matches FreeRDP behavior)
                 self.v3_next_channel_sequence = 1;
@@ -335,15 +412,12 @@ impl UdpConnection {
             if let Some(remote_flags) = syn_ex.udp_version {
                 let remote_version = udp_version_from_flags(remote_flags);
                 match remote_version {
+                    // The version in the SYN+ACK is the one both endpoints must use
+                    // ([MS-RDPEUDP] 3.1.5.1.2). A server that rejected our cookie hash answers
+                    // with version 2, so the advertised value is authoritative on its own and
+                    // must not be second-guessed by looking for a cookie the server never sends.
                     Some(UdpProtocolVersion::V3) => {
-                        if self.negotiated_version == UdpProtocolVersion::V3
-                            && syn_ex.cookie_hash.is_none()
-                        {
-                            self.negotiated_version = UdpProtocolVersion::V2;
-                        } else {
-                            self.negotiated_version =
-                                self.negotiated_version.min(UdpProtocolVersion::V3);
-                        }
+                        self.negotiated_version = self.negotiated_version.min(UdpProtocolVersion::V3);
                     }
                     Some(UdpProtocolVersion::V2) => {
                         self.negotiated_version =
@@ -445,9 +519,16 @@ impl UdpConnection {
             }
         }
 
-        // Remove packets that hit max retransmits
+        // Remove packets that hit max retransmits. Giving up on one moves our sender window
+        // forward, which the peer learns from the next AckOfAcks we send.
         for key in to_remove {
             self.pending_packets.remove(&key);
+            if let PendingKey::V3(seq) = key {
+                let base = seq.wrapping_add(1);
+                if seq_gt(base, self.v3_sender_base) {
+                    self.v3_sender_base = base;
+                }
+            }
         }
 
         retransmits
@@ -528,25 +609,44 @@ impl UdpConnection {
             }
             UdpProtocolVersion::V3 => {
                 use crate::rdpudp_v2_overhead;
-                let mut flags = V2HeaderFlags::ACK;
 
-                // Add OVERHEADSIZE flag per MS-RDPEUDP2 spec
-                // OverheadSize is sent by Receiver to inform overhead bytes at RDP-UDP2 layer
-                flags |= rdpudp_v2_flags!(OVERHEADSIZE);
+                self.pending_ack = None;
 
-                let header = V2PacketHeader::new(flags, 0)?;
+                // OverheadSize: bytes this layer adds on top of the payload
+                // (prefix byte + header + ACK payload).
+                let overhead_size = Some(rdpudp_v2_overhead!(10));
+
+                if self.v3_has_gap() {
+                    // A cumulative ACK cannot describe a hole, so report the exact receive
+                    // window state and let the peer retransmit only what is missing.
+                    // ACKVEC and ACK are mutually exclusive ([MS-RDPEUDP2] 2.2.1.1).
+                    let vector = self.build_v3_ack_vector();
+                    let flags = rdpudp_v2_flags!(ACKVEC | OVERHEADSIZE);
+                    let header = V2PacketHeader::new(flags, V3_LOG_WINDOW_SIZE)?;
+                    debug!(
+                        "📤 V3 ACKVEC: base={} entries={}",
+                        vector.base_sequence_number,
+                        vector.entries.len()
+                    );
+                    return rdpudp_v2_packet_bytes!(
+                        header = header,
+                        overhead_size = overhead_size,
+                        ack_vector = Some(vector)
+                    );
+                }
+
+                let flags = rdpudp_v2_flags!(ACK | OVERHEADSIZE);
+                let header = V2PacketHeader::new(flags, V3_LOG_WINDOW_SIZE)?;
                 let ack_payload = V2AckPayload {
                     sequence_number: self.v3_expected_sequence.wrapping_sub(1),
-                    received_timestamp: 0,
-                    send_ack_time_gap_ms: 0,
+                    // A zero timestamp makes the peer's RTT and loss-timeout estimates
+                    // meaningless, so a real one is always supplied.
+                    received_timestamp: self.v3_timestamp(),
+                    send_ack_time_gap_ms: self.v3_send_ack_gap_ms(),
                     num_delayed_acks: 0,
                     delay_ack_time_scale: 0,
                     delay_ack_time_additions: Vec::new(),
                 };
-
-                // OverheadSize: typical RDP UDP v3 overhead is around 8-12 bytes
-                // (header + prefix + various payloads)
-                let overhead_size = Some(rdpudp_v2_overhead!(10));
 
                 rdpudp_v2_packet_bytes!(
                     header = header,
@@ -607,12 +707,13 @@ impl UdpConnection {
 
         let mut flags = rdpudp_v2_flags!(DATA);
         let mut ack_payload = None;
-        if let Some(PendingAck::V3 { sequence }) = self.pending_ack.take() {
+        if self.pending_ack.take().is_some() {
             flags |= rdpudp_v2_flags!(ACK);
+            let sequence = self.v3_expected_sequence.wrapping_sub(1);
             ack_payload = Some(V2AckPayload {
                 sequence_number: sequence,
-                received_timestamp: 0,
-                send_ack_time_gap_ms: 0,
+                received_timestamp: self.v3_timestamp(),
+                send_ack_time_gap_ms: self.v3_send_ack_gap_ms(),
                 num_delayed_acks: 0,
                 delay_ack_time_scale: 0,
                 delay_ack_time_additions: Vec::new(),
@@ -621,6 +722,9 @@ impl UdpConnection {
                 "📤 V3 DATA: Including ACK payload for seq={} (0x{:04X})",
                 sequence, sequence
             );
+        } else {
+            // Both Windows endpoints set this on every DATA packet that carries no ACK.
+            flags |= rdpudp_v2_flags!(NOACK);
         }
 
         // Per MS-RDPEUDP2, include DelayAckInfo for reliable mode
@@ -632,16 +736,18 @@ impl UdpConnection {
             None
         };
 
-        // Include Ack of Acks with the current data sequence number
-        // This acknowledges the peer's ACKs
-        let ack_of_acks = Some(rdpudp_v2_ack_of_acks!(data_sequence as u16));
+        // AckOfAcks is the *lowest* sequence number of ours still awaiting acknowledgement
+        // ([MS-RDPEUDP2] 2.2.1.2.4), which tells the peer where our sender window starts.
+        // Sending the sequence being transmitted instead would ask the peer to abandon every
+        // packet still in flight. It only needs to go out when the value changes.
+        let ack_of_acks = if self.v3_announced_aoa != Some(self.v3_sender_base) {
+            self.v3_announced_aoa = Some(self.v3_sender_base);
+            Some(rdpudp_v2_ack_of_acks!(self.v3_sender_base))
+        } else {
+            None
+        };
 
-        // Calculate LogWindowSize as log₂ of receive_window_size (per MS-RDPEUDP2 section 2.2.1.1)
-        // Maximum value is 15, which gives a window of 2^15 = 32,768 packets
-        let log_window = (self.config.receive_window_size as f32).log2().ceil() as u8;
-        let log_window = log_window.min(15); // Clamp to maximum allowed value
-
-        let header = V2PacketHeader::new(flags, log_window)?;
+        let header = V2PacketHeader::new(flags, V3_LOG_WINDOW_SIZE)?;
         let encoded = rdpudp_v2_packet_bytes!(
             header = header,
             ack = ack_payload,
@@ -680,74 +786,167 @@ impl UdpConnection {
 
     fn process_v3_source(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
         let packet = V2Packet::decode_on_wire(bytes)?;
+
+        // Feedback about our own sender window, regardless of whether this packet carries data.
         if let Some(ack) = &packet.ack {
             self.update_remote_ack_v3(ack.sequence_number);
         }
-
-        // Check if this packet has data (could be Dummy packet with just sequence, or Standard with data)
-        if let Some(data_header) = packet.data_header {
-            let sequence = data_header.data_sequence_number;
-
-            if let Some(body) = packet.data_body {
-                // Standard packet with actual data
-                info!(
-                    "📥 V3 DATA packet: seq={} (expected={}), data_len={}",
-                    sequence,
-                    self.v3_expected_sequence,
-                    body.data.len()
-                );
-
-                // If this is the first DATA packet (expected==0), initialize from it
-                if self.v3_expected_sequence == 0 {
-                    debug!(
-                        "📥 V3: First DATA packet! Initializing expected_seq from {}",
-                        sequence
-                    );
-                    self.v3_expected_sequence = sequence;
-                }
-
-                // Check for duplicate packet (already processed)
-                // Sequence numbers wrap around, but if seq < expected and not a huge wrap, it's a duplicate
-                let seq_diff = sequence.wrapping_sub(self.v3_expected_sequence);
-                if seq_diff > 0x8000 {
-                    // This is an old packet (seq < expected), more than halfway around the u16 space
-                    info!(
-                        "⏭️  V3: Skipping duplicate/old DATA packet seq={} (already processed, expected={})",
-                        sequence, self.v3_expected_sequence
-                    );
-                    // Don't ACK duplicates - this can cause issues with TLS
-                    return Ok(Vec::new());
-                }
-
-                self.v3_receive_buffer.insert(sequence, body.data);
-                return Ok(self.collect_ready_packets_v3());
-            } else {
-                // Dummy packet - has sequence but no data, just acknowledge it
-                debug!(
-                    "📥 V3 DUMMY packet: seq={} (expected={})",
-                    sequence, self.v3_expected_sequence
-                );
-
-                // If this is the first packet (expected==0), initialize from it
-                if self.v3_expected_sequence == 0 {
-                    debug!(
-                        "📥 V3: First DUMMY packet! Initializing expected_seq from {}",
-                        sequence
-                    );
-                    self.v3_expected_sequence = sequence;
-                }
-
-                // Update expected sequence if this is the next one we're waiting for
-                if sequence == self.v3_expected_sequence {
-                    self.v3_expected_sequence = sequence.wrapping_add(1);
-                    self.pending_ack = Some(PendingAck::V3 { sequence });
-                }
-                // Dummy packets don't deliver any payload
-                return Ok(Vec::new());
+        if let Some(vector) = &packet.ack_vector {
+            self.process_remote_ack_vector(vector);
+        }
+        // AckOfAcks moves the lower bound of *our* receive window ([MS-RDPEUDP2] 3.1.1.2.2).
+        // This is the only way to get past a lost dummy packet, because dummies are never
+        // retransmitted -- without honouring it the receive stream stalls forever.
+        let mut delivered = Vec::new();
+        if let Some(aoa) = &packet.ack_of_acks {
+            if self.advance_receive_base(aoa.sequence_number) {
+                delivered = self.collect_ready_packets_v3();
             }
         }
 
-        Ok(Vec::new())
+        // The AckOfAcks above is usually piggybacked on a DATA packet, so this packet's own
+        // payload still has to be processed and appended to whatever the base advance released.
+        let Some(data_header) = packet.data_header else {
+            return Ok(delivered);
+        };
+        let sequence = data_header.data_sequence_number;
+        let is_dummy = packet.data_body.is_none();
+        self.last_data_arrival = Some(Instant::now());
+
+        if !self.v3_base_established {
+            debug!("📥 V3: first DATA packet, sequence space starts at {sequence}");
+            self.v3_base_established = true;
+            self.v3_expected_sequence = sequence;
+            self.v3_highest_received = sequence.wrapping_sub(1);
+        }
+
+        let ahead = sequence.wrapping_sub(self.v3_expected_sequence);
+        if ahead >= 0x8000 {
+            // Older than our window: the peer retransmitted because it believes our
+            // acknowledgement was lost, so we must acknowledge again rather than stay silent.
+            debug!(
+                "⏭️  V3: re-acknowledging already-delivered packet seq={sequence} (expected={}) \
+                 flags=0x{:03x} len={} raw={:02x?}",
+                self.v3_expected_sequence,
+                packet.header.flags.bits(),
+                bytes.len(),
+                &bytes[..bytes.len().min(24)]
+            );
+            self.arm_pending_ack();
+            return Ok(delivered);
+        }
+        if ahead > V3_RECEIVE_WINDOW {
+            debug!(
+                "⚠️  V3: dropping packet seq={sequence}, {ahead} past expected={}",
+                self.v3_expected_sequence
+            );
+            return Ok(delivered);
+        }
+
+        if seq_gt(sequence, self.v3_highest_received) {
+            self.v3_highest_received = sequence;
+        }
+
+        // A dummy packet carries a body that higher layers must ignore, but it still occupies a
+        // sequence number, so it is buffered with no channel sequence and acknowledged like any
+        // other packet.
+        let payload = match packet.data_body {
+            Some(body) => {
+                debug!(
+                    "📥 V3 DATA packet: seq={sequence}, chan_seq={}, data_len={} flags=0x{:03x}",
+                    body.channel_sequence_number,
+                    body.data.len(),
+                    packet.header.flags.bits()
+                );
+                V3Payload {
+                    channel_sequence: Some(body.channel_sequence_number),
+                    data: body.data,
+                }
+            }
+            None => {
+                debug!("📥 V3 DUMMY packet: seq={sequence}");
+                V3Payload {
+                    channel_sequence: None,
+                    data: Vec::new(),
+                }
+            }
+        };
+        let _ = is_dummy;
+        self.v3_receive_buffer.insert(sequence, payload);
+        self.arm_pending_ack();
+
+        delivered.extend(self.collect_ready_packets_v3());
+        Ok(delivered)
+    }
+
+    /// Records that an acknowledgement is owed for everything received so far.
+    fn arm_pending_ack(&mut self) {
+        self.pending_ack = Some(PendingAck::V3);
+    }
+
+    /// Moves the lower bound of the receive window forward, abandoning any gap below it.
+    /// Returns true when the base actually moved.
+    fn advance_receive_base(&mut self, base: u16) -> bool {
+        if !self.v3_base_established || !seq_gt(base, self.v3_expected_sequence) {
+            return false;
+        }
+        if base.wrapping_sub(self.v3_expected_sequence) > V3_RECEIVE_WINDOW {
+            debug!("⚠️  V3: ignoring implausible AckOfAcks {base}");
+            return false;
+        }
+        debug!(
+            "🔀 V3: AckOfAcks moves receive base {} → {base}, abandoning the gap",
+            self.v3_expected_sequence
+        );
+        // Only the sequences that never arrived are written off, as empty placeholders that
+        // deliver nothing. Anything already buffered is real data the peer did get through and
+        // must still be handed up in order -- dropping it would punch a hole in the byte stream
+        // and break the TLS record layer for the rest of the connection.
+        let mut seq = self.v3_expected_sequence;
+        while seq != base {
+            self.v3_receive_buffer.entry(seq).or_insert(V3Payload {
+                channel_sequence: None,
+                data: Vec::new(),
+            });
+            seq = seq.wrapping_add(1);
+        }
+        if seq_gt(base.wrapping_sub(1), self.v3_highest_received) {
+            self.v3_highest_received = base.wrapping_sub(1);
+        }
+        self.arm_pending_ack();
+        true
+    }
+
+    /// Applies an ACK vector sent by the peer to our own outstanding packets.
+    fn process_remote_ack_vector(&mut self, vector: &AckVectorPayload) {
+        let mut sequence = vector.base_sequence_number;
+        for entry in &vector.entries {
+            match *entry {
+                AckVecEntry::StateMap(bits) => {
+                    for bit in 0..7u8 {
+                        if bits & (1 << bit) != 0 {
+                            self.pending_packets.remove(&PendingKey::V3(sequence));
+                        }
+                        sequence = sequence.wrapping_add(1);
+                    }
+                }
+                AckVecEntry::RunLength { received, length } => {
+                    for _ in 0..length {
+                        if received {
+                            self.pending_packets.remove(&PendingKey::V3(sequence));
+                        }
+                        sequence = sequence.wrapping_add(1);
+                    }
+                }
+            }
+        }
+        // Everything below the vector base has already been acknowledged.
+        let base = vector.base_sequence_number;
+        self.pending_packets
+            .retain(|key, _| !matches!(key, PendingKey::V3(seq) if !seq_gt(*seq, base.wrapping_sub(1))));
+        if self.v3_sender_base != base && !seq_gt(self.v3_sender_base, base) {
+            self.v3_sender_base = base;
+        }
     }
 
     fn collect_ready_packets(&mut self) -> Vec<Vec<u8>> {
@@ -778,20 +977,89 @@ impl UdpConnection {
         let mut current = self.v3_expected_sequence;
         let mut delivered = false;
 
-        while let Some(data) = self.v3_receive_buffer.remove(&current) {
-            result.push(data);
+        while let Some(payload) = self.v3_receive_buffer.remove(&current) {
             current = current.wrapping_add(1);
             delivered = true;
+
+            // Dummy packets and abandoned gaps hold their place but carry nothing upwards.
+            let Some(channel_sequence) = payload.channel_sequence else {
+                continue;
+            };
+
+            // A retransmission arrives with a fresh data sequence number but repeats an earlier
+            // channel sequence. Handing those bytes up a second time would duplicate them in the
+            // tunnel's byte stream, which desynchronises the TLS record layer for good.
+            if self
+                .v3_last_channel_sequence
+                .is_some_and(|last| !seq_gt(channel_sequence, last))
+            {
+                debug!("⏭️  V3: dropping repeated channel sequence {channel_sequence}");
+                continue;
+            }
+
+            self.v3_last_channel_sequence = Some(channel_sequence);
+            if !payload.data.is_empty() {
+                result.push(payload.data);
+            }
         }
 
         if delivered {
             self.v3_expected_sequence = current;
-            self.pending_ack = Some(PendingAck::V3 {
-                sequence: current.wrapping_sub(1),
-            });
+            self.arm_pending_ack();
         }
 
         result
+    }
+
+    /// True when packets have arrived out of order and a gap is still outstanding, in which case
+    /// a cumulative ACK cannot describe our state and an ACK vector must be sent instead.
+    fn v3_has_gap(&self) -> bool {
+        !self.v3_receive_buffer.is_empty()
+    }
+
+    /// 24-bit timestamp in units of 4 microseconds ([MS-RDPEUDP2] 3.1.1.1.4).
+    fn v3_timestamp(&self) -> u32 {
+        ((Instant::now().duration_since(self.epoch).as_micros() / 4) as u32) & 0x00ff_ffff
+    }
+
+    /// Milliseconds between the arrival of the newest data packet and now, saturating at 254
+    /// because 255 means "invalid" on the wire.
+    fn v3_send_ack_gap_ms(&self) -> u8 {
+        self.last_data_arrival
+            .map(|at| {
+                Instant::now()
+                    .duration_since(at)
+                    .as_millis()
+                    .min(254) as u8
+            })
+            .unwrap_or(0)
+    }
+
+    /// Builds an ACK vector describing the receive window from the first missing sequence up to
+    /// the highest one seen, using state-map entries (bit 0 = base, increasing towards bit 6).
+    fn build_v3_ack_vector(&self) -> AckVectorPayload {
+        let base = self.v3_expected_sequence;
+        let span = self.v3_highest_received.wrapping_sub(base).wrapping_add(1) as usize;
+        let bytes = span.div_ceil(7).min(V3_MAX_ACKVEC_BYTES);
+        let mut entries = Vec::with_capacity(bytes);
+        for chunk in 0..bytes {
+            let mut bits = 0u8;
+            for bit in 0..7u8 {
+                let seq = base.wrapping_add((chunk * 7) as u16 + bit as u16);
+                if self.v3_receive_buffer.contains_key(&seq) {
+                    bits |= 1 << bit;
+                }
+            }
+            entries.push(AckVecEntry::StateMap(bits));
+        }
+        AckVectorPayload {
+            base_sequence_number: base,
+            timestamp_info: Some(TimestampInfo {
+                timestamp: self.v3_timestamp(),
+                send_ack_time_gap_ms: self.v3_send_ack_gap_ms(),
+            }),
+            entries,
+        }
     }
 
     fn build_ack_section(&self, run_length: u8) -> Result<AckSection> {
@@ -827,19 +1095,34 @@ impl UdpConnection {
         );
     }
 
+    /// Handles the peer's `snSourceAck`, which reports the newest packet *of ours* it has
+    /// received. It must not touch `remote_acked_sequence`, which is what we report about the
+    /// peer's packets in our own header.
     fn update_remote_ack(&mut self, ack_sequence: u32) {
-        self.remote_acked_sequence = ack_sequence;
         self.pending_packets.retain(|key, _| match key {
-            PendingKey::V1(seq) => *seq > ack_sequence,
+            PendingKey::V1(seq) => seq_gt32(*seq, ack_sequence),
             PendingKey::V3(_) => true,
         });
     }
 
     fn update_remote_ack_v3(&mut self, ack_sequence: u16) {
+        if self
+            .v3_remote_acked
+            .is_some_and(|previous| !seq_gt(ack_sequence, previous))
+        {
+            return;
+        }
+        self.v3_remote_acked = Some(ack_sequence);
+        // Comparisons have to wrap: once the 16-bit space rolls over, a plain `>` keeps every
+        // outstanding packet forever and turns into a retransmit storm.
         self.pending_packets.retain(|key, _| match key {
-            PendingKey::V3(seq) => *seq > ack_sequence,
+            PendingKey::V3(seq) => seq_gt(*seq, ack_sequence),
             PendingKey::V1(_) => true,
         });
+        let base = ack_sequence.wrapping_add(1);
+        if seq_gt(base, self.v3_sender_base) {
+            self.v3_sender_base = base;
+        }
     }
 }
 
@@ -876,6 +1159,265 @@ mod tests {
         let syn_ex = packet.syn_data_ex.expect("syn ex present");
         let version = syn_ex.udp_version.expect("version present");
         assert_eq!(version.bits(), UdpVersionFlags::VERSION_3.bits());
+    }
+
+    fn connected_v3() -> UdpConnection {
+        let mut conn = UdpConnection::new(default_config(UdpProtocolVersion::V3));
+        conn.set_cookie_hash([0xAA; 32]);
+        conn.create_syn().expect("syn");
+        let syn_ack = crate::rdpudp_v1_syn_ack_packet_bytes!(
+            0,
+            64,
+            SynDataPayload {
+                initial_sequence_number: 0,
+                upstream_mtu: 1232,
+                downstream_mtu: 1232,
+            },
+            syn_ex = Some(rdpudp_v1_syn_ex!(
+                udp_version = UdpVersionFlags::VERSION_3,
+                cookie_hash = [0u8; 32]
+            ))
+        )
+        .expect("syn ack");
+        conn.process_syn_ack(&syn_ack).expect("process syn ack");
+        assert_eq!(conn.protocol_version(), UdpProtocolVersion::V3);
+        conn
+    }
+
+    /// Builds an on-wire v3 DATA packet. `body` of `None` produces a dummy packet, which on the
+    /// wire still carries a body that the receiver must ignore. The channel sequence tracks the
+    /// data sequence, which is what a first transmission looks like.
+    fn v3_data(sequence: u16, body: Option<&[u8]>) -> Vec<u8> {
+        v3_data_with_channel(sequence, sequence, body)
+    }
+
+    /// Builds a v3 DATA packet with an explicit channel sequence, so a retransmission -- a fresh
+    /// data sequence carrying an earlier channel sequence -- can be constructed.
+    fn v3_data_with_channel(sequence: u16, channel_sequence: u16, body: Option<&[u8]>) -> Vec<u8> {
+        let is_dummy = body.is_none();
+        let packet = crate::rdpudp_v2_packet!(
+            header = V2PacketHeader::new(rdpudp_v2_flags!(DATA), 15).unwrap(),
+            data_header = Some(DataHeaderPayload {
+                data_sequence_number: sequence,
+            }),
+            data_body = Some(DataBodyPayload {
+                channel_sequence_number: channel_sequence,
+                data: body.unwrap_or(&[0u8; 16]).to_vec(),
+            })
+        );
+        let index = if is_dummy {
+            crate::v2::PacketPrefixByte::TYPE_DUMMY
+        } else {
+            crate::v2::PacketPrefixByte::TYPE_STANDARD
+        };
+        packet.encode_on_wire(index).expect("encode")
+    }
+
+    fn v3_ack_of_acks(sequence: u16) -> Vec<u8> {
+        crate::rdpudp_v2_packet!(
+            header = V2PacketHeader::new(rdpudp_v2_flags!(AOA), 15).unwrap(),
+            ack_of_acks = Some(crate::rdpudp_v2_ack_of_acks!(sequence))
+        )
+        .encode_on_wire(crate::v2::PacketPrefixByte::TYPE_STANDARD)
+        .expect("encode")
+    }
+
+    #[test]
+    fn syn_is_padded_to_the_mtu() {
+        let mut conn = UdpConnection::new(default_config(UdpProtocolVersion::V2));
+        let syn = conn.create_syn().expect("syn");
+        assert_eq!(syn.len(), 1232);
+    }
+
+    #[test]
+    fn dummy_packets_are_acknowledged_but_not_delivered() {
+        let mut conn = connected_v3();
+        let delivered = conn.process_source_packet(&v3_data(100, None)).expect("dummy");
+        assert!(delivered.is_empty(), "a dummy packet carries nothing upwards");
+        assert!(
+            conn.has_pending_ack(),
+            "a dummy still occupies a sequence number and must be acknowledged"
+        );
+        // The sequence space advanced, so real data behind it is delivered immediately.
+        let delivered = conn
+            .process_source_packet(&v3_data(101, Some(b"payload")))
+            .expect("data");
+        assert_eq!(delivered, vec![b"payload".to_vec()]);
+    }
+
+    #[test]
+    fn ack_of_acks_releases_data_stuck_behind_a_lost_dummy() {
+        let mut conn = connected_v3();
+        conn.process_source_packet(&v3_data(100, Some(b"first"))).expect("first");
+        // 101 is a dummy that never arrives; dummies are never retransmitted.
+        let delivered = conn
+            .process_source_packet(&v3_data(102, Some(b"second")))
+            .expect("second");
+        assert!(delivered.is_empty(), "102 has to wait behind the gap at 101");
+
+        // The peer gives up on 101 and moves the window base to 102.
+        let delivered = conn.process_source_packet(&v3_ack_of_acks(102)).expect("aoa");
+        assert_eq!(
+            delivered,
+            vec![b"second".to_vec()],
+            "AckOfAcks must unstick the stream instead of leaving it blocked forever"
+        );
+    }
+
+    /// Regression: an AckOfAcks that writes off a lost dummy must not take already-buffered
+    /// data with it, and must not swallow the payload it is piggybacked on. Dropping either
+    /// punches a hole in the tunnel byte stream and kills the TLS record layer for good.
+    #[test]
+    fn ack_of_acks_keeps_buffered_data_and_its_own_payload() {
+        let mut conn = connected_v3();
+        assert_eq!(
+            conn.process_source_packet(&v3_data(223, Some(b"a"))).expect("223"),
+            vec![b"a".to_vec()]
+        );
+        // 224 is a dummy that never arrives. 225 does arrive and waits behind the hole.
+        assert!(conn
+            .process_source_packet(&v3_data(225, Some(b"b")))
+            .expect("225")
+            .is_empty());
+
+        // The peer writes off 224 in an AckOfAcks piggybacked on the DATA packet for 226.
+        let packet = crate::rdpudp_v2_packet!(
+            header = V2PacketHeader::new(rdpudp_v2_flags!(DATA | AOA), 15).unwrap(),
+            ack_of_acks = Some(crate::rdpudp_v2_ack_of_acks!(225)),
+            data_header = Some(DataHeaderPayload {
+                data_sequence_number: 226,
+            }),
+            data_body = Some(DataBodyPayload {
+                channel_sequence_number: 226,
+                data: b"c".to_vec(),
+            })
+        )
+        .encode_on_wire(crate::v2::PacketPrefixByte::TYPE_STANDARD)
+        .expect("encode");
+
+        let delivered = conn.process_source_packet(&packet).expect("aoa + data");
+        assert_eq!(
+            delivered,
+            vec![b"b".to_vec(), b"c".to_vec()],
+            "the buffered payload and the piggybacked one must both come through, in order"
+        );
+        assert_eq!(conn.v3_expected_sequence, 227);
+    }
+
+    #[test]
+    fn retransmitted_packets_are_acknowledged_again() {
+        let mut conn = connected_v3();
+        conn.process_source_packet(&v3_data(100, Some(b"first"))).expect("first");
+        conn.create_ack().expect("ack");
+        assert!(!conn.has_pending_ack());
+
+        // The peer resends 100 because it never saw our ACK. Staying silent would make it
+        // retransmit until it gives up.
+        let delivered = conn.process_source_packet(&v3_data(100, Some(b"first"))).expect("dup");
+        assert!(delivered.is_empty(), "already-delivered data is not delivered twice");
+        assert!(conn.has_pending_ack(), "a retransmit must be re-acknowledged");
+    }
+
+    /// A retransmission carries a *new* data sequence number but repeats an earlier channel
+    /// sequence. Delivering it again duplicates bytes in the tunnel's byte stream, which
+    /// permanently desynchronises the TLS record layer, so it must be dropped.
+    #[test]
+    fn retransmitted_channel_data_is_not_delivered_twice() {
+        let mut conn = connected_v3();
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(100, 10, Some(b"a")))
+                .expect("100"),
+            vec![b"a".to_vec()]
+        );
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(101, 11, Some(b"b")))
+                .expect("101"),
+            vec![b"b".to_vec()]
+        );
+
+        // The peer never saw our ACK and resends channel sequence 11 as data sequence 102.
+        let delivered = conn
+            .process_source_packet(&v3_data_with_channel(102, 11, Some(b"b")))
+            .expect("retransmit");
+        assert!(
+            delivered.is_empty(),
+            "channel sequence 11 has already been handed up"
+        );
+        assert!(conn.has_pending_ack(), "the retransmit is still acknowledged");
+
+        // New data still flows.
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(103, 12, Some(b"c")))
+                .expect("103"),
+            vec![b"c".to_vec()]
+        );
+    }
+
+    #[test]
+    fn gap_produces_an_ack_vector_rather_than_a_cumulative_ack() {
+        let mut conn = connected_v3();
+        conn.process_source_packet(&v3_data(100, Some(b"a"))).expect("100");
+        conn.process_source_packet(&v3_data(102, Some(b"c"))).expect("102");
+
+        let ack = conn.create_ack().expect("ack");
+        let packet = V2Packet::decode_on_wire(&ack).expect("decode");
+        let vector = packet.ack_vector.expect("a hole must be reported as an ACK vector");
+        assert!(packet.ack.is_none(), "ACK and ACKVEC are mutually exclusive");
+        assert_eq!(vector.base_sequence_number, 101, "base is the first missing sequence");
+        // Bit 0 is the base (101, missing), bit 1 is 102 (received).
+        assert_eq!(vector.entries, vec![AckVecEntry::StateMap(0b10)]);
+    }
+
+    #[test]
+    fn ack_carries_a_real_timestamp() {
+        let mut conn = connected_v3();
+        conn.process_source_packet(&v3_data(100, Some(b"a"))).expect("100");
+        let ack = conn.create_ack().expect("ack");
+        let packet = V2Packet::decode_on_wire(&ack).expect("decode");
+        let ack = packet.ack.expect("cumulative ack");
+        assert_eq!(ack.sequence_number, 100);
+        assert_eq!(packet.header.log_window_size, 15);
+    }
+
+    #[test]
+    fn acknowledgements_survive_sequence_wraparound() {
+        let mut conn = connected_v3();
+        conn.v3_next_data_sequence = 0xfffe;
+        conn.v3_sender_base = 0xfffe;
+        for _ in 0..4 {
+            conn.send_data(vec![0u8; 8]).expect("send");
+        }
+        assert_eq!(conn.pending_packets.len(), 4);
+        // The peer acknowledges past the wrap point.
+        conn.update_remote_ack_v3(0x0000);
+        assert_eq!(
+            conn.pending_packets.len(),
+            1,
+            "a cumulative ACK of 0x0000 covers 0xfffe, 0xffff and 0x0000, leaving only 0x0001"
+        );
+    }
+
+    #[test]
+    fn ack_of_acks_reports_the_oldest_unacknowledged_packet() {
+        let mut conn = connected_v3();
+        let first = conn.send_data(vec![1u8; 8]).expect("send");
+        let packet = V2Packet::decode_on_wire(&first).expect("decode");
+        let aoa = packet.ack_of_acks.expect("the first packet announces our base");
+        assert_eq!(aoa.sequence_number, V3_INITIAL_SEQUENCE);
+
+        // Nothing acknowledged yet, so the base has not moved and is not repeated.
+        let second = conn.send_data(vec![2u8; 8]).expect("send");
+        let packet = V2Packet::decode_on_wire(&second).expect("decode");
+        assert!(packet.ack_of_acks.is_none());
+
+        // Once the peer acknowledges the first packet the base advances and is re-announced.
+        conn.update_remote_ack_v3(V3_INITIAL_SEQUENCE);
+        let third = conn.send_data(vec![3u8; 8]).expect("send");
+        let packet = V2Packet::decode_on_wire(&third).expect("decode");
+        assert_eq!(
+            packet.ack_of_acks.expect("base moved").sequence_number,
+            V3_INITIAL_SEQUENCE + 1
+        );
     }
 
     #[test]
