@@ -13,7 +13,7 @@
 sudo apt install -y \
     cargo rustc pkg-config build-essential \
     cmake clang libclang-dev \
-    libgtk-4-dev libadwaita-1-dev libcairo2-dev \
+    libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev \
     libasound2-dev libssl-dev \
     libavcodec-dev libavformat-dev libavutil-dev \
     libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev \
@@ -30,7 +30,7 @@ releases, use PPA builds of FFmpeg 8 or build without the `h264` /
 sudo dnf install -y \
     rust cargo pkg-config \
     cmake clang-devel \
-    gtk4-devel libadwaita-devel cairo-devel \
+    libxkbcommon-devel wayland-devel mesa-libGL-devel libX11-devel \
     alsa-lib-devel openssl-devel \
     ffmpeg-devel fdk-aac-devel opus-devel
 ```
@@ -41,7 +41,7 @@ sudo dnf install -y \
 sudo pacman -S --needed \
     rust cargo pkgconf base-devel \
     cmake clang \
-    gtk4 libadwaita cairo alsa-lib openssl \
+    libxkbcommon wayland mesa libx11 alsa-lib openssl \
     ffmpeg fdk-aac opus
 ```
 

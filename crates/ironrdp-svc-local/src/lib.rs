@@ -76,12 +76,24 @@ pub trait SvcEncode: Encode + Send {}
 // FIXME: legacy code
 impl SvcEncode for Vec<u8> {}
 
+/// Identifies which transport a message should be sent over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportContext {
+    /// Message should be sent over the main TCP connection
+    Tcp,
+    /// Message should be sent over a UDP tunnel with the specified request_id
+    UdpTunnel(u32),
+}
+
 /// Encodable PDU to be sent over a static virtual channel.
 ///
 /// Additional SVC header flags can be added via [`SvcMessage::with_flags`] method.
 pub struct SvcMessage {
     pdu: Box<dyn SvcEncode>,
     flags: ChannelFlags,
+    /// Optional transport context indicating where this message should be sent.
+    /// If None, the message will be sent over the default TCP transport.
+    transport: Option<TransportContext>,
 }
 
 impl fmt::Debug for SvcMessage {
@@ -89,6 +101,7 @@ impl fmt::Debug for SvcMessage {
         f.debug_struct("SvcMessage")
             .field("pdu", &self.pdu.name())
             .field("flags", &self.flags)
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -100,6 +113,35 @@ impl SvcMessage {
         self.flags |= flags;
         self
     }
+
+    /// Sets the transport context for this message.
+    #[must_use]
+    pub fn with_transport(mut self, transport: TransportContext) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// Returns the transport context for this message.
+    pub fn transport(&self) -> Option<TransportContext> {
+        self.transport
+    }
+
+    /// Returns the name of the PDU type
+    pub fn pdu_name(&self) -> &'static str {
+        self.pdu.name()
+    }
+
+    /// Encodes only the PDU itself, without any static virtual channel framing.
+    ///
+    /// The TCP path wraps a message in CHANNEL_PDU_HEADER, MCS and X.224 layers. An MS-RDPEMT
+    /// tunnel instead carries the bare channel PDU inside its own tunnel header, matching the
+    /// receive direction where tunnel payloads are handed straight to the channel processor.
+    pub fn to_pdu_bytes(&self) -> EncodeResult<Vec<u8>> {
+        let mut buf = vec![0u8; self.pdu.size()];
+        let mut cursor = WriteCursor::new(&mut buf);
+        self.pdu.encode(&mut cursor)?;
+        Ok(buf)
+    }
 }
 
 impl<T> From<T> for SvcMessage
@@ -110,6 +152,7 @@ where
         Self {
             pdu: Box::new(pdu),
             flags: ChannelFlags::empty(),
+            transport: None,
         }
     }
 }
@@ -154,9 +197,15 @@ impl StaticVirtualChannel {
 
     /// Processes a payload received on the virtual channel. Returns a vector of PDUs to be sent back
     /// to the server. If no PDUs are to be sent, an empty vector is returned.
+    ///
+    /// Static virtual channels typically use TCP transport. For dynamic channels over UDP tunnels,
+    /// the transport context is managed by the DVC layer.
     pub fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>> {
         if let Some(payload) = self.dechunkify(payload).map_err(|e| decode_err!(e))? {
-            return self.channel_processor.process(&payload);
+            // Static virtual channels always use TCP transport
+            return self
+                .channel_processor
+                .process(&payload, TransportContext::Tcp);
         }
 
         Ok(Vec::new())
@@ -274,8 +323,15 @@ pub trait SvcProcessor: AsAny + fmt::Debug + Send {
     /// Processes a payload received on the virtual channel. The `payload` is expected
     /// to be a fully de-chunkified PDU.
     ///
+    /// The `transport` parameter indicates which transport the message arrived on, allowing
+    /// responses to be routed back via the same transport (TCP or UDP tunnel).
+    ///
     /// Returns a list of PDUs to be sent back.
-    fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>>;
+    fn process(
+        &mut self,
+        payload: &[u8],
+        transport: TransportContext,
+    ) -> PduResult<Vec<SvcMessage>>;
 }
 
 assert_obj_safe!(SvcProcessor);

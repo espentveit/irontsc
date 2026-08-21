@@ -157,23 +157,23 @@ impl DecodeStream {
             #[cfg(feature = "aac")]
             WaveFormat::AAC_MS => {
                 use fdk_aac::dec::{Decoder, Transport};
-                
+
                 let (dec_tx, dec_rx) = mpsc::channel();
                 let channels = rx_format.n_channels;
                 let sample_rate = rx_format.n_samples_per_sec;
-                
+
                 dec_thread = Some(thread::spawn(move || {
                     // Initialize AAC decoder with ADTS transport
                     let mut decoder = Decoder::new(Transport::Adts);
-                    
+
                     // Set output channel configuration
                     if let Err(e) = decoder.set_max_output_channels(channels as usize) {
                         error!(?e, "Failed to set AAC max output channels");
                         return;
                     }
-                    
+
                     debug!(channels, sample_rate, "AAC decoder initialized");
-                    
+
                     while let Ok(pkt) = rx.recv() {
                         // Fill decoder with packet data
                         let bytes_consumed = match decoder.fill(&pkt) {
@@ -183,7 +183,7 @@ impl DecodeStream {
                                 continue;
                             }
                         };
-                        
+
                         // Only try to decode if we consumed the whole packet
                         // This indicates the decoder has enough data for a frame
                         if bytes_consumed == pkt.len() {
@@ -193,9 +193,9 @@ impl DecodeStream {
                                 // Decoder hasn't initialized yet, skip decode
                                 continue;
                             }
-                            
+
                             let mut output_buffer = vec![0i16; frame_size];
-                            
+
                             // Decode frame
                             match decoder.decode_frame(&mut output_buffer) {
                                 Ok(_) => {
@@ -204,7 +204,7 @@ impl DecodeStream {
                                     for sample in output_buffer {
                                         pcm_bytes.extend_from_slice(&sample.to_le_bytes());
                                     }
-                                    
+
                                     if dec_tx.send(pcm_bytes).is_err() {
                                         error!("Failed to send decoded AAC data");
                                         break;
@@ -216,7 +216,11 @@ impl DecodeStream {
                                 }
                             }
                         } else {
-                            debug!(consumed = bytes_consumed, total = pkt.len(), "Partial AAC packet consumed");
+                            debug!(
+                                consumed = bytes_consumed,
+                                total = pkt.len(),
+                                "Partial AAC packet consumed"
+                            );
                         }
                     }
                 }));

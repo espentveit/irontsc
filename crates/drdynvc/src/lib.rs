@@ -92,11 +92,43 @@ struct ReassemblyBuffer {
     data: BytesMut,
 }
 
-/// Incoming message from a dynamic channel
+/// Events from processing DRDYNVC PDUs
+#[derive(Debug)]
+pub enum DvcEvent {
+    /// Complete data message received on a channel
+    Data { channel_id: u32, data: Vec<u8> },
+    /// Soft-Sync Request received (server wants to switch channels to UDP)
+    SoftSyncRequest(SoftSyncRequest),
+}
+
+/// Incoming message from a dynamic channel (deprecated - use DvcEvent)
 #[derive(Debug)]
 pub struct Incoming {
     pub channel_id: u32,
     pub data: Vec<u8>,
+}
+
+/// Tunnel type constants (MS-RDPEDYC §2.2.5.1.1)
+pub const TUNNELTYPE_UDPFECR: u32 = 0x00000001; // Reliable
+pub const TUNNELTYPE_UDPFECL: u32 = 0x00000003; // Lossy
+
+/// Soft-Sync flags (MS-RDPEDYC §2.2.5.1)
+pub const SOFT_SYNC_TCP_FLUSHED: u16 = 0x01;
+pub const SOFT_SYNC_CHANNEL_LIST_PRESENT: u16 = 0x02;
+
+/// Soft-Sync Channel List from a Soft-Sync Request (MS-RDPEDYC §2.2.5.1.1)
+#[derive(Debug, Clone)]
+pub struct SoftSyncChannelList {
+    pub tunnel_type: u32,
+    pub dvc_ids: Vec<u32>,
+}
+
+/// Soft-Sync Request data (MS-RDPEDYC §2.2.5.1)
+#[derive(Debug, Clone)]
+pub struct SoftSyncRequest {
+    pub flags: u16,
+    pub number_of_tunnels: u16,
+    pub channel_lists: Vec<SoftSyncChannelList>,
 }
 
 /// DRDYNVC client state machine
@@ -307,6 +339,44 @@ impl Drdynvc {
         Ok(buf.to_vec())
     }
 
+    /// Build a Soft-Sync Response PDU (MS-RDPEDYC §2.2.5.2)
+    /// 
+    /// This tells the server which tunnels the client will use for sending DVC data.
+    /// Typically mirrors the server's request to use the same tunnels.
+    pub fn build_soft_sync_response(&self, tunnel_types: &[u32]) -> Result<Vec<u8>> {
+        let mut buf = BytesMut::new();
+
+        // Header: cbId (2 bits) | Sp (2 bits) | Cmd (4 bits)
+        // Cmd = 0x09 (Soft-Sync Response), cbId and Sp = 0
+        buf.put_u8((PduCmd::SoftSyncResponse as u8) << 4);
+
+        // Pad (1 byte) - MUST be 0x00
+        buf.put_u8(0x00);
+
+        // NumberOfTunnels (4 bytes)
+        buf.put_u32_le(tunnel_types.len() as u32);
+
+        // TunnelsToSwitch (variable)
+        for &tunnel_type in tunnel_types {
+            buf.put_u32_le(tunnel_type);
+            
+            let tunnel_name = match tunnel_type {
+                TUNNELTYPE_UDPFECR => "UDPFECR (Reliable)",
+                TUNNELTYPE_UDPFECL => "UDPFECL (Lossy)",
+                _ => "Unknown",
+            };
+            debug!("   Tunnel type: 0x{:08x} ({})", tunnel_type, tunnel_name);
+        }
+
+        debug!(
+            "📤 Built Soft-Sync Response: {} tunnels, {} bytes",
+            tunnel_types.len(),
+            buf.len()
+        );
+
+        Ok(buf.to_vec())
+    }
+
     /// Process incoming PDU from the static drdynvc channel
     /// Returns Some(Incoming) if a complete message is received
     pub fn process_incoming(&mut self, pdu: &[u8]) -> Result<Option<Incoming>> {
@@ -329,6 +399,7 @@ impl Drdynvc {
             PduCmd::Data => self.process_data(buf, cb_chid),
             PduCmd::DataFirst => self.process_data_first(buf, sp, cb_chid),
             PduCmd::CloseRequest => self.process_close(buf, cb_chid),
+            PduCmd::SoftSyncRequest => self.process_soft_sync_request(buf),
             _ => {
                 warn!("Unhandled DRDYNVC command: {:?}", cmd);
                 Ok(None)
@@ -442,6 +513,95 @@ impl Drdynvc {
             total_length,
             channel_id
         );
+        Ok(None)
+    }
+
+    fn process_soft_sync_request(&mut self, mut buf: &[u8]) -> Result<Option<Incoming>> {
+        // MS-RDPEDYC §2.2.5.1: DYNVC_SOFT_SYNC_REQUEST
+        if buf.remaining() < 7 {
+            bail!("SOFT_SYNC_REQUEST PDU too short (need at least 7 bytes)");
+        }
+
+        let pad = buf.get_u8();
+        if pad != 0 {
+            warn!("SOFT_SYNC_REQUEST: Pad should be 0x00, got 0x{:02x}", pad);
+        }
+
+        let length = buf.get_u32_le();
+        let flags = buf.get_u16_le();
+        let number_of_tunnels = buf.get_u16_le();
+
+        debug!(
+            "📡 Soft-Sync Request: flags=0x{:04x}, tunnels={}, length={}",
+            flags, number_of_tunnels, length
+        );
+
+        let tcp_flushed = (flags & SOFT_SYNC_TCP_FLUSHED) != 0;
+        let has_channel_list = (flags & SOFT_SYNC_CHANNEL_LIST_PRESENT) != 0;
+
+        debug!(
+            "   TCP_FLUSHED={}, CHANNEL_LIST_PRESENT={}",
+            tcp_flushed, has_channel_list
+        );
+
+        let mut channel_lists = Vec::new();
+
+        if has_channel_list {
+            // Parse channel lists
+            for i in 0..number_of_tunnels {
+                if buf.remaining() < 6 {
+                    bail!(
+                        "SOFT_SYNC_REQUEST: Not enough data for channel list {} (need 6 bytes)",
+                        i
+                    );
+                }
+
+                let tunnel_type = buf.get_u32_le();
+                let num_dvcs = buf.get_u16_le();
+
+                let tunnel_name = match tunnel_type {
+                    TUNNELTYPE_UDPFECR => "UDPFECR (Reliable)",
+                    TUNNELTYPE_UDPFECL => "UDPFECL (Lossy)",
+                    _ => "Unknown",
+                };
+
+                debug!(
+                    "   Tunnel {}: type=0x{:08x} ({}), DVCs={}",
+                    i, tunnel_type, tunnel_name, num_dvcs
+                );
+
+                let mut dvc_ids = Vec::with_capacity(num_dvcs as usize);
+                for j in 0..num_dvcs {
+                    if buf.remaining() < 4 {
+                        bail!(
+                            "SOFT_SYNC_REQUEST: Not enough data for DVC ID {} in tunnel {}",
+                            j,
+                            i
+                        );
+                    }
+                    let dvc_id = buf.get_u32_le();
+                    dvc_ids.push(dvc_id);
+
+                    // Try to find channel name
+                    let channel_name = self
+                        .channels
+                        .get(&dvc_id)
+                        .map(|ch| ch.name.as_str())
+                        .unwrap_or("<unknown>");
+
+                    debug!("      DVC[{}]: ID={} ('{}')", j, dvc_id, channel_name);
+                }
+
+                channel_lists.push(SoftSyncChannelList {
+                    tunnel_type,
+                    dvc_ids,
+                });
+            }
+        }
+
+        debug!("✅ Soft-Sync Request parsed successfully");
+
+        // For now, just log it - we'll return an event type later
         Ok(None)
     }
 

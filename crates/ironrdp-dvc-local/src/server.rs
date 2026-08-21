@@ -128,7 +128,11 @@ impl SvcProcessor for DrdynvcServer {
         Ok(alloc::vec![msg])
     }
 
-    fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>> {
+    fn process(
+        &mut self,
+        payload: &[u8],
+        _transport: ironrdp_svc::TransportContext,
+    ) -> PduResult<Vec<SvcMessage>> {
         let pdu = decode_dvc_message(payload).map_err(|e| decode_err!(e))?;
         let mut resp = Vec::new();
 
@@ -194,6 +198,12 @@ impl SvcProcessor for DrdynvcServer {
                             .map_err(|e| encode_err!(e))?,
                     );
                 }
+            }
+            DrdynvcClientPdu::SoftSyncRequest(req_pdu) => {
+                debug!("Got DVC SoftSync Request PDU from client: {req_pdu:?}");
+                // Client is requesting to switch channels to UDP
+                // Server should respond with SoftSyncResponse
+                // For now, just log it - full implementation would handle channel switching
             }
             DrdynvcClientPdu::SoftSyncResponse(resp_pdu) => {
                 debug!("Got DVC SoftSync Response PDU: {resp_pdu:?}");

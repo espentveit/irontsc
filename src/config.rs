@@ -35,6 +35,15 @@ pub struct Config {
 
     /// Enable H.264 hardware acceleration (default: false for compatibility)
     pub h264_hw_accel: bool,
+
+    /// Disable H.264 AVC420 codec
+    pub disable_avc420: bool,
+
+    /// Disable H.264 AVC444 codec
+    pub disable_avc444: bool,
+
+    /// Disable UDP transport (use TCP only)
+    pub disable_udp: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -489,6 +498,9 @@ impl Config {
             rdcleanpath,
             dvc_pipe_proxies: args.dvc_proxy,
             h264_hw_accel: false, // Set via UI, default to false for CLI mode
+            disable_avc420: false,
+            disable_avc444: false,
+            disable_udp: false,
         })
     }
 }

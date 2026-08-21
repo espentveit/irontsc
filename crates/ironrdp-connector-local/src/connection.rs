@@ -33,6 +33,16 @@ pub struct ConnectionResult {
     pub message_channel_id: Option<u16>,
     /// Selected security protocol from negotiation (for determining DTLS requirement in MS-RDPEMT)
     pub selected_protocol: nego::SecurityProtocol,
+    /// Multitransport request ID from InitiateMultitransportRequest (for creating UDP tunnel)
+    /// This is provided by the server during CapabilitiesExchange and must be echoed back
+    /// in the Tunnel Create Request PDU per MS-RDPEMT spec
+    pub multitransport_request_id: Option<u32>,
+    /// Multitransport security cookie from InitiateMultitransportRequest (for creating UDP tunnel)
+    /// This 16-byte cookie is provided by the server and must be sent in the Tunnel Create Request
+    /// PDU to authenticate the multitransport connection per MS-RDPEMT spec
+    pub multitransport_security_cookie: Option<[u8; 16]>,
+    /// Multitransport protocol requested by server (UdpFecReliable or UdpFecLossy)
+    pub multitransport_protocol: Option<ironrdp_pdu::rdp::multitransport::MultitransportProtocol>,
 }
 
 #[derive(Default, Debug)]
@@ -712,20 +722,33 @@ impl Sequence for ClientConnector {
                             desktop_size,
                             enable_server_pointer,
                             pointer_software_rendering,
-                        } => ClientConnectorState::Connected {
-                            result: ConnectionResult {
-                                io_channel_id,
-                                user_channel_id,
-                                static_channels: mem::take(&mut self.static_channels),
-                                desktop_size,
-                                enable_server_pointer,
-                                pointer_software_rendering,
-                                connection_activation,
-                                correlation_id: self.correlation_id,
-                                message_channel_id: self.message_channel_id,
-                                selected_protocol: self.selected_protocol,
-                            },
-                        },
+                        } => {
+                            // Extract multitransport information from connection_activation before moving it
+                            let multitransport_request_id =
+                                connection_activation.multitransport_request_id;
+                            let multitransport_security_cookie =
+                                connection_activation.multitransport_security_cookie;
+                            let multitransport_protocol =
+                                connection_activation.multitransport_protocol;
+
+                            ClientConnectorState::Connected {
+                                result: ConnectionResult {
+                                    io_channel_id,
+                                    user_channel_id,
+                                    static_channels: mem::take(&mut self.static_channels),
+                                    desktop_size,
+                                    enable_server_pointer,
+                                    pointer_software_rendering,
+                                    connection_activation,
+                                    correlation_id: self.correlation_id,
+                                    message_channel_id: self.message_channel_id,
+                                    selected_protocol: self.selected_protocol,
+                                    multitransport_request_id,
+                                    multitransport_security_cookie,
+                                    multitransport_protocol,
+                                },
+                            }
+                        }
                         _ => return Err(general_err!("invalid state (this is a bug)")),
                     }
                 };

@@ -26,6 +26,10 @@ pub struct ConnectionActivationSequence {
     pub state: ConnectionActivationState,
     config: Config,
     message_channel_id: Option<u16>,
+    /// Multitransport request information received during CapabilitiesExchange
+    pub multitransport_request_id: Option<u32>,
+    pub multitransport_security_cookie: Option<[u8; 16]>,
+    pub multitransport_protocol: Option<ironrdp_pdu::rdp::multitransport::MultitransportProtocol>,
 }
 
 impl ConnectionActivationSequence {
@@ -42,6 +46,9 @@ impl ConnectionActivationSequence {
             },
             config,
             message_channel_id,
+            multitransport_request_id: None,
+            multitransport_security_cookie: None,
+            multitransport_protocol: None,
         }
     }
 
@@ -141,26 +148,31 @@ impl Sequence for ConnectionActivationSequence {
                         multitransport_request.requested_protocol
                     );
 
-                    // Send InitiateMultitransportResponse
-                    // Per MS-RDPBCGR spec, the response MUST be sent on the MCS Message Channel
-                    let message_channel = self.message_channel_id.unwrap_or_else(|| {
-                        warn!(
-                            "No message_channel_id available for multitransport response, using io_channel_id as fallback"
-                        );
-                        io_channel_id
-                    });
-
-                    let written = legacy::encode_multitransport_response(
-                        user_channel_id,
-                        message_channel,
-                        multitransport_request.request_id,
-                        output,
-                    )?;
+                    // **CRITICAL**: Store the multitransport information for later use
+                    // Per MS-RDPEMT spec, the client MUST use these exact values when creating
+                    // the Tunnel Create Request PDU over the UDP connection
+                    self.multitransport_request_id = Some(multitransport_request.request_id);
+                    self.multitransport_security_cookie =
+                        Some(multitransport_request.security_cookie);
+                    self.multitransport_protocol = Some(multitransport_request.requested_protocol);
 
                     debug!(
-                        "Sent InitiateMultitransportResponse: request_id={}, written={} bytes",
-                        multitransport_request.request_id, written
+                        "💾 Stored multitransport info: request_id={}, cookie={:02x?}, protocol={:?}",
+                        multitransport_request.request_id,
+                        &multitransport_request.security_cookie[..8], // Show first 8 bytes
+                        multitransport_request.requested_protocol
                     );
+
+                    // **DO NOT** send InitiateMultitransportResponse here!
+                    // Per MS-RDPBCGR and MS-RDPEMT specs, the response MUST be sent
+                    // AFTER the multitransport tunnel is created and authenticated.
+                    // Sending it prematurely causes Windows RDP servers to fail with
+                    // error 0x800708CA (RPC_S_SERVER_UNAVAILABLE).
+                    //
+                    // The response will be sent later in rdp.rs after the UDP tunnel
+                    // completes its TLS/DTLS handshake and MS-RDPEMT Tunnel Create sequence.
+
+                    debug!("⏸️  Deferring InitiateMultitransportResponse until UDP tunnel is established");
 
                     // Stay in CapabilitiesExchange state to wait for ServerDemandActive
                     self.state = ConnectionActivationState::CapabilitiesExchange {
@@ -168,7 +180,8 @@ impl Sequence for ConnectionActivationSequence {
                         user_channel_id,
                     };
 
-                    return Ok(Written::from_size(written)?);
+                    // Return Written::Nothing since we didn't send a response yet
+                    return Ok(Written::Nothing);
                 }
 
                 // Not a multitransport request - decode as ShareControlHeader (normal capabilities exchange)

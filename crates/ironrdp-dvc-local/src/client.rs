@@ -1,3 +1,4 @@
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::any::TypeId;
 use core::fmt;
@@ -9,7 +10,7 @@ use ironrdp_svc::{
 };
 use pdu::gcc::ChannelName;
 use pdu::PduResult;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::pdu::{
     CapabilitiesResponsePdu, CapsVersion, ClosePdu, CreateResponsePdu, CreationStatus,
@@ -19,6 +20,15 @@ use crate::{encode_dvc_messages, DvcProcessor, DynamicChannelSet, DynamicVirtual
 
 pub trait DvcClientProcessor: DvcProcessor {}
 
+/// Format tunnel type as a human-readable string
+fn tunnel_type_name(tunnel_type: u32) -> &'static str {
+    match tunnel_type {
+        0x00000001 => "TUNNELTYPE_UDPFECR (Reliable UDP)",
+        0x00000003 => "TUNNELTYPE_UDPFECL (Lossy UDP)",
+        _ => "Unknown",
+    }
+}
+
 /// DRDYNVC Static Virtual Channel (the Remote Desktop Protocol: Dynamic Virtual Channel Extension)
 ///
 /// It adds support for dynamic virtual channels (DVC).
@@ -26,6 +36,17 @@ pub struct DrdynvcClient {
     dynamic_channels: DynamicChannelSet,
     /// Indicates whether the capability request/response handshake has been completed.
     cap_handshake_done: bool,
+    /// Indicates whether soft-sync to UDP has been completed for a tunnel
+    soft_sync_completed_tunnel: Option<u32>,
+    /// Maps channel IDs to their UDP tunnel type (if they've been switched via Soft-Sync)
+    /// Channels not in this map use TCP transport
+    udp_channels: BTreeMap<u32, u32>,
+    /// Set of UDP tunnel types that have been successfully established and are available for use.
+    /// Per MS-RDPEDYC §3.2.5.3.2: "Each multitransport tunnel that the client manager will use
+    /// to send dynamic virtual channel data MUST be specified in the TunnelsToSwitch field."
+    available_udp_tunnels: alloc::collections::BTreeSet<u32>,
+    /// Buffered Soft-Sync request that arrived before tunnel was established
+    pending_soft_sync: Option<SoftSyncRequestPdu>,
 }
 
 impl fmt::Debug for DrdynvcClient {
@@ -50,10 +71,14 @@ impl DrdynvcClient {
         Self {
             dynamic_channels: DynamicChannelSet::new(),
             cap_handshake_done: false,
+            soft_sync_completed_tunnel: None,
+            udp_channels: BTreeMap::new(),
+            available_udp_tunnels: alloc::collections::BTreeSet::new(),
+            pending_soft_sync: None,
         }
     }
 
-    // FIXME(#61): it’s likely we want to enable adding dynamic channels at any point during the session (message passing? other approach?)
+    // FIXME(#61): it's likely we want to enable adding dynamic channels at any point during the session (message passing? other approach?)
 
     #[must_use]
     pub fn with_dynamic_channel<T>(mut self, channel: T) -> Self
@@ -69,6 +94,53 @@ impl DrdynvcClient {
         T: DvcProcessor + 'static,
     {
         self.dynamic_channels.insert(channel);
+    }
+
+    /// Returns the tunnel type if soft-sync has been completed
+    pub fn soft_sync_completed(&self) -> Option<u32> {
+        self.soft_sync_completed_tunnel
+    }
+
+    /// Register that a UDP tunnel has been successfully established and is available for use.
+    /// Per MS-RDPEDYC §3.2.5.3.2: The client MUST NOT send the Soft-Sync Response PDU until
+    /// it has sent a successful Initiate Multitransport Response PDU for each tunnel.
+    ///
+    /// This should be called when the UDP transport initialization completes successfully.
+    /// Returns any deferred CREATE requests or Soft-Sync responses that should now be processed.
+    pub fn register_available_tunnel(
+        &mut self,
+        tunnel_type: u32,
+    ) -> Result<Vec<SvcMessage>, pdu::PduError> {
+        debug!(
+            "Registering available UDP tunnel type: 0x{:08X} ({})",
+            tunnel_type,
+            tunnel_type_name(tunnel_type)
+        );
+        self.available_udp_tunnels.insert(tunnel_type);
+
+        // Check if we have a buffered Soft-Sync request waiting for this tunnel
+        let mut responses = Vec::new();
+        if let Some(request) = self.pending_soft_sync.take() {
+            info!("📦 Processing buffered Soft-Sync request now that tunnel 0x{:08X} is available", tunnel_type);
+            self.handle_soft_sync_request_with_transport(&request, &mut responses, ironrdp_svc::TransportContext::Tcp)?;
+        }
+
+        Ok(responses)
+    }
+
+    /// Unregister a UDP tunnel (e.g., if connection fails)
+    pub fn unregister_available_tunnel(&mut self, tunnel_type: u32) {
+        debug!(
+            "Unregistering UDP tunnel type: 0x{:08X} ({})",
+            tunnel_type,
+            tunnel_type_name(tunnel_type)
+        );
+        self.available_udp_tunnels.remove(&tunnel_type);
+    }
+
+    /// Clears the soft-sync completion status (used after handling the event)
+    pub fn clear_soft_sync_completed(&mut self) {
+        self.soft_sync_completed_tunnel = None;
     }
 
     pub fn get_dvc_by_type_id<T>(&self) -> Option<&DynamicVirtualChannel>
@@ -89,12 +161,39 @@ impl DrdynvcClient {
         self.dynamic_channels.get_by_channel_id(channel_id)
     }
 
-    fn create_capabilities_response(&mut self) -> SvcMessage {
+    fn create_capabilities_response(&mut self, server_version: CapsVersion) -> SvcMessage {
+        // Per MS-RDPEDYC §2.2.1.2, client MUST respond with the version level it supports
+        // We support up to V3, but must negotiate with server's requested version
+        const CLIENT_MAX_VERSION: CapsVersion = CapsVersion::V3;
+
+        // Negotiate: use minimum of client max and server requested
+        let negotiated_version = match (CLIENT_MAX_VERSION, server_version) {
+            (CapsVersion::V3, CapsVersion::V3) => CapsVersion::V3,
+            (CapsVersion::V3, CapsVersion::V2) => CapsVersion::V2,
+            (CapsVersion::V3, CapsVersion::V1) => CapsVersion::V1,
+            (CapsVersion::V2, CapsVersion::V3) => CapsVersion::V2,
+            (CapsVersion::V2, CapsVersion::V2) => CapsVersion::V2,
+            (CapsVersion::V2, CapsVersion::V1) => CapsVersion::V1,
+            (CapsVersion::V1, _) => CapsVersion::V1,
+        };
+
         let caps_response =
-            DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(CapsVersion::V3));
-        debug!("Send DVC Capabilities Response PDU: {caps_response:?}");
+            DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(negotiated_version));
+        debug!(
+            "Send DVC Capabilities Response PDU: {caps_response:?} (server requested {:?}, client max {:?}, negotiated {:?})",
+            server_version, CLIENT_MAX_VERSION, negotiated_version
+        );
         self.cap_handshake_done = true;
         SvcMessage::from(caps_response)
+    }
+
+    /// Extract the version from a CapabilitiesRequestPdu
+    fn get_caps_version(caps_request: &crate::pdu::CapabilitiesRequestPdu) -> CapsVersion {
+        match caps_request {
+            crate::pdu::CapabilitiesRequestPdu::V1 { .. } => CapsVersion::V1,
+            crate::pdu::CapabilitiesRequestPdu::V2 { .. } => CapsVersion::V2,
+            crate::pdu::CapabilitiesRequestPdu::V3 { .. } => CapsVersion::V3,
+        }
     }
 
     fn handle_soft_sync_request(
@@ -102,24 +201,173 @@ impl DrdynvcClient {
         request: &SoftSyncRequestPdu,
         responses: &mut Vec<SvcMessage>,
     ) -> PduResult<()> {
+        self.handle_soft_sync_request_internal(request, responses, None)
+    }
+
+    fn handle_soft_sync_request_with_transport(
+        &mut self,
+        request: &SoftSyncRequestPdu,
+        responses: &mut Vec<SvcMessage>,
+        transport: ironrdp_svc::TransportContext,
+    ) -> PduResult<()> {
+        self.handle_soft_sync_request_internal(request, responses, Some(transport))
+    }
+
+    fn handle_soft_sync_request_internal(
+        &mut self,
+        request: &SoftSyncRequestPdu,
+        responses: &mut Vec<SvcMessage>,
+        transport: Option<ironrdp_svc::TransportContext>,
+    ) -> PduResult<()> {
+        info!(
+            "📥 Received Soft-Sync Request from server: {} tunnel(s)",
+            request.tunnels.len()
+        );
+
+        // Per MS-RDPEDYC §2.2.5.1, validate SOFT_SYNC_TCP_FLUSHED flag
+        // "This flag MUST be set to indicate no more data will be sent over TCP for the specified DVCs"
+        if (request.flags & crate::pdu::SOFT_SYNC_TCP_FLUSHED) == 0 {
+            warn!(
+                "⚠️  Server Soft-Sync Request missing SOFT_SYNC_TCP_FLUSHED flag (flags=0x{:04X})",
+                request.flags
+            );
+            warn!("   Per MS-RDPEDYC §2.2.5.1, this flag MUST be set - continuing anyway");
+        }
+
         for tunnel in &request.tunnels {
+            info!(
+                "   Tunnel type=0x{:08X} ({}), {} channel(s)",
+                tunnel.tunnel_type,
+                tunnel_type_name(tunnel.tunnel_type),
+                tunnel.channel_ids.len()
+            );
+            
+            // Check if this tunnel type is actually available (established with TunnelCreateResponse)
+            if !self.available_udp_tunnels.contains(&tunnel.tunnel_type) {
+                warn!(
+                    "⚠️  Server requesting tunnel type 0x{:08X} ({}) but it's not established yet!",
+                    tunnel.tunnel_type,
+                    tunnel_type_name(tunnel.tunnel_type)
+                );
+                warn!("   Buffering Soft-Sync request - will process after TunnelCreateResponse");
+                
+                // Buffer this request to process later when tunnel is ready
+                self.pending_soft_sync = Some(request.clone());
+                
+                // Send empty response for now (stay on TCP)
+                let empty_tunnels = alloc::collections::BTreeSet::new();
+                let response = DrdynvcClientPdu::SoftSyncResponse(
+                    SoftSyncResponsePdu::from_request_with_available(request, &empty_tunnels)
+                );
+                info!("📤 Sending empty DVC SoftSync Response PDU (waiting for tunnel): {response:?}");
+                let msg = SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp);
+                responses.push(msg);
+                return Ok(());
+            }
+            
+            let mut udp_channel_count = 0;
             for &channel_id in &tunnel.channel_ids {
+                // Check if this channel supports UDP transport (skip stubs)
+                if !self.dynamic_channels.supports_udp_transport(channel_id) {
+                    if let Some(channel) = self.dynamic_channels.get_by_channel_id(channel_id) {
+                        info!(
+                            "   Skipping channel_id={} ('{}') - does not support UDP (stub/mock implementation)",
+                            channel_id,
+                            channel.channel_name()
+                        );
+                    }
+                    continue; // Don't mark this channel for UDP
+                }
+
+                // Mark this channel as using UDP with this tunnel type
+                self.udp_channels.insert(channel_id, tunnel.tunnel_type);
+                udp_channel_count += 1;
+
                 if let Some(channel) = self.dynamic_channels.get_by_channel_id_mut(channel_id) {
-                    channel.on_soft_sync(tunnel.tunnel_type);
+                    info!(
+                        "   Marking channel_id={} ('{}') for UDP tunnel 0x{:08X} ({})",
+                        channel_id,
+                        channel.channel_name(),
+                        tunnel.tunnel_type,
+                        tunnel_type_name(tunnel.tunnel_type)
+                    );
+                    // Notify channel that it's being switched to UDP
+                    let _ = channel.on_soft_sync(tunnel.tunnel_type);
                 } else {
-                    debug!(
-                        "SoftSync tunnel references unknown channel_id={channel_id} (tunnel_type=0x{:08X})",
-                        tunnel.tunnel_type
+                    info!(
+                        "   Marking channel_id={} (unknown channel) for UDP tunnel 0x{:08X} ({})",
+                        channel_id,
+                        tunnel.tunnel_type,
+                        tunnel_type_name(tunnel.tunnel_type)
                     );
                 }
             }
+
+            info!(
+                "   ✅ Accepted {}/{} channels for UDP tunnel 0x{:08X}",
+                udp_channel_count,
+                tunnel.channel_ids.len(),
+                tunnel.tunnel_type
+            );
+
+            // Store the first tunnel type for notification
+            if self.soft_sync_completed_tunnel.is_none() {
+                self.soft_sync_completed_tunnel = Some(tunnel.tunnel_type);
+            }
         }
 
-        let response =
-            DrdynvcClientPdu::SoftSyncResponse(SoftSyncResponsePdu::from_request(request));
-        debug!("Send DVC SoftSync Response PDU: {response:?}");
-        responses.push(SvcMessage::from(response));
+        let response = DrdynvcClientPdu::SoftSyncResponse(
+            SoftSyncResponsePdu::from_request_with_available(request, &self.available_udp_tunnels),
+        );
+        info!("📤 Sending DVC SoftSync Response PDU: {response:?}");
+
+        // Per MS-RDPEDYC: Soft-Sync responses MUST go over TCP
+        // This is the transition message that signals switching to UDP is complete
+        // The response itself uses TCP, but signals that subsequent Data PDUs can use UDP
+        let msg = SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp);
+
+        responses.push(msg);
         Ok(())
+    }
+
+    /// Create and return a Soft-Sync Request PDU to switch dynamic channels to UDP transport.
+    ///
+    /// This should be called after the multitransport (UDP) tunnel is established.
+    /// The tunnel_type should be:
+    /// - 0x00000001 for TUNNELTYPE_UDPFECR (Reliable UDP)
+    /// - 0x00000003 for TUNNELTYPE_UDPFECL (Lossy UDP)
+    pub fn create_soft_sync_request(&self, tunnel_type: u32) -> PduResult<SvcMessage> {
+        use crate::pdu::{
+            SoftSyncChannelListEntry, SOFT_SYNC_CHANNEL_LIST_PRESENT, SOFT_SYNC_TCP_FLUSHED,
+        };
+
+        // Collect all active dynamic channel IDs
+        let channel_ids: Vec<u32> = self
+            .dynamic_channels
+            .values()
+            .filter_map(|channel| channel.channel_id())
+            .collect();
+
+        if channel_ids.is_empty() {
+            return Err(pdu_other_err!("No active dynamic channels to switch"));
+        }
+
+        let mut tunnels = Vec::new();
+        tunnels.push(SoftSyncChannelListEntry {
+            tunnel_type,
+            channel_ids,
+        });
+
+        let flags = SOFT_SYNC_TCP_FLUSHED | SOFT_SYNC_CHANNEL_LIST_PRESENT;
+        let request = SoftSyncRequestPdu::new(flags, tunnels);
+
+        debug!(
+            "Created Soft-Sync Request PDU: tunnel_type=0x{:08X}, {} channels",
+            tunnel_type,
+            request.tunnels[0].channel_ids.len()
+        );
+
+        Ok(SvcMessage::from(DrdynvcClientPdu::SoftSyncRequest(request)))
     }
 }
 
@@ -140,14 +388,20 @@ impl SvcProcessor for DrdynvcClient {
         CompressionCondition::WhenRdpDataIsCompressed
     }
 
-    fn process(&mut self, payload: &[u8]) -> PduResult<Vec<SvcMessage>> {
+    fn process(
+        &mut self,
+        payload: &[u8],
+        transport: ironrdp_svc::TransportContext,
+    ) -> PduResult<Vec<SvcMessage>> {
         let pdu = decode_dvc_message(payload).map_err(|e| decode_err!(e))?;
         let mut responses = Vec::new();
 
         match pdu {
             DrdynvcServerPdu::Capabilities(caps_request) => {
                 debug!("Got DVC Capabilities Request PDU: {caps_request:?}");
-                responses.push(self.create_capabilities_response());
+                let server_version = Self::get_caps_version(&caps_request);
+                // Capabilities always use TCP per MS-RDPEDYC - initial handshake
+                responses.push(self.create_capabilities_response(server_version));
             }
             DrdynvcServerPdu::Create(create_request) => {
                 debug!("Got DVC Create Request PDU: {create_request:?}");
@@ -159,7 +413,8 @@ impl SvcProcessor for DrdynvcClient {
                         "Got DVC Create Request PDU before a Capabilities Request PDU. \
                         Sending Capabilities Response PDU before the Create Response PDU."
                     );
-                    responses.push(self.create_capabilities_response());
+                    // Server didn't send Caps Request, assume V1 for compatibility
+                    responses.push(self.create_capabilities_response(CapsVersion::V1));
                 }
 
                 let channel_exists = self
@@ -183,13 +438,18 @@ impl SvcProcessor for DrdynvcClient {
                 let create_response =
                     DrdynvcClientPdu::Create(CreateResponsePdu::new(channel_id, creation_status));
                 debug!("Send DVC Create Response PDU: {create_response:?}");
-                responses.push(SvcMessage::from(create_response));
+                // Per MS-RDPEDYC: "The server DVC manager sends the Create Request PDU over
+                // the selected transport, and the client responds by sending the Create Response
+                // PDU back to the server over the same transport."
+                responses.push(SvcMessage::from(create_response).with_transport(transport));
 
-                // If this DVC has start messages, send them.
+                // If this DVC has start messages, send them over the same transport as the request
                 if !start_messages.is_empty() {
                     responses.extend(
                         encode_dvc_messages(channel_id, start_messages, ChannelFlags::empty())
-                            .map_err(|e| encode_err!(e))?,
+                            .map_err(|e| encode_err!(e))?
+                            .into_iter()
+                            .map(|msg| msg.with_transport(transport)),
                     );
                 }
             }
@@ -202,7 +462,8 @@ impl SvcProcessor for DrdynvcClient {
                     DrdynvcClientPdu::Close(ClosePdu::new(close_request.channel_id));
 
                 debug!("Send DVC Close Response PDU: {close_response:?}");
-                responses.push(SvcMessage::from(close_response));
+                // Use same transport as request (per general RDP principle)
+                responses.push(SvcMessage::from(close_response).with_transport(transport));
             }
             DrdynvcServerPdu::Data(data) => {
                 let channel_id = data.channel_id();
@@ -213,14 +474,43 @@ impl SvcProcessor for DrdynvcClient {
                     .ok_or_else(|| pdu_other_err!("access to non existing DVC channel"))?
                     .process(data)?;
 
+                // Preserve the incoming transport context - this ensures responses go back
+                // on the same tunnel/connection that the request arrived on
+                // This is critical for UDP multitransport where request_id != tunnel_type
+                let response_transport = transport;
+
+                // Data messages use the same transport as the incoming request,
+                // but individual messages can override this via preferred_transport()
                 responses.extend(
                     encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
-                        .map_err(|e| encode_err!(e))?,
+                        .map_err(|e| encode_err!(e))?
+                        .into_iter()
+                        .map(|msg| {
+                            // Only apply default transport if the message doesn't have one already
+                            if msg.transport().is_none() {
+                                msg.with_transport(response_transport)
+                            } else {
+                                msg
+                            }
+                        }),
                 );
             }
             DrdynvcServerPdu::SoftSyncRequest(request) => {
                 debug!("Got DVC SoftSync Request PDU: {request:?}");
-                self.handle_soft_sync_request(&request, &mut responses)?;
+                self.handle_soft_sync_request_with_transport(&request, &mut responses, transport)?;
+            }
+            DrdynvcServerPdu::SoftSyncResponse(response) => {
+                debug!("Got DVC SoftSync Response PDU: {response:?}");
+                // Server confirmed that channels have been switched to UDP
+                // Store the first tunnel type for notification
+                if let Some(&tunnel_type) = response.tunnels_to_switch.first() {
+                    debug!(
+                        "Server confirmed soft-sync for tunnel_type=0x{:08X} ({})",
+                        tunnel_type,
+                        tunnel_type_name(tunnel_type)
+                    );
+                    self.soft_sync_completed_tunnel = Some(tunnel_type);
+                }
             }
         }
 
