@@ -22,7 +22,7 @@ pub use ironrdp_connector::DesktopSize;
 use ironrdp_pdu::nego;
 
 pub use self::channel_connection::{ChannelConnectionSequence, ChannelConnectionState};
-pub use self::connection::{Acceptor, AcceptorResult, AcceptorState};
+pub use self::connection::{Acceptor, AcceptorResult, AcceptorState, CredentialVerifier};
 pub use self::finalization::{FinalizationSequence, FinalizationState};
 use crate::credssp::resolve_generator;
 
