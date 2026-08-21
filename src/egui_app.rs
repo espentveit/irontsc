@@ -2652,7 +2652,7 @@ pub fn build_config(form: &ConnectForm, settings: &RdpSettings) -> anyhow::Resul
         autologon: true,
         desktop_scale_factor: settings.get_dpi_scaling().unwrap_or(0),
         enable_tls: true,
-        enable_credssp: true,
+        enable_credssp: !settings.disable_nla,
         keyboard_type: ironrdp::pdu::gcc::KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_functional_keys_count: 12,

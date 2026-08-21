@@ -745,7 +745,10 @@ impl<Ctx: GfxContext> GfxClient<Ctx> {
 
 #[cfg(feature = "h264")]
 fn default_capability_sets(small_cache: bool) -> Vec<CapabilitySet> {
-    CapabilitySet::default_sets(small_cache, true, true)
+    // AV1 goes with H.264: both are decoded by the same FFmpeg, so a build that has one has
+    // the other. Advertising it costs a server that does not know the extension nothing --
+    // it ignores the version and confirms something ordinary.
+    CapabilitySet::default_sets_with_av1(small_cache, true, true, true)
 }
 
 #[cfg(not(feature = "h264"))]

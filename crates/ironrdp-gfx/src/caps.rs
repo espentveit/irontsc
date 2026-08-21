@@ -1,5 +1,18 @@
 //! Capability negotiation for RDPEGFX
 
+/// The FreeRDP extension capability, which is how a client says it can take AV1.
+///
+/// It sorts below every Microsoft version on purpose: a server picking the newest version it
+/// recognises can never land on this one by accident, so it has to be looked for deliberately.
+pub mod cap_version_frdp {
+    /// `RDPGFX_CAPVERSION_FRDP_1`.
+    pub const V1: u32 = 0x0001_0000;
+    /// The client can take AV1 in 4:4:4.
+    pub const AV1_I444_SUPPORTED: u32 = 0x1000_0000;
+    /// The client would rather not.
+    pub const AV1_I444_DISABLED: u32 = 0x2000_0000;
+}
+
 /// Capability versions (MS-RDPEGFX 2.2.3.1)
 pub mod cap_version {
     pub const V8: u32 = 0x00080004; // RDP 8.0
@@ -53,6 +66,33 @@ impl CapabilitySet {
     /// Get default capability sets to advertise. Mirrors FreeRDP ordering/flags so
     /// Windows enables mixed-mode or full H.264 rendering when supported.
     pub fn default_sets(
+        small_cache: bool,
+        avc420_enabled: bool,
+        avc444_enabled: bool,
+    ) -> Vec<Self> {
+        Self::default_sets_with_av1(small_cache, avc420_enabled, avc444_enabled, false)
+    }
+
+    /// The same, optionally saying the client can decode AV1.
+    ///
+    /// Advertised alongside the standard versions rather than instead of one: a server that
+    /// does not know the extension ignores it and confirms something ordinary.
+    pub fn default_sets_with_av1(
+        small_cache: bool,
+        avc420_enabled: bool,
+        avc444_enabled: bool,
+        av1_enabled: bool,
+    ) -> Vec<Self> {
+        let mut caps = Self::default_sets_inner(small_cache, avc420_enabled, avc444_enabled);
+
+        if av1_enabled {
+            caps.insert(0, Self::new(cap_version_frdp::V1, 0));
+        }
+
+        caps
+    }
+
+    fn default_sets_inner(
         small_cache: bool,
         avc420_enabled: bool,
         avc444_enabled: bool,

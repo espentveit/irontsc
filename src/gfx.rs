@@ -172,6 +172,12 @@ pub struct GfxState {
     /// H.264 decoder (optional, requires h264 feature)
     #[cfg(feature = "h264")]
     h264_decoder: SendFfmpegDecoder,
+    /// Built the first time a server actually sends AV1, since most never will.
+    #[cfg(feature = "h264")]
+    av1_decoder: Option<SendFfmpegDecoder>,
+    /// Whether hardware decoding was asked for, kept for that late construction.
+    #[cfg(feature = "h264")]
+    hw_accel: bool,
     /// Active surfaces
     surfaces: HashMap<u16, GfxSurface>,
     /// Graphics output buffer (ResetGraphics)
@@ -222,6 +228,10 @@ impl GfxState {
             progressive_decoder: ProgressiveDecoder::new(EntropyAlgorithm::Rlgr1),
             #[cfg(feature = "h264")]
             h264_decoder,
+            #[cfg(feature = "h264")]
+            av1_decoder: None,
+            #[cfg(feature = "h264")]
+            hw_accel: h264_hw_accel,
             surfaces: HashMap::new(),
             graphics_output: None,
             surface_output_mappings: Vec::new(),
@@ -511,6 +521,64 @@ impl GfxContext for GfxState {
                     ironrdp_gfx::pdu::Color32 {
                         b: 0, // Green: RGB(0, 255, 0) in RGBA buffer (no swap needed)
                         g: 255,
+                        r: 0,
+                        xa: 255,
+                    },
+                )?;
+            }
+            #[cfg(feature = "h264")]
+            codec::codec_id::AV1 => {
+                use tracing::info;
+
+                // AV1 arrives in the same wrapper H.264 does -- a region metablock and then
+                // the bitstream -- so the only thing that differs here is which decoder gets
+                // handed the payload.
+                if self.av1_decoder.is_none() {
+                    info!("🎬 Initializing FFmpeg AV1 decoder...");
+                    let decoder = FfmpegDecoder::new_av1(self.hw_accel)
+                        .context("Failed to initialize the AV1 decoder")?;
+                    info!("✅ FFmpeg AV1 decoder initialized");
+                    self.av1_decoder = Some(SendFfmpegDecoder(decoder));
+                }
+
+                let region = Some((
+                    dest_rect.left,
+                    dest_rect.top,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                ));
+
+                let decoder = self
+                    .av1_decoder
+                    .as_mut()
+                    .expect("the AV1 decoder was just built");
+
+                let frame = decoder
+                    .0
+                    .decode_gfx_stream(AvcKind::Avc420, bitmap_data, region)
+                    .context("Failed to decode an AV1 frame")?;
+
+                info!(
+                    "🎬 AV1: frame={}x{}, dest_rect={}x{} at ({},{}), surface={}x{}",
+                    frame.width,
+                    frame.height,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                    dest_rect.left,
+                    dest_rect.top,
+                    surface.width,
+                    surface.height
+                );
+
+                Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
+
+                // Blue, so an AV1 frame is distinguishable from an H.264 one at a glance.
+                Self::draw_debug_outline(
+                    surface,
+                    &dest_rect,
+                    ironrdp_gfx::pdu::Color32 {
+                        b: 255,
+                        g: 0,
                         r: 0,
                         xa: 255,
                     },

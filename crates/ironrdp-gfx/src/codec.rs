@@ -3,6 +3,11 @@
 /// Codec identifiers (MS-RDPEGFX 2.2.3.1)
 pub mod codec_id {
     pub const UNCOMPRESSED: u16 = 0x0000;
+    /// AV1. Not a Microsoft allocation -- MS-RDPEGFX has none -- but FreeRDP's, taken from the
+    /// unallocated low end and valid only when [`super::cap_version_frdp::V1`] was the
+    /// capability version confirmed. Following it means talking to any FreeRDP built with
+    /// `WITH_GFX_AV1` rather than only to servers of our own.
+    pub const AV1: u16 = 0x0001;
     pub const CAVIDEO: u16 = 0x0003;
     pub const CLEARCODEC: u16 = 0x0008;
     pub const RFX_PROGRESSIVE: u16 = 0x0009;

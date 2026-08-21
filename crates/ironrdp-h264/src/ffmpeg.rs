@@ -766,11 +766,24 @@ pub struct FfmpegDecoder {
 impl FfmpegDecoder {
     /// Create a new FFmpeg H.264 decoder
     pub fn new(enable_hw_accel: bool) -> Result<Self> {
+        Self::for_codec(ffmpeg::codec::Id::H264, enable_hw_accel)
+    }
+
+    /// Create a decoder for AV1, which arrives on the graphics pipeline under FreeRDP's codec
+    /// id and is otherwise the same problem as H.264: a bitstream in, a frame out, decoded on
+    /// the GPU where the hardware will have it.
+    pub fn new_av1(enable_hw_accel: bool) -> Result<Self> {
+        Self::for_codec(ffmpeg::codec::Id::AV1, enable_hw_accel)
+    }
+
+    /// The decoder for one codec. Everything below here is the same either way -- the hardware
+    /// setup, the threading choices, the colour conversion -- so the codec is the only thing
+    /// that varies.
+    fn for_codec(id: ffmpeg::codec::Id, enable_hw_accel: bool) -> Result<Self> {
         init_ffmpeg()?;
 
-        // Find H.264 decoder codec
-        let codec = ffmpeg::codec::decoder::find(ffmpeg::codec::Id::H264)
-            .ok_or_else(|| anyhow::anyhow!("H.264 decoder not found"))?;
+        let codec = ffmpeg::codec::decoder::find(id)
+            .ok_or_else(|| anyhow::anyhow!("decoder not found for {id:?}"))?;
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
         let hardware = HardwareContext::try_setup(&codec, &mut context, enable_hw_accel)?;
