@@ -227,6 +227,27 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 adw = { version = "0.8.0", package = "libadwaita", features = ["v1_6"] }
 arboard = "3.6.1"
 
+# egui frontend. Built as a second binary (src/bin/irontsc-egui.rs) next to the GTK one; the
+# window, GL context and event loop are driven directly by winit/glutin rather than eframe so
+# that the RDP session can see physical key codes, which eframe hides behind egui's logical
+# `Key` enum.
+egui = "0.31"
+egui_glow = { version = "0.31", features = ["winit"] }
+egui-winit = "0.31"
+winit = "0.30"
+glutin = "0.32"
+glutin-winit = "0.5"
+
+# System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
+# winit has no API for this, so it is done against the display server directly: the Wayland
+# keyboard-shortcuts-inhibit protocol, or XGrabKeyboard on X11. Both are reached through the
+# raw handles winit already hands out, and both are optional at runtime.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+x11-dl = "2.21"
+
 # RDPEGFX + H.264 support
 clearcodec = { path = "crates/clearcodec" }
 zgfx = { path = "crates/zgfx" }
