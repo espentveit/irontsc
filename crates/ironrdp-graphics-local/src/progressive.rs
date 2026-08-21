@@ -1159,6 +1159,15 @@ fn progressive_get_band_h_count(level: usize) -> usize {
 }
 
 #[inline]
+/// One lifting step of the inverse DWT, shared by the fast and bounds-checked paths so the two
+/// cannot drift apart. Returns `(x2, x1)`.
+#[inline(always)]
+fn idwt_step(l0: i16, h0: i16, h1: i16, x0: i16) -> (i16, i16) {
+    let x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
+    let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
+    (x2, x1)
+}
+
 fn progressive_idwt_x(
     low_band: &[i16],
     low_step: usize,
@@ -1184,22 +1193,51 @@ fn progressive_idwt_x(
         let mut x0 = clamp_i16(i32::from(l0) - i32::from(h0));
         let mut x2 = x0;
 
-        for _ in 0..high_count.saturating_sub(1) {
-            let h1 = high_band.get(high_idx).copied().unwrap_or_default();
-            high_idx += 1;
+        let steps = high_count.saturating_sub(1);
 
-            l0 = low_band.get(low_idx).copied().unwrap_or_default();
-            low_idx += 1;
+        // Checking the bounds of every single sample defeats vectorisation and costs a branch
+        // per pixel. When the whole row is present -- which is the normal case -- take the
+        // slices once and let the loop run unguarded. Short rows still happen (the LL band is
+        // clamped to whatever the buffer holds), so the guarded path below is kept for them.
+        let rows_available = high_band.len() >= high_idx + steps
+            && low_band.len() >= low_idx + steps
+            && dst_band.len() >= dst_idx + 2 * steps;
 
-            x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
-            let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
-            if let Some(slice) = dst_band.get_mut(dst_idx..dst_idx + 2) {
-                slice[0] = x0;
-                slice[1] = x1;
+        if rows_available {
+            let highs = &high_band[high_idx..high_idx + steps];
+            let lows = &low_band[low_idx..low_idx + steps];
+            let out = &mut dst_band[dst_idx..dst_idx + 2 * steps];
+
+            for ((&h1, &l), pair) in highs.iter().zip(lows).zip(out.chunks_exact_mut(2)) {
+                let (next_x2, x1) = idwt_step(l, h0, h1, x0);
+                pair[0] = x0;
+                pair[1] = x1;
+                x2 = next_x2;
+                x0 = next_x2;
+                h0 = h1;
             }
-            dst_idx += 2;
-            x0 = x2;
-            h0 = h1;
+
+            high_idx += steps;
+            low_idx += steps;
+            dst_idx += 2 * steps;
+        } else {
+            for _ in 0..steps {
+                let h1 = high_band.get(high_idx).copied().unwrap_or_default();
+                high_idx += 1;
+
+                l0 = low_band.get(low_idx).copied().unwrap_or_default();
+                low_idx += 1;
+
+                let (next_x2, x1) = idwt_step(l0, h0, h1, x0);
+                x2 = next_x2;
+                if let Some(slice) = dst_band.get_mut(dst_idx..dst_idx + 2) {
+                    slice[0] = x0;
+                    slice[1] = x1;
+                }
+                dst_idx += 2;
+                x0 = x2;
+                h0 = h1;
+            }
         }
 
         if low_count <= high_count + 1 {
@@ -1261,27 +1299,57 @@ fn progressive_idwt_y(
         let mut x0 = clamp_i16(i32::from(l0) - i32::from(h0));
         let mut x2 = x0;
 
-        for _ in 0..high_count.saturating_sub(1) {
-            let h1 = high_band.get(high_idx).copied().unwrap_or_default();
-            high_idx += high_step;
+        let steps = high_count.saturating_sub(1);
 
-            l0 = low_band.get(low_idx).copied().unwrap_or_default();
-            low_idx += low_step;
+        // Same reasoning as the horizontal pass: verify the strided ranges once rather than
+        // bounds-checking each sample.
+        let cols_available = steps == 0
+            || (high_band.len() > high_idx + (steps - 1) * high_step
+                && low_band.len() > low_idx + (steps - 1) * low_step
+                && dst_band.len() > dst_idx + (2 * steps - 1) * dst_step);
 
-            x2 = clamp_i16(i32::from(l0) - ((i32::from(h0) + i32::from(h1)) / 2));
-            let x1 = clamp_i16(((i32::from(x0) + i32::from(x2)) / 2) + 2 * i32::from(h0));
+        if cols_available {
+            for _ in 0..steps {
+                let h1 = high_band[high_idx];
+                high_idx += high_step;
 
-            if let Some(val) = dst_band.get_mut(dst_idx) {
-                *val = x0;
+                l0 = low_band[low_idx];
+                low_idx += low_step;
+
+                let (next_x2, x1) = idwt_step(l0, h0, h1, x0);
+                x2 = next_x2;
+
+                dst_band[dst_idx] = x0;
+                dst_idx += dst_step;
+                dst_band[dst_idx] = x1;
+                dst_idx += dst_step;
+
+                x0 = x2;
+                h0 = h1;
             }
-            dst_idx += dst_step;
-            if let Some(val) = dst_band.get_mut(dst_idx) {
-                *val = x1;
-            }
-            dst_idx += dst_step;
+        } else {
+            for _ in 0..steps {
+                let h1 = high_band.get(high_idx).copied().unwrap_or_default();
+                high_idx += high_step;
 
-            x0 = x2;
-            h0 = h1;
+                l0 = low_band.get(low_idx).copied().unwrap_or_default();
+                low_idx += low_step;
+
+                let (next_x2, x1) = idwt_step(l0, h0, h1, x0);
+                x2 = next_x2;
+
+                if let Some(val) = dst_band.get_mut(dst_idx) {
+                    *val = x0;
+                }
+                dst_idx += dst_step;
+                if let Some(val) = dst_band.get_mut(dst_idx) {
+                    *val = x1;
+                }
+                dst_idx += dst_step;
+
+                x0 = x2;
+                h0 = h1;
+            }
         }
 
         if low_count <= high_count + 1 {
