@@ -23,6 +23,7 @@
 //!   so the remote surface gets the whole window.
 
 use core::num::NonZeroU32;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -44,8 +45,8 @@ use crate::config::{ClipboardType, Config, Destination};
 use crate::egui_scancode::scancode_for;
 use crate::egui_shortcuts::ShortcutCapture;
 use crate::rdp::{
-    ArboardClipboardFactory, DvcPipeProxyFactory, ImageRegion, RdpClient, RdpEventSender,
-    RdpInputEvent, RdpOutputEvent,
+    ArboardClipboardFactory, ConnectionStats, DvcPipeProxyFactory, ImageRegion, RdpClient,
+    RdpEventSender, RdpInputEvent, RdpOutputEvent,
 };
 use crate::settings::RdpSettings;
 
@@ -81,6 +82,10 @@ const ISLAND_REVEAL_BAND: f32 = 50.0;
 /// Revealing the island the instant the pointer crossed the top edge meant merely passing
 /// through summoned it, and it swallowed a click aimed at the desktop. Make it wait.
 const ISLAND_REVEAL_DELAY: Duration = Duration::from_millis(400);
+
+/// How far back the frame rate is measured. Short enough to follow a stall, long enough that
+/// a single late frame does not read as a collapse.
+const FRAME_RATE_WINDOW: Duration = Duration::from_secs(2);
 
 /// How long to wait for the compositor to honour the switch to the session window size before
 /// negotiating a desktop size anyway.
@@ -166,6 +171,12 @@ struct Session {
 
     status: String,
     connected: bool,
+
+    /// Who this session is with. The island names the machine the way mstsc's connection bar
+    /// does, and the rest goes into its details tooltip.
+    server: String,
+    user: String,
+    stats: SessionStats,
 
     resize_deadline: Option<Instant>,
     last_resize_sent: Option<(u16, u16, u32)>,
@@ -385,6 +396,119 @@ impl GlutinWindowContext {
     }
 }
 
+/// What the session has reported about the link, kept rolling so the island can show it.
+///
+/// The GTK client drew this as graphs in a separate window. Here it is a tooltip on the
+/// connection name instead: the numbers are worth having, but not worth a permanent row of
+/// chrome across a desktop the island is already floating over.
+struct SessionStats {
+    protocol: String,
+    /// The previous byte counters and when they arrived, which is all a rate needs.
+    previous: Option<(Instant, u64, u64)>,
+    /// KiB/s over the last reporting interval.
+    received_rate: f64,
+    sent_rate: f64,
+    received_total: u64,
+    sent_total: u64,
+    /// Kept across samples: the server does not put a round trip in every report.
+    roundtrip_ms: Option<u32>,
+    /// When recent frames arrived, for the frame rate.
+    frames: VecDeque<Instant>,
+}
+
+impl SessionStats {
+    fn new() -> Self {
+        Self {
+            protocol: "Connecting...".to_owned(),
+            previous: None,
+            received_rate: 0.0,
+            sent_rate: 0.0,
+            received_total: 0,
+            sent_total: 0,
+            roundtrip_ms: None,
+            frames: VecDeque::new(),
+        }
+    }
+
+    fn record(&mut self, stats: &ConnectionStats) {
+        let now = Instant::now();
+
+        if let Some((then, sent, received)) = self.previous {
+            let seconds = now.duration_since(then).as_secs_f64();
+            // Guard against a burst of reports arriving together, which would divide by
+            // almost nothing and show a rate of gigabytes a second.
+            if seconds >= 0.1 {
+                let sent_delta = stats.bytes_sent.saturating_sub(sent);
+                let received_delta = stats.bytes_received.saturating_sub(received);
+                self.sent_rate = sent_delta as f64 / seconds / 1024.0;
+                self.received_rate = received_delta as f64 / seconds / 1024.0;
+            }
+        }
+
+        self.previous = Some((now, stats.bytes_sent, stats.bytes_received));
+        self.sent_total = stats.bytes_sent;
+        self.received_total = stats.bytes_received;
+        if stats.roundtrip_time_ms.is_some() {
+            self.roundtrip_ms = stats.roundtrip_time_ms;
+        }
+        self.protocol = stats.transport_protocol.clone();
+    }
+
+    fn record_frame(&mut self) {
+        let now = Instant::now();
+        self.frames.push_back(now);
+        while self
+            .frames
+            .front()
+            .is_some_and(|frame| now.duration_since(*frame) > FRAME_RATE_WINDOW)
+        {
+            self.frames.pop_front();
+        }
+    }
+
+    /// Frames per second over the measurement window, `None` until two frames have arrived.
+    fn frame_rate(&self) -> Option<f32> {
+        let first = *self.frames.front()?;
+        let last = *self.frames.back()?;
+
+        // A desktop with nothing moving on it sends no frames at all, which is zero rather
+        // than whatever it was doing when the last one arrived.
+        if last.elapsed() > FRAME_RATE_WINDOW {
+            return Some(0.0);
+        }
+
+        let span = last.duration_since(first).as_secs_f32();
+        if self.frames.len() < 2 || span <= 0.0 {
+            return None;
+        }
+
+        Some((self.frames.len() - 1) as f32 / span)
+    }
+
+    fn snapshot(&self) -> StatsSnapshot {
+        StatsSnapshot {
+            protocol: self.protocol.clone(),
+            received_rate: self.received_rate,
+            sent_rate: self.sent_rate,
+            received_total: self.received_total,
+            sent_total: self.sent_total,
+            roundtrip_ms: self.roundtrip_ms,
+            frame_rate: self.frame_rate(),
+        }
+    }
+}
+
+/// The statistics as of one frame, owned so the UI closure does not borrow the session.
+struct StatsSnapshot {
+    protocol: String,
+    received_rate: f64,
+    sent_rate: f64,
+    received_total: u64,
+    sent_total: u64,
+    roundtrip_ms: Option<u32>,
+    frame_rate: Option<f32>,
+}
+
 /// The floating control island's own state, which outlives individual sessions.
 struct Island {
     /// Horizontal position as a fraction of the free width, so it stays put across resizes.
@@ -502,6 +626,41 @@ impl SessionApp {
             && !self.egui_using_pointer()
     }
 
+    /// Everything the island paints, taken off the session before the frame borrows it.
+    fn island_view(&self, scale_percent: u32) -> Option<IslandView> {
+        let session = self.session.as_ref()?;
+
+        Some(IslandView {
+            server: session.server.clone(),
+            user: session.user.clone(),
+            status: session.status.clone(),
+            connected: session.connected,
+            surface_size: session.surface_size,
+            scale_percent,
+            stats: session.stats.snapshot(),
+            pinned: self.island.pinned,
+            fullscreen: self.fullscreen,
+            capture_available: self
+                .shortcut_capture
+                .as_ref()
+                .is_some_and(ShortcutCapture::is_available),
+            capture_enabled: self
+                .shortcut_capture
+                .as_ref()
+                .is_some_and(ShortcutCapture::is_enabled),
+            capture_status: self.shortcut_capture.as_ref().map_or_else(
+                || "unavailable".to_owned(),
+                |capture| {
+                    if capture.is_engaged() {
+                        format!("{} (active)", capture.status())
+                    } else {
+                        capture.status().to_owned()
+                    }
+                },
+            ),
+        })
+    }
+
     /// Where the island was drawn, when it is showing.
     fn island_rect(&self) -> Option<egui::Rect> {
         if !self.island_visible() {
@@ -531,28 +690,39 @@ impl SessionApp {
         if self.session.is_none() {
             return false;
         }
-        // Auto-hide whenever it is not pinned, windowed or fullscreen alike. The island floats
-        // over the desktop rather than docking beside it, so leaving it up permanently covers
-        // part of the session; pinning is the way to keep it.
+        // Hiding belongs to fullscreen, as it does in mstsc and as it did in the GTK client:
+        // windowed there is a title bar on screen anyway, and an auto-hiding toolbar in a
+        // window the user can already see the edges of is just something to hunt for.
+        if !self.fullscreen {
+            return true;
+        }
         self.island.pinned || self.island.dragging || self.island.revealed
     }
 
     /// Recomputes the reveal state from where the pointer is now.
+    ///
+    /// While the island is up for some other reason `revealed` is held true rather than
+    /// cleared, so that unpinning it or letting go of a drag with the pointer still on it
+    /// leaves it where it is instead of blinking out and serving the reveal delay again.
     fn update_island_reveal(&mut self) {
-        if self.island.pinned || self.island.dragging {
+        if !self.fullscreen || self.island.pinned || self.island.dragging {
             self.island.hover_since = None;
-            self.island.revealed = false;
+            self.island.revealed = true;
             self.island_deadline = None;
             return;
         }
+
+        // The band has to reach past the island itself: the pointer resting on its buttons is
+        // not the pointer having left the top edge.
+        let band = ISLAND_REVEAL_BAND.max(self.island.size.y);
 
         let Some(session) = self.session.as_ref() else {
             return;
         };
 
-        let near_top = session.pointer_position.is_some_and(|position| {
-            position.y - session.desktop_rect.min.y < ISLAND_REVEAL_BAND
-        });
+        let near_top = session
+            .pointer_position
+            .is_some_and(|position| position.y - session.desktop_rect.min.y < band);
 
         if !near_top {
             self.island.hover_since = None;
@@ -834,6 +1004,7 @@ impl SessionApp {
                 } => {
                     self.update_surface(&buffer, width.get(), height.get(), region);
                     if let Some(session) = self.session.as_mut() {
+                        session.stats.record_frame();
                         if !session.connected {
                             session.connected = true;
                             session.status = "Connected".to_owned();
@@ -857,16 +1028,10 @@ impl SessionApp {
                     // The server owns the pointer position; nothing to do locally.
                 }
                 RdpOutputEvent::ConnectionStats(stats) => {
-                    session.status = format!(
-                        "{} | {} KiB in / {} KiB out{}",
-                        stats.transport_protocol,
-                        stats.bytes_received / 1024,
-                        stats.bytes_sent / 1024,
-                        stats
-                            .roundtrip_time_ms
-                            .map(|rtt| format!(" | {rtt} ms"))
-                            .unwrap_or_default(),
-                    );
+                    // Into the island's details tooltip rather than onto its face: a row of
+                    // live numbers across the top of the desktop is what the space was being
+                    // spent on before, and it is only ever glanced at.
+                    session.stats.record(&stats);
                     repaint = true;
                 }
                 RdpOutputEvent::ConnectionFailure(error) => {
@@ -1108,6 +1273,13 @@ impl SessionApp {
             window.set_title(&format!("{} - IronTSC", self.form.server));
         }
 
+        // mstsc's connection bar names the machine; the domain only shows up in the details.
+        let user = if self.form.domain.trim().is_empty() {
+            self.form.username.clone()
+        } else {
+            format!("{}\\{}", self.form.domain.trim(), self.form.username)
+        };
+
         self.session = Some(Session {
             input_sender,
             output_receiver,
@@ -1120,6 +1292,9 @@ impl SessionApp {
             buttons_held: 0,
             status: "Connecting...".to_owned(),
             connected: false,
+            server: self.form.server.clone(),
+            user,
+            stats: SessionStats::new(),
             resize_deadline: Some(Instant::now() + RESIZE_DEBOUNCE),
             last_resize_sent: None,
             pending_window_size: Some((session_size, Instant::now())),
@@ -1194,7 +1369,8 @@ impl SessionApp {
             self.fullscreen = true;
         }
 
-        self.island.revealed = false;
+        // Deliberately not resetting the reveal: the pointer is on the island, having just
+        // clicked this, and mstsc leaves its bar up until you move away from the top edge.
         self.island.hover_since = None;
     }
 
@@ -1227,31 +1403,12 @@ impl SessionApp {
         // Everything the UI closure needs, copied out so it does not borrow `self`.
         let in_session = self.session.is_some();
         let surface = self.session.as_ref().and_then(|s| s.surface.clone());
-        let surface_size = self.session.as_ref().map_or((0, 0), |s| s.surface_size);
-        let status = self
-            .session
-            .as_ref()
-            .map_or_else(String::new, |s| s.status.clone());
-        let pinned = self.island.pinned;
-        let fullscreen = self.fullscreen;
-        let capture_available = self
-            .shortcut_capture
-            .as_ref()
-            .is_some_and(ShortcutCapture::is_available);
-        let capture_enabled = self
-            .shortcut_capture
-            .as_ref()
-            .is_some_and(ShortcutCapture::is_enabled);
-        let capture_status = self.shortcut_capture.as_ref().map_or_else(
-            || "unavailable".to_owned(),
-            |capture| {
-                if capture.is_engaged() {
-                    format!("{} (active)", capture.status())
-                } else {
-                    capture.status().to_owned()
-                }
-            },
-        );
+        // Read from the frame's own context: `pixels_per_point` goes through `self.egui_glow`,
+        // which has been moved out for the duration of the frame.
+        let scale_percent = (egui_glow.egui_ctx.pixels_per_point() * 100.0)
+            .round()
+            .max(1.0) as u32;
+        let island_view = self.island_view(scale_percent);
 
         let mut form = self.form.clone();
         let connect_error = self.connect_error.clone();
@@ -1284,19 +1441,8 @@ impl SessionApp {
                     });
 
                 if island_visible {
-                    if let Some(position) = island_position {
-                        island_size = show_island(
-                            ctx,
-                            position,
-                            &status,
-                            surface_size,
-                            pinned,
-                            fullscreen,
-                            capture_available,
-                            capture_enabled,
-                            &capture_status,
-                            &mut actions,
-                        );
+                    if let (Some(position), Some(view)) = (island_position, island_view.as_ref()) {
+                        island_size = show_island(ctx, position, view, &mut actions);
                     }
                 }
             } else {
@@ -1397,22 +1543,31 @@ struct FrameActions {
     island_dragged: Option<f32>,
 }
 
+/// Everything the island shows, owned, so the frame's UI closure borrows nothing else.
+struct IslandView {
+    server: String,
+    user: String,
+    status: String,
+    connected: bool,
+    surface_size: (u16, u16),
+    scale_percent: u32,
+    stats: StatsSnapshot,
+    pinned: bool,
+    fullscreen: bool,
+    capture_available: bool,
+    capture_enabled: bool,
+    capture_status: String,
+}
+
 /// Draws the floating control island and reports its size for next frame's positioning.
 ///
 /// Deliberately flat: a drop shadow here has to be recomposited against whatever the remote
 /// desktop is painting underneath, which glitches as the island fades in and out. A one-pixel
 /// light border does the same job of separating it from the picture.
-#[expect(clippy::too_many_arguments, reason = "a UI function, not a data model")]
 fn show_island(
     ctx: &egui::Context,
     position: egui::Pos2,
-    status: &str,
-    surface_size: (u16, u16),
-    pinned: bool,
-    fullscreen: bool,
-    capture_available: bool,
-    capture_enabled: bool,
-    capture_status: &str,
+    view: &IslandView,
     actions: &mut FrameActions,
 ) -> egui::Vec2 {
     let response = egui::Area::new(egui::Id::new("irontsc-island"))
@@ -1440,12 +1595,23 @@ fn show_island(
                     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, bright);
                     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, bright);
                     visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, bright);
-                    visuals.widgets.inactive.weak_bg_fill =
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 18);
+
+                    // Flat until touched, the way the GTK client's `.flat .circular` buttons
+                    // were: no plate at rest, so the row reads as text, but a real highlight
+                    // under the pointer, without which the buttons feel dead.
+                    visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
                     visuals.widgets.hovered.weak_bg_fill =
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 38);
                     visuals.widgets.active.weak_bg_fill =
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 58);
+                    for widget in [
+                        &mut visuals.widgets.inactive,
+                        &mut visuals.widgets.hovered,
+                        &mut visuals.widgets.active,
+                    ] {
+                        widget.bg_stroke = egui::Stroke::NONE;
+                        widget.corner_radius = egui::CornerRadius::same(8);
+                    }
 
                     ui.horizontal(|ui| {
                         // An explicit grip, so dragging the island can never be confused with
@@ -1465,30 +1631,53 @@ fn show_island(
 
                         ui.separator();
 
-                        let capture_label = if capture_enabled {
+                        // The machine you are on, named the way mstsc's connection bar names
+                        // it, and a second place to drag from: mstsc's bar is moved by its
+                        // middle, and the grip alone is a very small target.
+                        let name = ui.add(
+                            egui::Label::new(egui::RichText::new(&view.server).strong())
+                                .selectable(false)
+                                .sense(egui::Sense::drag()),
+                        );
+                        if name.dragged() {
+                            actions.island_dragged = Some(name.drag_delta().x);
+                        }
+                        if name.hovered() || name.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        }
+                        name.on_hover_ui(|ui| show_connection_details(ui, view));
+
+                        // Only while it means something. Once connected the state lives in the
+                        // tooltip with the rest of the numbers.
+                        if !view.connected {
+                            ui.label(egui::RichText::new(&view.status).small().weak());
+                        }
+
+                        ui.separator();
+
+                        let capture_label = if view.capture_enabled {
                             egui::RichText::new("Keys on").strong()
                         } else {
                             egui::RichText::new("Keys off").weak()
                         };
-                        let capture_button = ui.add_enabled(
-                            capture_available,
-                            egui::Button::new(capture_label).frame(false),
-                        );
+                        let capture_button = ui
+                            .add_enabled(view.capture_available, egui::Button::new(capture_label));
                         if capture_button.clicked() {
                             actions.toggle_capture = true;
                         }
                         capture_button.on_hover_text(format!(
                             "Send Alt+Tab, Super and other system shortcuts to the remote \
-                             desktop\n{capture_status}"
+                             desktop\n{}",
+                            view.capture_status,
                         ));
 
-                        let pin_label = if pinned {
+                        let pin_label = if view.pinned {
                             egui::RichText::new("Pinned").strong()
                         } else {
                             egui::RichText::new("Pin").weak()
                         };
                         if ui
-                            .add(egui::Button::new(pin_label).frame(false))
+                            .add(egui::Button::new(pin_label))
                             .on_hover_text("Keep the controls visible in fullscreen")
                             .clicked()
                         {
@@ -1496,21 +1685,12 @@ fn show_island(
                         }
 
                         ui.separator();
-                        ui.label(
-                            egui::RichText::new(format!("{}x{}", surface_size.0, surface_size.1))
-                                .small()
-                                .weak(),
-                        );
-                        if !status.is_empty() {
-                            ui.label(egui::RichText::new(status).small().weak());
-                        }
-                        ui.separator();
 
                         // Window controls sit at the right-hand end, in the order mstsc uses:
                         // minimise, restore/maximise, close. The island sizes itself to its
                         // content, so being last in the row is what puts them on the right.
                         if ui
-                            .add(egui::Button::new("\u{2013}").frame(false))
+                            .add(egui::Button::new("\u{2013}"))
                             .on_hover_text("Minimise")
                             .clicked()
                         {
@@ -1519,9 +1699,9 @@ fn show_island(
 
                         // Text rather than a glyph: U+2921/U+2922 are outside egui's bundled
                         // fonts and draw as nothing.
-                        let fullscreen_label = if fullscreen { "Restore" } else { "Full" };
+                        let fullscreen_label = if view.fullscreen { "Restore" } else { "Full" };
                         if ui
-                            .add(egui::Button::new(fullscreen_label).frame(false))
+                            .add(egui::Button::new(fullscreen_label))
                             .on_hover_text("Toggle fullscreen")
                             .clicked()
                         {
@@ -1542,6 +1722,66 @@ fn show_island(
         });
 
     response.response.rect.size()
+}
+
+/// The connection details, shown when the pointer rests on the island's name.
+///
+/// The tooltip is its own area and takes the ambient style rather than the island's dark
+/// palette, so nothing here overrides colours: doing so is what would put white on white.
+fn show_connection_details(ui: &mut egui::Ui, view: &IslandView) {
+    let stats = &view.stats;
+
+    egui::Grid::new("irontsc-island-details")
+        .num_columns(2)
+        .spacing([12.0, 3.0])
+        .show(ui, |ui| {
+            let mut row = |name: &str, value: String| {
+                ui.label(egui::RichText::new(name).weak());
+                ui.label(value);
+                ui.end_row();
+            };
+
+            row("Server", view.server.clone());
+            if !view.user.is_empty() {
+                row("User", view.user.clone());
+            }
+            row(
+                "Resolution",
+                format!("{}x{}", view.surface_size.0, view.surface_size.1),
+            );
+            row("Scale", format!("{}%", view.scale_percent));
+            row("Status", view.status.clone());
+            row("Transport", stats.protocol.clone());
+            row(
+                "Received",
+                format!(
+                    "{:.0} KiB/s ({} MiB total)",
+                    stats.received_rate,
+                    stats.received_total / 1024 / 1024
+                ),
+            );
+            row(
+                "Sent",
+                format!(
+                    "{:.0} KiB/s ({} MiB total)",
+                    stats.sent_rate,
+                    stats.sent_total / 1024 / 1024
+                ),
+            );
+            row(
+                "Response",
+                stats
+                    .roundtrip_ms
+                    .map_or_else(|| "n/a".to_owned(), |rtt| format!("{rtt} ms")),
+            );
+            row(
+                "Frame rate",
+                stats
+                    .frame_rate
+                    .map_or_else(|| "n/a".to_owned(), |fps| format!("{fps:.0} FPS")),
+            );
+            row("Keys", view.capture_status.clone());
+        });
 }
 
 /// The connection form, filling the small dialog-sized window.
