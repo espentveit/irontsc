@@ -96,6 +96,19 @@ impl DrdynvcServer {
         self
     }
 
+    /// The id of an open channel by name, for a server that wants to send on it unprompted.
+    ///
+    /// A dynamic channel only has an id once the client has agreed to open it, so this is
+    /// `None` until then -- which is also the signal that there is nobody to send to yet.
+    pub fn open_channel_id(&self, name: &str) -> Option<u32> {
+        self.dynamic_channels
+            .iter()
+            .find(|(_, channel)| {
+                channel.processor.channel_name() == name && channel.state == ChannelState::Opened
+            })
+            .map(|(id, _)| id as u32)
+    }
+
     fn channel_by_id(&mut self, id: u32) -> DecodeResult<&mut DynamicChannel> {
         let id = cast_length!("DRDYNVC", "", id)?;
         self.dynamic_channels
