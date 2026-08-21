@@ -137,6 +137,46 @@ impl dvc::DvcProcessor for AInputHandler {
 
 impl dvc::DvcServerProcessor for AInputHandler {}
 
+/// Carries a boxed processor into `with_dynamic_channel`, which wants something sized.
+///
+/// The registration API is generic over the concrete channel type, and a server that takes its
+/// channels from outside only has trait objects; this is the one-line adapter between them.
+struct BoxedProcessor(Box<dyn dvc::DvcServerProcessor>);
+
+impl core::fmt::Debug for BoxedProcessor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("BoxedProcessor")
+            .field(&self.0.channel_name())
+            .finish()
+    }
+}
+
+impl_as_any!(BoxedProcessor);
+
+impl dvc::DvcProcessor for BoxedProcessor {
+    fn channel_name(&self) -> &str {
+        self.0.channel_name()
+    }
+
+    fn start(&mut self, channel_id: u32) -> PduResult<Vec<dvc::DvcMessage>> {
+        self.0.start(channel_id)
+    }
+
+    fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<dvc::DvcMessage>> {
+        self.0.process(channel_id, payload)
+    }
+
+    fn close(&mut self, channel_id: u32) {
+        self.0.close(channel_id);
+    }
+
+    fn supports_udp_transport(&self) -> bool {
+        self.0.supports_udp_transport()
+    }
+}
+
+impl dvc::DvcServerProcessor for BoxedProcessor {}
+
 struct DisplayControlBackend {
     display: Arc<Mutex<Box<dyn RdpServerDisplay>>>,
 }
@@ -229,6 +269,10 @@ pub struct RdpServer {
     /// Makes a verifier for each connection, when the server would rather decide for itself
     /// whether a logon is good than be handed a password to compare against.
     verifier: Option<Arc<dyn Fn() -> Box<dyn CredentialVerifier> + Send + Sync>>,
+    /// Dynamic channels the embedding server wants alongside the built-in ones. Factories
+    /// rather than instances: a channel belongs to one connection and cannot be shared with
+    /// the next.
+    dynamic_channels: Vec<Arc<dyn Fn() -> Box<dyn dvc::DvcServerProcessor> + Send + Sync>>,
     local_addr: Option<SocketAddr>,
 }
 
@@ -284,6 +328,7 @@ impl RdpServer {
             ev_receiver: Arc::new(Mutex::new(ev_receiver)),
             creds: None,
             verifier: None,
+            dynamic_channels: Vec::new(),
             local_addr: None,
         }
     }
@@ -312,11 +357,16 @@ impl RdpServer {
         }
 
         let dcs_backend = DisplayControlBackend::new(Arc::clone(&self.display));
-        let dvc = dvc::DrdynvcServer::new()
+        let mut dvc = dvc::DrdynvcServer::new()
             .with_dynamic_channel(AInputHandler {
                 handler: Arc::clone(&self.handler),
             })
             .with_dynamic_channel(DisplayControlServer::new(Box::new(dcs_backend)));
+
+        for make in &self.dynamic_channels {
+            dvc = dvc.with_dynamic_channel(BoxedProcessor(make()));
+        }
+
         acceptor.attach_static_channel(dvc);
     }
 
@@ -1044,6 +1094,17 @@ impl RdpServer {
         }
 
         Ok(())
+    }
+
+    /// Registers a dynamic virtual channel of the embedding server's own.
+    ///
+    /// The factory is called once per connection, because a channel's state belongs to the
+    /// session it was opened in.
+    pub fn add_dynamic_channel(
+        &mut self,
+        make: Arc<dyn Fn() -> Box<dyn dvc::DvcServerProcessor> + Send + Sync>,
+    ) {
+        self.dynamic_channels.push(make);
     }
 
     /// Decides logons with a verifier of the server's own rather than a fixed password.

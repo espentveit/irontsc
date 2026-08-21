@@ -171,10 +171,10 @@ pub fn wire_to_surface_1(
     buf.put_u16_le(surface_id);
     buf.put_u16_le(codec_id);
     buf.put_u8(pixel_format);
-    buf.put_u16_le(dest.left as u16);
-    buf.put_u16_le(dest.top as u16);
-    buf.put_u16_le(dest.right as u16);
-    buf.put_u16_le(dest.bottom as u16);
+    buf.put_u16_le(dest.left);
+    buf.put_u16_le(dest.top);
+    buf.put_u16_le(dest.right);
+    buf.put_u16_le(dest.bottom);
     buf.put_u32_le(bitmap.len() as u32);
     buf.extend_from_slice(bitmap);
     buf
@@ -194,10 +194,10 @@ pub fn solid_fill(surface_id: u16, colour: [u8; 4], rects: &[Rectangle]) -> Vec<
     buf.put_u16_le(rects.len() as u16);
 
     for rect in rects {
-        buf.put_u16_le(rect.left as u16);
-        buf.put_u16_le(rect.top as u16);
-        buf.put_u16_le(rect.right as u16);
-        buf.put_u16_le(rect.bottom as u16);
+        buf.put_u16_le(rect.left);
+        buf.put_u16_le(rect.top);
+        buf.put_u16_le(rect.right);
+        buf.put_u16_le(rect.bottom);
     }
 
     buf
