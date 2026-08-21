@@ -14,8 +14,15 @@ use crate::gfx::GfxState;
 pub const GFX_CHANNEL_NAME: &str = "Microsoft::Windows::RDS::Graphics";
 
 /// GFX message wrapper for DVC
-struct GfxDvcMessage {
-    data: Vec<u8>,
+pub struct GfxDvcMessage {
+    pub data: Vec<u8>,
+}
+
+impl GfxDvcMessage {
+    /// Create a new GFX DVC message
+    fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
 }
 
 impl ironrdp_core::Encode for GfxDvcMessage {
@@ -38,7 +45,7 @@ impl ironrdp_dvc::DvcEncode for GfxDvcMessage {}
 /// GFX DVC Processor
 pub struct GfxDvcProcessor {
     /// GFX client
-    client: GfxClient<GfxState>,
+    pub client: GfxClient<GfxState>,
     /// Current channel ID (set when channel opens)
     channel_id: Option<u32>,
     /// zGFX decompressor (stateful)
@@ -65,10 +72,13 @@ impl GfxDvcProcessor {
         self.client.ctx.set_event_sender(event_sender);
     }
 
-    /// Enable UDP transport mode (TCP GFX data will be ignored)
+    /// Enable UDP transport mode (for logging differentiation only)
+    ///
+    /// After this is called, graphics data arrives via UDP tunnel but still goes
+    /// through the normal DvcProcessor::process() method via DRDYNVC routing.
     pub fn enable_udp_mode(&mut self) {
         use tracing::info;
-        info!("🔄 GFX: Switching to UDP transport mode (TCP data will be ignored)");
+        info!("🔄 GFX: Switching to UDP transport mode");
         self.udp_active = true;
     }
 
@@ -117,7 +127,7 @@ impl GfxDvcProcessor {
 
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| Box::new(GfxDvcMessage::new(data)) as DvcMessage)
             .collect())
     }
 }
@@ -163,28 +173,31 @@ impl DvcProcessor for GfxDvcProcessor {
         }
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| Box::new(GfxDvcMessage::new(data)) as DvcMessage)
             .collect())
     }
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
-        use tracing::{debug, info};
+        use tracing::{debug, info, trace, warn};
 
-        // If UDP is active, ignore TCP GFX data
+        // Log differently for UDP vs TCP path
+        // Note: This method is called for Data PDUs from BOTH TCP and UDP tunnels!
+        // After UDP mode is enabled, most graphics data arrives via UDP tunnel.
         if self.udp_active {
-            info!(
-                "⏭️ RDPEGFX: Ignoring {} bytes on TCP channel {} (UDP mode active)",
+            trace!(
+                "📥 RDPEGFX (UDP): Received {} bytes on channel {} (first 16: {:02x?})",
                 payload.len(),
-                channel_id
+                channel_id,
+                &payload[..payload.len().min(16)]
             );
-            return Ok(Vec::new());
+        } else {
+            trace!(
+                "📥 RDPEGFX (TCP): Received {} bytes on channel {} (first 16: {:02x?})",
+                payload.len(),
+                channel_id,
+                &payload[..payload.len().min(16)]
+            );
         }
-
-        debug!(
-            "📥 RDPEGFX: Received {} bytes on channel {}",
-            payload.len(),
-            channel_id
-        );
 
         // Decompress with zGFX (preserving error details in log)
         debug!(
@@ -217,10 +230,24 @@ impl DvcProcessor for GfxDvcProcessor {
         }
 
         // Process PDUs
-        self.client.process_pdu_stream(&decompressed).map_err(|e| {
-            info!("❌ RDPEGFX: PDU processing failed: {:?}", e);
-            ironrdp_pdu::pdu_other_err!("GFX PDU processing failed")
-        })?;
+        if let Err(err) = self.client.process_pdu_stream(&decompressed) {
+            use tracing::warn;
+
+            let raw_preview = &payload[..payload.len().min(32)];
+            let decompressed_preview = &decompressed[..decompressed.len().min(32)];
+
+            warn!(
+                "❌ RDPEGFX: PDU processing failed: {:?} (raw_len={}, raw_first={:02X?}, \
+                 decompressed_len={}, decompressed_first={:02X?})",
+                err,
+                payload.len(),
+                raw_preview,
+                decompressed.len(),
+                decompressed_preview
+            );
+
+            return Err(ironrdp_pdu::pdu_other_err!("GFX PDU processing failed"));
+        }
 
         // Get any outgoing messages (acknowledgements, etc.)
         let messages = self.client.ctx.take_outgoing_messages();
@@ -236,7 +263,7 @@ impl DvcProcessor for GfxDvcProcessor {
         }
         Ok(messages
             .into_iter()
-            .map(|data| Box::new(GfxDvcMessage { data }) as DvcMessage)
+            .map(|data| Box::new(GfxDvcMessage::new(data)) as DvcMessage)
             .collect())
     }
 
@@ -246,7 +273,7 @@ impl DvcProcessor for GfxDvcProcessor {
         self.channel_id = None;
     }
 
-    fn on_soft_sync(&mut self, _channel_id: u32, _tunnel_type: SoftSyncTunnelType) {
+    fn on_soft_sync(&mut self, channel_id: u32, _tunnel_type: SoftSyncTunnelType) {
         use tracing::info;
         info!("🔄 RDPEGFX: SoftSync request received, enabling UDP mode");
         self.enable_udp_mode();

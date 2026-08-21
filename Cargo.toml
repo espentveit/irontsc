@@ -2,7 +2,7 @@
 members = [
     ".",
     "crates/clearcodec",
-    "crates/drdynvc",
+    "crates/irontsc-udp",
     "crates/zgfx",
     "crates/ironrdp-gfx",
     "crates/ironrdp-h264",
@@ -51,6 +51,13 @@ rstest = "0.25"
 lazy_static = "1.4"
 num-derive = "0.4"
 num-traits = "0.2"
+
+[profile.optimized]
+inherits = "release"
+lto = "fat"           # Full link-time optimization (slower build, faster runtime)
+codegen-units = 1     # Maximum optimization opportunities
+opt-level = 3         # Maximum optimizations
+strip = true          # Strip symbols
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
@@ -174,14 +181,16 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.100"
 bytes = "1.5"
-cairo-rs = { version = "0.18", features = ["png"] }
 clap = { version = "4.5", features = ["derive"] }
 cpal = "0.15"
+
+# Shared with egui_glow so the tree holds one glow.
+glow = "0.16"
 dirs = "6.0.0"
 futures-util = "0.3"
-gtk = { version = "0.10.1", package = "gtk4", features = ["v4_18"] }
 inquire = "0.7"
 ironrdp = { path = "crates/ironrdp-local", features = ["connector", "dvc", "input", "cliprdr", "displaycontrol", "graphics", "session", "svc", "rdpdr", "rdpsnd"] }
+ironrdp-displaycontrol = { path = "crates/ironrdp-displaycontrol-local" }
 ironrdp-tokio = { path = "crates/ironrdp-tokio-local", features = ["reqwest"] }
 picky = "=7.0.0-rc.17"
 picky-krb = "=0.11.1"
@@ -196,6 +205,9 @@ tracing = "0.1.41"
 url = "2.5"
 whoami = "1.5"
 x509-cert = "0.2"
+rand = "0.8"
+sha2 = "0.10"
+openssl = "0.10"
 ironrdp-mstsgu = { path = "crates/ironrdp-mstsgu-local" }
 ironrdp-tls = { path = "crates/ironrdp-tls-local", features = ["rustls"]}
 ironrdp-cfg = { path = "crates/ironrdp-cfg-local", version = "0.1.0" }
@@ -205,13 +217,33 @@ ironrdp-rdpsnd-native = { path = "crates/ironrdp-rdpsnd-native-local", version =
 ironrdp-propertyset = { path = "crates/ironrdp-propertyset-local", version = "0.1.0" }
 ironrdp-async = { path = "crates/ironrdp-async-local", version = "0.7.0" }
 ironrdp-core = { path = "crates/ironrdp-core-local", version = "0.1.5" }
+ironrdp_udp = { path = "crates/irontsc-udp" }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-adw = { version = "0.8.0", package = "libadwaita", features = ["v1_6"] }
 arboard = "3.6.1"
+
+# egui frontend. Built as a second binary (src/bin/irontsc-egui.rs) next to the GTK one; the
+# window, GL context and event loop are driven directly by winit/glutin rather than eframe so
+# that the RDP session can see physical key codes, which eframe hides behind egui's logical
+# `Key` enum.
+egui = "0.31"
+egui_glow = { version = "0.31", features = ["winit"] }
+egui-winit = "0.31"
+winit = "0.30"
+glutin = "0.32"
+glutin-winit = "0.5"
+
+# System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
+# winit has no API for this, so it is done against the display server directly: the Wayland
+# keyboard-shortcuts-inhibit protocol, or XGrabKeyboard on X11. Both are reached through the
+# raw handles winit already hands out, and both are optional at runtime.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+x11-dl = "2.21"
 
 # RDPEGFX + H.264 support
 clearcodec = { path = "crates/clearcodec" }
-drdynvc = { path = "crates/drdynvc" }
 zgfx = { path = "crates/zgfx" }
 ironrdp-gfx = { path = "crates/ironrdp-gfx" }
 ironrdp-graphics = { path = "crates/ironrdp-graphics-local" }
@@ -228,7 +260,9 @@ foreign-types = "0.3"
 libc = "0.2"
 
 [features]
-default = ["gfx", "video-redirection", "h264"]
+# h264 is back on by default: ffmpeg-sys-next 9 builds against FFmpeg 8, and without it every
+# frame of full-motion video is forced through the progressive codec on the CPU.
+default = ["gfx", "h264"]
 gfx = []
 h264 = ["ironrdp-h264", "ironrdp-gfx/h264"]
 video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264", "ironrdp-gfx/h264"]

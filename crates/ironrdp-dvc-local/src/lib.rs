@@ -38,7 +38,14 @@ pub mod pdu;
 /// Represents a message that, when encoded, forms a complete PDU for a given dynamic virtual channel.
 /// This means a message that is ready to be wrapped in [`pdu::DataFirstPdu`] and [`pdu::DataPdu`] PDUs
 /// (being split into multiple of such PDUs if necessary).
-pub trait DvcEncode: Encode + Send {}
+pub trait DvcEncode: Encode + Send {
+    /// Returns the preferred transport context for this message.
+    /// If None, the message will use the default transport for the channel.
+    /// If Some, the message will override the default and use the specified transport.
+    fn preferred_transport(&self) -> Option<ironrdp_svc::TransportContext> {
+        None
+    }
+}
 pub type DvcMessage = Box<dyn DvcEncode>;
 
 /// A type that is a Dynamic Virtual Channel (DVC)
@@ -59,7 +66,14 @@ pub trait DvcProcessor: AsAny + Send {
 
     fn close(&mut self, _channel_id: u32) {}
 
+    /// Called when a Soft-Sync request is received for this channel.
     fn on_soft_sync(&mut self, _channel_id: DynamicChannelId, _tunnel_type: SoftSyncTunnelType) {}
+
+    /// Returns whether this channel should be switched to UDP transport.
+    /// Default is true. Stub/mock implementations should return false to keep using TCP.
+    fn supports_udp_transport(&self) -> bool {
+        true
+    }
 }
 
 assert_obj_safe!(DvcProcessor);
@@ -73,6 +87,9 @@ pub fn encode_dvc_messages(
     for msg in messages {
         let total_length = msg.size();
         let needs_splitting = total_length >= DrdynvcDataPdu::MAX_DATA_SIZE;
+        
+        // Capture preferred transport before encoding
+        let preferred_transport = msg.preferred_transport();
 
         let msg = encode_vec(msg.as_ref())?;
         let mut off = 0;
@@ -100,7 +117,12 @@ pub fn encode_dvc_messages(
                 DrdynvcDataPdu::Data(pdu::DataPdu::new(channel_id, msg[off..end].to_vec()))
             };
 
-            let svc = SvcMessage::from(pdu).with_flags(flags);
+            let mut svc = SvcMessage::from(pdu).with_flags(flags);
+            
+            // Apply preferred transport if specified
+            if let Some(transport) = preferred_transport {
+                svc = svc.with_transport(transport);
+            }
 
             res.push(svc);
             off = end;
@@ -172,6 +194,10 @@ impl DynamicVirtualChannel {
         if let Some(channel_id) = self.channel_id {
             self.channel_processor.on_soft_sync(channel_id, tunnel_type);
         }
+    }
+
+    fn supports_udp_transport(&self) -> bool {
+        self.channel_processor.supports_udp_transport()
     }
 
     fn channel_name(&self) -> &str {
@@ -253,6 +279,12 @@ impl DynamicChannelSet {
         self.channel_id_to_name
             .get(&id)
             .and_then(|name| self.channels.get_mut(name))
+    }
+
+    fn supports_udp_transport(&self, id: DynamicChannelId) -> bool {
+        self.get_by_channel_id(id)
+            .map(|channel| channel.supports_udp_transport())
+            .unwrap_or(false)
     }
 
     fn remove_by_channel_id(&mut self, id: DynamicChannelId) -> Option<DynamicChannelId> {

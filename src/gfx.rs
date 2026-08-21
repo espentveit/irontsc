@@ -14,6 +14,7 @@ use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 /// Maximum surface dimension (8K resolution)
@@ -21,8 +22,51 @@ const MAX_SURFACE_DIM: u16 = 8192;
 /// Maximum total surface pixels (8K × 8K)
 const MAX_SURFACE_PIXELS: usize = 8192 * 8192;
 
+const MAX_CACHE_ENTRIES: usize = 25600; // Matches FreeRDP normal cache
+
 use crate::rdp::{RdpEventSender, RdpOutputEvent};
 use core::num::NonZeroU16;
+
+/// Dirty rectangle for tracking updated regions (like FreeRDP's invalid regions)
+#[derive(Debug, Clone, Copy)]
+struct DirtyRect {
+    left: u16,
+    top: u16,
+    right: u16,
+    bottom: u16,
+}
+
+impl DirtyRect {
+    fn new(left: u16, top: u16, right: u16, bottom: u16) -> Self {
+        Self { left, top, right, bottom }
+    }
+
+    fn from_rect(rect: &Rectangle) -> Self {
+        Self {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+
+    fn union(&self, other: &DirtyRect) -> DirtyRect {
+        DirtyRect {
+            left: self.left.min(other.left),
+            top: self.top.min(other.top),
+            right: self.right.max(other.right),
+            bottom: self.bottom.max(other.bottom),
+        }
+    }
+
+    fn width(&self) -> u16 {
+        self.right.saturating_sub(self.left)
+    }
+
+    fn height(&self) -> u16 {
+        self.bottom.saturating_sub(self.top)
+    }
+}
 
 /// GFX surface information
 #[derive(Debug, Clone)]
@@ -33,6 +77,10 @@ struct GfxSurface {
     pixel_format: u8,
     /// Buffer for decoded frames (BGRA format)
     buffer: Arc<Vec<u8>>,
+    /// Accumulated dirty regions for this frame (cleared at BeginFrame/EndFrame)
+    dirty_regions: Vec<DirtyRect>,
+    /// Whether this surface has been sent to UI at least once
+    has_been_sent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +89,7 @@ struct CachedBitmap {
     width: u16,
     height: u16,
     data: Vec<u8>,
+    last_used: Instant,  // For LRU eviction (Medium Priority #3)
 }
 
 #[derive(Debug, Clone)]
@@ -127,10 +176,15 @@ pub struct GfxState {
     active_codec_contexts: HashSet<(u16, u32)>,
     /// Bitmap cache entries indexed by slot
     bitmap_cache: HashMap<u16, CachedBitmap>,
+    /// Total cache size in bytes for eviction tracking
+    cache_size_bytes: usize,
     /// Event sender for UI updates
     event_sender: Box<dyn RdpEventSender>,
     /// Outgoing message buffer
     outgoing_buffer: Vec<Vec<u8>>,
+    /// Frame rate control (Medium Priority #4)
+    last_frame_time: Option<Instant>,
+    frame_count: u64,
 }
 
 impl GfxState {
@@ -166,8 +220,11 @@ impl GfxState {
             window_mappings: HashMap::new(),
             active_codec_contexts: HashSet::new(),
             bitmap_cache: HashMap::new(),
+            cache_size_bytes: 0,
             event_sender,
             outgoing_buffer: Vec::new(),
+            last_frame_time: None,
+            frame_count: 0,
         })
     }
 
@@ -236,6 +293,8 @@ impl GfxContext for GfxState {
             height,
             pixel_format,
             buffer: Arc::new(vec![0; buffer_size]),
+            dirty_regions: Vec::new(),
+            has_been_sent: false,
         };
 
         self.surfaces.insert(surface_id, surface);
@@ -269,6 +328,16 @@ impl GfxContext for GfxState {
             "GFX frame start frame_id={} timestamp={}",
             frame_id, timestamp
         );
+        
+        // Frame rate control (Medium Priority #4)
+        let now = Instant::now();
+        if let Some(last_time) = self.last_frame_time {
+            let frame_interval = now.duration_since(last_time);
+            trace!("Frame interval: {:?}", frame_interval);
+        }
+        self.last_frame_time = Some(now);
+        self.frame_count += 1;
+        
         Ok(())
     }
 
@@ -279,24 +348,24 @@ impl GfxContext for GfxState {
             let mapping_count = self.surface_output_mappings.len();
 
             if mapping_count == 0 {
-                trace!("📊 Path: no mappings, sending surface 0");
-                if let Some(surface) = self.surfaces.get(&0) {
-                    self.send_surface_to_ui(surface)?;
+                // No mappings - try sending surface 0 if it exists
+                if self.surfaces.contains_key(&0) {
+                    trace!("📊 Path: no mappings, sending surface 0");
+                    self.send_surface_to_ui(0)?;
                 }
             } else if mapping_count == 1 {
-                // Single surface case: ALWAYS send directly to GTK for GPU-accelerated rendering
-                // GTK handles ALL scaling, positioning, and composition on GPU - much faster than CPU
-                let mapping = &self.surface_output_mappings[0];
-                if let Some(surface) = self.surfaces.get(&mapping.surface_id) {
-                    debug!(
-                        "🚀 FAST PATH: sending surface {} directly to GTK ({}x{})",
-                        mapping.surface_id,
-                        surface.width,
-                        surface.height
-                    );
-                    self.send_surface_to_ui(surface)?;
-                    return Ok(());
-                }
+                // Single surface case: send directly to GTK with dirty region tracking
+                let surface_id = self.surface_output_mappings[0].surface_id;
+                let dirty_count = self.surfaces.get(&surface_id)
+                    .map(|s| s.dirty_regions.len())
+                    .unwrap_or(0);
+                debug!(
+                    "🚀 FAST PATH: sending surface {} with {} dirty regions",
+                    surface_id,
+                    dirty_count
+                );
+                self.send_surface_to_ui(surface_id)?;
+                return Ok(());
             } else {
                 warn!("🐌 SLOW PATH: {} surfaces - CPU compositing", mapping_count);
             }
@@ -330,9 +399,9 @@ impl GfxContext for GfxState {
             return Ok(());
         }
 
-        // Fallback: send the primary surface (typically surface 0)
-        if let Some(surface) = self.surfaces.get(&0) {
-            self.send_surface_to_ui(surface)?;
+        // Fallback: send the primary surface (typically surface 0) if it exists
+        if self.surfaces.contains_key(&0) {
+            self.send_surface_to_ui(0)?;
         }
 
         Ok(())
@@ -384,7 +453,7 @@ impl GfxContext for GfxState {
 
                 debug!("✅ ClearCodec decode complete, blitting to surface");
                 Self::blit_raw_to_surface(surface, &dest_rect, &decoded_buffer)?;
-                
+
                 // Draw debug outline (pink for ClearCodec)
                 Self::draw_debug_outline(
                     surface,
@@ -402,7 +471,12 @@ impl GfxContext for GfxState {
                 use tracing::info;
 
                 // Decode H.264/AVC420 with region optimization
-                let region = Some((dest_rect.left, dest_rect.top, dest_rect.width(), dest_rect.height()));
+                let region = Some((
+                    dest_rect.left,
+                    dest_rect.top,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                ));
                 let frame = self
                     .h264_decoder
                     .0
@@ -411,13 +485,17 @@ impl GfxContext for GfxState {
 
                 info!(
                     "🎬 H.264 AVC420: frame={}x{}, dest_rect={}x{} at ({},{}), surface={}x{}",
-                    frame.width, frame.height,
-                    dest_rect.width(), dest_rect.height(),
-                    dest_rect.left, dest_rect.top,
-                    surface.width, surface.height
+                    frame.width,
+                    frame.height,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                    dest_rect.left,
+                    dest_rect.top,
+                    surface.width,
+                    surface.height
                 );
                 Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
-                
+
                 // Draw debug outline (green for AVC420)
                 Self::draw_debug_outline(
                     surface,
@@ -441,18 +519,32 @@ impl GfxContext for GfxState {
                     AvcKind::Avc444v2
                 };
 
-                let region = Some((dest_rect.left, dest_rect.top, dest_rect.width(), dest_rect.height()));
-                match self.h264_decoder.0.decode_gfx_stream(kind, bitmap_data, region) {
+                let region = Some((
+                    dest_rect.left,
+                    dest_rect.top,
+                    dest_rect.width(),
+                    dest_rect.height(),
+                ));
+                match self
+                    .h264_decoder
+                    .0
+                    .decode_gfx_stream(kind, bitmap_data, region)
+                {
                     Ok(frame) => {
                         info!(
                             "🎬 H.264 {:?}: frame={}x{}, dest_rect={}x{} at ({},{}), surface={}x{}",
-                            kind, frame.width, frame.height,
-                            dest_rect.width(), dest_rect.height(),
-                            dest_rect.left, dest_rect.top,
-                            surface.width, surface.height
+                            kind,
+                            frame.width,
+                            frame.height,
+                            dest_rect.width(),
+                            dest_rect.height(),
+                            dest_rect.left,
+                            dest_rect.top,
+                            surface.width,
+                            surface.height
                         );
                         Self::blit_frame_to_surface(surface, &dest_rect, frame)?;
-                        
+
                         // Draw debug outline (yellow for AVC444/AVC444V2)
                         Self::draw_debug_outline(
                             surface,
@@ -486,7 +578,7 @@ impl GfxContext for GfxState {
             codec::codec_id::UNCOMPRESSED => {
                 // Raw BGRA bitmap
                 Self::blit_raw_to_surface(surface, &dest_rect, bitmap_data)?;
-                
+
                 // Draw debug outline (orange for uncompressed)
                 Self::draw_debug_outline(
                     surface,
@@ -527,7 +619,7 @@ impl GfxContext for GfxState {
                         for tile in &update.tiles {
                             Self::blit_tile_to_surface(surface, tile)
                                 .context("Failed to blit progressive tile")?;
-                            
+
                             // Draw debug outline (blue for Progressive)
                             let tile_rect = Rectangle {
                                 left: tile.rect.x,
@@ -587,12 +679,8 @@ impl GfxContext for GfxState {
             }
         }
 
-        // Don't send updates immediately - batch them until EndFrame
-        // This prevents visible tearing from tile-by-tile updates
-        trace!(
-            "📝 Decoded surface {} - waiting for EndFrame to send",
-            surface_id
-        );
+        // Don't flush here - wait for EndFrame to batch all updates in the frame
+        // This reduces redundant rendering and improves performance
 
         Ok(())
     }
@@ -758,14 +846,42 @@ impl GfxContext for GfxState {
         Self::validate_rect_within_surface(surface, &source_rect)?;
         let data = Self::extract_surface_region(surface, &source_rect)?;
 
+        let data_size = data.len();
+        
+        // Remove old entry if slot is being reused (do this BEFORE eviction check)
+        let old_size = if let Some(old) = self.bitmap_cache.remove(&cache_slot) {
+            let size = old.data.len();
+            self.cache_size_bytes = self.cache_size_bytes.saturating_sub(size);
+            size
+        } else {
+            0
+        };
+
+        // Check if we need to evict (Medium Priority #3: Cache eviction)
+        // Only limit by entry count, matching FreeRDP behavior
+        if self.bitmap_cache.len() > MAX_CACHE_ENTRIES {
+            self.evict_cache_entries();
+        }
+
         let cached = CachedBitmap {
             key: cache_key,
             width: source_rect.width(),
             height: source_rect.height(),
             data,
+            last_used: Instant::now(),
         };
 
+        self.cache_size_bytes += data_size;
         self.bitmap_cache.insert(cache_slot, cached);
+        
+        debug!(
+            "Cache insert: slot={} size={}KB total_entries={} total_size={}MB",
+            cache_slot,
+            data_size / 1024,
+            self.bitmap_cache.len(),
+            self.cache_size_bytes / (1024 * 1024)
+        );
+        
         Ok(())
     }
 
@@ -784,6 +900,11 @@ impl GfxContext for GfxState {
 
         if dest_points.is_empty() {
             return Ok(());
+        }
+
+        // Update last used time for LRU eviction
+        if let Some(cached) = self.bitmap_cache.get_mut(&cache_slot) {
+            cached.last_used = Instant::now();
         }
 
         let cached = self
@@ -1080,20 +1201,19 @@ impl GfxState {
 
         // Blit to surface buffer
         let buffer = Arc::make_mut(&mut surface.buffer);
-        
+
         // Check if the frame is already the exact region (region-optimized decode)
         // or if it's the full surface and we need to extract the region
-        let frame_is_region = frame_width_usize == rect_width 
-            && frame_height_usize == rect_height;
-        
+        let frame_is_region = frame_width_usize == rect_width && frame_height_usize == rect_height;
+
         let bytes_per_row = rect_width * 4;
-        
+
         if frame_is_region {
             // Frame is already the region we need - just copy it directly to dest_rect position
             for y in 0..rect_height {
                 // Source: frame starts at (0,0) and is exactly rect_width x rect_height
                 let src_offset = y * frame_stride;
-                
+
                 // Destination: write to dest_rect position on surface
                 let dst_y = dest_rect.top as usize + y;
                 let dst_x = dest_rect.left as usize;
@@ -1103,13 +1223,26 @@ impl GfxState {
                 if src_offset + bytes_per_row > frame_data.len() {
                     anyhow::bail!(
                         "Blit source out of bounds: y={}, frame={}x{}, stride={}, need {} bytes at offset {}, have {}",
-                        y, frame_width, frame_height, frame_stride, bytes_per_row, src_offset, frame_data.len()
+                        y,
+                        frame_width,
+                        frame_height,
+                        frame_stride,
+                        bytes_per_row,
+                        src_offset,
+                        frame_data.len()
                     );
                 }
                 if dst_offset + bytes_per_row > buffer.len() {
                     anyhow::bail!(
                         "Blit dest out of bounds: y={}, dst at ({},{}), surface={}x{}, need {} bytes at offset {}, have {}",
-                        y, dst_x, dst_y, surface.width, surface.height, bytes_per_row, dst_offset, buffer.len()
+                        y,
+                        dst_x,
+                        dst_y,
+                        surface.width,
+                        surface.height,
+                        bytes_per_row,
+                        dst_offset,
+                        buffer.len()
                     );
                 }
 
@@ -1124,7 +1257,7 @@ impl GfxState {
                 let src_y = dest_rect.top as usize + y;
                 let src_x = dest_rect.left as usize;
                 let src_offset = (src_y * frame_width_usize + src_x) * 4;
-                
+
                 // Destination: write to dest_rect position on surface
                 let dst_y = dest_rect.top as usize + y;
                 let dst_x = dest_rect.left as usize;
@@ -1134,13 +1267,27 @@ impl GfxState {
                 if src_offset + bytes_per_row > frame_data.len() {
                     anyhow::bail!(
                         "Blit source out of bounds: y={}, src at ({},{}), frame={}x{}, need {} bytes at offset {}, have {}",
-                        y, src_x, src_y, frame_width, frame_height, bytes_per_row, src_offset, frame_data.len()
+                        y,
+                        src_x,
+                        src_y,
+                        frame_width,
+                        frame_height,
+                        bytes_per_row,
+                        src_offset,
+                        frame_data.len()
                     );
                 }
                 if dst_offset + bytes_per_row > buffer.len() {
                     anyhow::bail!(
                         "Blit dest out of bounds: y={}, dst at ({},{}), surface={}x{}, need {} bytes at offset {}, have {}",
-                        y, dst_x, dst_y, surface.width, surface.height, bytes_per_row, dst_offset, buffer.len()
+                        y,
+                        dst_x,
+                        dst_y,
+                        surface.width,
+                        surface.height,
+                        bytes_per_row,
+                        dst_offset,
+                        buffer.len()
                     );
                 }
 
@@ -1149,6 +1296,9 @@ impl GfxState {
                     .copy_from_slice(&frame_data[src_offset..src_offset + bytes_per_row]);
             }
         }
+
+        // Mark this region as dirty
+        surface.dirty_regions.push(DirtyRect::from_rect(dest_rect));
 
         Ok(())
     }
@@ -1194,6 +1344,9 @@ impl GfxState {
             buffer[dst_offset..dst_offset + rect_width * 4]
                 .copy_from_slice(&data[src_offset..src_offset + rect_width * 4]);
         }
+
+        // Mark this region as dirty
+        surface.dirty_regions.push(DirtyRect::from_rect(dest_rect));
 
         Ok(())
     }
@@ -1243,6 +1396,15 @@ impl GfxState {
                 .copy_from_slice(&tile.pixels[src_offset..src_offset + tile_width * 4]);
         }
 
+        // Mark this region as dirty (FreeRDP-style invalidation)
+        let dirty = DirtyRect::new(
+            tile.rect.x,
+            tile.rect.y,
+            tile.rect.x + tile.rect.width,
+            tile.rect.y + tile.rect.height,
+        );
+        surface.dirty_regions.push(dirty);
+
         Ok(())
     }
 
@@ -1274,6 +1436,9 @@ impl GfxState {
             }
         }
 
+        // Mark this region as dirty
+        surface.dirty_regions.push(DirtyRect::from_rect(rect));
+
         Ok(())
     }
 
@@ -1292,7 +1457,7 @@ impl GfxState {
         let rect_width = rect.width() as usize;
         let rect_height = rect.height() as usize;
         let surface_width = surface.width as usize;
-        
+
         if rect_width == 0 || rect_height == 0 {
             return Ok(());
         }
@@ -1305,14 +1470,14 @@ impl GfxState {
         // Draw top and bottom horizontal lines
         for x in 0..rect_width {
             let dst_x = rect.left as usize + x;
-            
+
             // Top line
             let top_y = rect.top as usize;
             let top_offset = (top_y * surface_width + dst_x) * 4;
             if top_offset + 4 <= buffer.len() {
                 buffer[top_offset..top_offset + 4].copy_from_slice(&pixel);
             }
-            
+
             // Bottom line
             if rect_height > 1 {
                 let bottom_y = rect.top as usize + rect_height - 1;
@@ -1326,14 +1491,14 @@ impl GfxState {
         // Draw left and right vertical lines
         for y in 0..rect_height {
             let dst_y = rect.top as usize + y;
-            
+
             // Left line
             let left_x = rect.left as usize;
             let left_offset = (dst_y * surface_width + left_x) * 4;
             if left_offset + 4 <= buffer.len() {
                 buffer[left_offset..left_offset + 4].copy_from_slice(&pixel);
             }
-            
+
             // Right line
             if rect_width > 1 {
                 let right_x = rect.left as usize + rect_width - 1;
@@ -1466,26 +1631,200 @@ impl GfxState {
                 .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
         }
 
+        // Mark this region as dirty
+        let dest_x_u16 = dest_x.min(u16::MAX as usize) as u16;
+        let dest_y_u16 = dest_y.min(u16::MAX as usize) as u16;
+        let width_u16 = width.min(u16::MAX as usize) as u16;
+        let height_u16 = height.min(u16::MAX as usize) as u16;
+        surface.dirty_regions.push(DirtyRect::new(
+            dest_x_u16,
+            dest_y_u16,
+            dest_x_u16 + width_u16,
+            dest_y_u16 + height_u16,
+        ));
+
         Ok(())
     }
 
+    /// Evict cache entries using LRU strategy (Medium Priority #3)
+    /// Only evicts based on entry count, matching FreeRDP behavior
+    fn evict_cache_entries(&mut self) {
+        let target_entries = MAX_CACHE_ENTRIES.saturating_sub(1);
+        
+        // Collect entries with their last used time
+        let mut entries: Vec<(u16, Instant, usize)> = self.bitmap_cache
+            .iter()
+            .map(|(slot, cached)| (*slot, cached.last_used, cached.data.len()))
+            .collect();
+        
+        // Sort by last_used (oldest first)
+        entries.sort_by_key(|(_, last_used, _)| *last_used);
+        
+        let mut evicted_count = 0;
+        let mut freed_bytes = 0;
+        
+        // Evict oldest entries until we're under the entry limit
+        for (slot, _, size) in entries {
+            if self.bitmap_cache.len() <= target_entries {
+                break;
+            }
+            
+            if let Some(removed) = self.bitmap_cache.remove(&slot) {
+                freed_bytes += removed.data.len();
+                self.cache_size_bytes = self.cache_size_bytes.saturating_sub(removed.data.len());
+                evicted_count += 1;
+            }
+        }
+        
+        if evicted_count > 0 {
+            debug!(
+                "Cache eviction: removed {} entries, freed {}KB, remaining entries={}, size={}MB",
+                evicted_count,
+                freed_bytes / 1024,
+                self.bitmap_cache.len(),
+                self.cache_size_bytes / (1024 * 1024)
+            );
+        }
+    }
+
     /// Send a surface to the UI for rendering
-    fn send_surface_to_ui(&self, surface: &GfxSurface) -> Result<()> {
+    fn send_surface_to_ui(&mut self, surface_id: u16) -> Result<()> {
+        let surface = self.surfaces.get_mut(&surface_id)
+            .ok_or_else(|| anyhow::anyhow!("Surface {} not found", surface_id))?;
+            
         let width = NonZeroU16::new(surface.width)
             .ok_or_else(|| anyhow::anyhow!("Surface width is zero"))?;
         let height = NonZeroU16::new(surface.height)
             .ok_or_else(|| anyhow::anyhow!("Surface height is zero"))?;
 
-        use tracing::info;
+        // FreeRDP-style dirty region optimization
+        if surface.dirty_regions.is_empty() {
+            // No changes this frame - only skip if we've already sent this surface once
+            if surface.has_been_sent {
+                return Ok(()); // No updates needed
+            }
+            // First time sending - send full frame even with no dirty regions
+        }
 
-        self.event_sender
-            .send_event(RdpOutputEvent::Image {
-                buffer: surface.buffer.clone(),
-                width,
-                height,
-                region: None,
-            })
-            .map_err(|_| anyhow::anyhow!("Failed to send image event to UI"))?;
+        // Mark as sent
+        surface.has_been_sent = true;
+
+        // Merge all dirty regions into a single bounding box
+        let merged = if surface.dirty_regions.is_empty() {
+            // No dirty regions but first send - treat entire surface as dirty
+            DirtyRect::new(0, 0, surface.width, surface.height)
+        } else {
+            let mut merged = surface.dirty_regions[0];
+            for dirty in &surface.dirty_regions[1..] {
+                merged = merged.union(dirty);
+            }
+            merged
+        };
+
+        // Clear dirty regions for next frame
+        surface.dirty_regions.clear();
+
+        // Extract only the dirty region to send (FreeRDP-style optimization)
+        let region_width = merged.width();
+        let region_height = merged.height();
+        
+        if region_width == 0 || region_height == 0 {
+            return Ok(()); // Empty region, nothing to send
+        }
+
+        // Check if we should send the full frame or just the dirty region
+        let full_size = (width.get() as usize) * (height.get() as usize) * 4;
+        let dirty_size = (region_width as usize) * (region_height as usize) * 4;
+        
+        // If dirty region is >70% of frame, send full frame (cheaper than extracting)
+        if dirty_size > (full_size * 7 / 10) {
+            let buffer = surface.buffer.clone();
+            self.event_sender
+                .send_event(RdpOutputEvent::Image {
+                    buffer,
+                    width,
+                    height,
+                    region: None,
+                })
+                .map_err(|_| anyhow::anyhow!("Failed to send image event to UI"))?;
+        } else {
+            // Extract just the dirty region
+            let region_width_nz = NonZeroU16::new(region_width)
+                .ok_or_else(|| anyhow::anyhow!("Region width is zero"))?;
+            let region_height_nz = NonZeroU16::new(region_height)
+                .ok_or_else(|| anyhow::anyhow!("Region height is zero"))?;
+            
+            let mut region_buffer: Vec<u8> = Vec::with_capacity(dirty_size);
+            let surface_width = surface.width as usize;
+            let row_bytes = region_width as usize * 4;
+            
+            // Validate bounds once before copying
+            let last_row = merged.top as usize + region_height as usize - 1;
+            let last_col = merged.left as usize + region_width as usize - 1;
+            let last_offset = (last_row * surface_width + last_col + 1) * 4;
+            
+            if last_offset > surface.buffer.len() {
+                // Out of bounds, fall back to full frame
+                let buffer = surface.buffer.clone();
+                self.event_sender
+                    .send_event(RdpOutputEvent::Image {
+                        buffer,
+                        width,
+                        height,
+                        region: None,
+                    })
+                    .map_err(|_| anyhow::anyhow!("Failed to send image event to UI"))?;
+                return Ok(());
+            }
+            
+            // Use unsafe bulk copy to avoid memmove overhead
+            unsafe {
+                region_buffer.set_len(dirty_size);
+            }
+            
+            // Optimization: if dirty region spans full width, do single contiguous copy
+            if region_width == width.get() {
+                let src_offset = (merged.top as usize * surface_width) * 4;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        surface.buffer.as_ptr().add(src_offset),
+                        region_buffer.as_mut_ptr(),
+                        dirty_size,
+                    );
+                }
+            } else {
+                // Row-by-row copy for partial width regions
+                for y in 0..region_height {
+                    let src_y = (merged.top + y) as usize;
+                    let src_x = merged.left as usize;
+                    let src_offset = (src_y * surface_width + src_x) * 4;
+                    let dst_offset = y as usize * row_bytes;
+                    
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            surface.buffer.as_ptr().add(src_offset),
+                            region_buffer.as_mut_ptr().add(dst_offset),
+                            row_bytes,
+                        );
+                    }
+                }
+            }
+            
+            use crate::rdp::ImageRegion;
+            self.event_sender
+                .send_event(RdpOutputEvent::Image {
+                    buffer: Arc::new(region_buffer),
+                    width,
+                    height,
+                    region: Some(ImageRegion {
+                        x: merged.left,
+                        y: merged.top,
+                        width: region_width_nz,
+                        height: region_height_nz,
+                    }),
+                })
+                .map_err(|_| anyhow::anyhow!("Failed to send image event to UI"))?;
+        }
 
         Ok(())
     }

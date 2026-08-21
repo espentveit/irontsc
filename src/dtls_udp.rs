@@ -14,53 +14,100 @@ use tracing::{debug, info, trace, warn};
 // Additional FFI declarations not available in openssl_sys
 unsafe extern "C" {
     fn BIO_ctrl_pending(b: *mut ffi::BIO) -> libc::size_t;
+    fn ERR_error_string_n(e: libc::c_ulong, buf: *mut libc::c_char, len: libc::size_t);
+}
+
+// SSL_CTX_ctrl constants for setting groups and signature algorithms
+const SSL_CTRL_SET_GROUPS_LIST: c_int = 92;
+const SSL_CTRL_SET_SIGALGS_LIST: c_int = 98;
+
+// Wrapper for SSL_CTX_ctrl (not directly exposed in openssl-sys)
+mod ffi_ext {
+    use super::*;
+    
+    pub unsafe fn SSL_CTX_ctrl_wrapper(
+        ctx: *mut ffi::SSL_CTX,
+        cmd: c_int,
+        larg: libc::c_long,
+        parg: *mut libc::c_void,
+    ) -> libc::c_long {
+        ffi::SSL_CTX_ctrl(ctx, cmd, larg, parg)
+    }
 }
 
 const MAX_DTLS_RECORD_SIZE: usize = 64 * 1024;
 const CLIENT_MTU: u32 = 1232;
 
-/// DTLS configuration for MS-RDPEMT
+/// Protocol type for MS-RDPEMT encryption
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionProtocol {
+    /// TLS 1.2 for Reliable mode
+    Tls,
+    /// DTLS 1.2 for Lossy mode
+    Dtls,
+}
+
+/// TLS/DTLS configuration for MS-RDPEMT
 pub struct DtlsConfig {
     /// Server hostname for certificate validation
     pub server_name: String,
     /// Whether to verify server certificate (should be true in production)
     pub verify_certificate: bool,
+    /// Protocol to use (TLS for Reliable, DTLS for Lossy)
+    pub protocol: EncryptionProtocol,
 }
 
-/// DTLS wrapper for encrypting/decrypting UDP datagrams
+/// TLS/DTLS wrapper for encrypting/decrypting UDP datagrams
 /// Note: This does NOT handle socket I/O - packets must be wrapped in RDP UDP DATA frames
 pub struct DtlsUdpSocket {
-    /// DTLS SSL context
+    /// SSL context
     ssl_context: SslContext,
     /// Server address (for logging/debugging)
     server_addr: SocketAddr,
     /// Configuration
     config: DtlsConfig,
-    /// Whether DTLS handshake is complete
+    /// Whether handshake is complete
     handshake_complete: bool,
     /// SSL connection instance (created after handshake)
     ssl_conn: Option<Ssl>,
+    /// Protocol being used
+    protocol: EncryptionProtocol,
 }
 
 impl DtlsUdpSocket {
-    /// Create a new DTLS encryption layer (does not handle socket I/O)
+    /// Create a new TLS/DTLS encryption layer (does not handle socket I/O)
     pub fn new(server_addr: SocketAddr, config: DtlsConfig) -> Result<Self> {
+        let protocol_name = match config.protocol {
+            EncryptionProtocol::Tls => "TLS",
+            EncryptionProtocol::Dtls => "DTLS",
+        };
+
         info!(
-            "🔐 Initializing DTLS for MS-RDPEMT (server: {})",
-            config.server_name
+            "🔐 Initializing {} for MS-RDPEMT (server: {})",
+            protocol_name, config.server_name
         );
 
-        // Create DTLS 1.2 context
-        let mut ctx_builder =
-            SslContext::builder(SslMethod::dtls()).context("Failed to create DTLS context")?;
+        // Create TLS or DTLS context based on protocol
+        let ssl_method = match config.protocol {
+            EncryptionProtocol::Tls => SslMethod::tls(),
+            EncryptionProtocol::Dtls => SslMethod::dtls(),
+        };
 
-        // Set DTLS version to 1.2 (required by most RDP servers)
+        let mut ctx_builder = SslContext::builder(ssl_method)
+            .with_context(|| format!("Failed to create {} context", protocol_name))?;
+
+        // Set version range - only TLS 1.2 and 1.3 to reduce ClientHello size
+        // Skip TLS 1.0/1.1 as they're deprecated and add to supported_versions extension
         ctx_builder
             .set_min_proto_version(Some(SslVersion::TLS1_2))
-            .context("Failed to set min DTLS version")?;
+            .with_context(|| format!("Failed to set min {} version", protocol_name))?;
         ctx_builder
-            .set_max_proto_version(Some(SslVersion::TLS1_2))
-            .context("Failed to set max DTLS version")?;
+            .set_max_proto_version(Some(SslVersion::TLS1_3))
+            .with_context(|| format!("Failed to set max {} version", protocol_name))?;
+
+        // Original (supports TLS 1.0-1.3, larger ClientHello):
+        // ctx_builder.set_min_proto_version(Some(SslVersion::TLS1))?;
+        // ctx_builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
 
         // Configure certificate verification
         if config.verify_certificate {
@@ -69,11 +116,21 @@ impl DtlsUdpSocket {
                 .set_default_verify_paths()
                 .context("Failed to load system CA certificates")?;
         } else {
-            warn!("⚠️  DTLS certificate verification disabled (insecure, for testing only)");
+            warn!(
+                "⚠️  {} certificate verification disabled (insecure, for testing only)",
+                protocol_name
+            );
             ctx_builder.set_verify(SslVerifyMode::NONE);
         }
 
-        // Set recommended cipher suites for RDP
+        //Set TLS 1.3 cipher suites - minimal to reduce ClientHello size
+        // Only advertise one cipher to minimize extension bloat
+        ctx_builder
+            .set_ciphersuites("TLS_AES_256_GCM_SHA384")
+            .context("Failed to set TLS 1.3 ciphersuites")?;
+
+        // TLS 1.0-1.2 cipher list - minimal set to keep ClientHello under 1200 bytes
+        // Prioritize modern ECDHE-RSA and fallback to RSA-only
         ctx_builder
             .set_cipher_list(
                 "ECDHE-RSA-AES256-GCM-SHA384:\
@@ -83,11 +140,78 @@ impl DtlsUdpSocket {
             )
             .context("Failed to set cipher list")?;
 
-        // Ensure OpenSSL does not attempt to probe MTU on its own
-        ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
+        // Disable ChaCha20 globally for both TLS 1.3 and TLS 1.2
+        // This is a workaround for OpenSSL adding ChaCha20 by default
+        let mut options = SslOptions::NO_TICKET | SslOptions::CIPHER_SERVER_PREFERENCE;
+
+        // Enable middlebox compatibility mode to send ChangeCipherSpec
+        // This makes TLS 1.3 handshakes look like TLS 1.2 for compatibility
+        // The Windows RDP server expects to receive ChangeCipherSpec
+        options |= SslOptions::ENABLE_MIDDLEBOX_COMPAT;
+
+        ctx_builder.set_options(options);
+
+        // Limit supported elliptic curve groups to reduce key_share extension size
+        // X25519 only = 32-byte public key instead of 8 curves × ~100 bytes
+        // This is critical to keep ClientHello under 1200 bytes (UDP MTU constraint)
+        unsafe {
+            use std::ffi::CString;
+            let groups = CString::new("X25519").unwrap();
+            // SSL_CTX_set1_groups_list sets both supported_groups AND limits key_share
+            let result = ffi_ext::SSL_CTX_ctrl_wrapper(
+                ctx_builder.as_ptr(),
+                SSL_CTRL_SET_GROUPS_LIST,
+                0,
+                groups.as_ptr() as *mut libc::c_void,
+            );
+            if result != 1 {
+                warn!("⚠️  Failed to set supported groups to X25519 only - ClientHello may exceed MTU!");
+            } else {
+                info!("✓ Limited supported groups to X25519 only (reduces ClientHello by ~1200 bytes)");
+            }
+        }
+
+        // Limit signature algorithms to reduce signature_algorithms extension
+        // Only advertise what the RDP server typically uses (RSA with PSS/SHA256)
+        unsafe {
+            use std::ffi::CString;
+            let sigalgs = CString::new("rsa_pss_rsae_sha256:rsa_pkcs1_sha256").unwrap();
+            let result = ffi_ext::SSL_CTX_ctrl_wrapper(
+                ctx_builder.as_ptr(),
+                SSL_CTRL_SET_SIGALGS_LIST,
+                0,
+                sigalgs.as_ptr() as *mut libc::c_void,
+            );
+            if result != 1 {
+                debug!("Note: Could not restrict signature algorithms (may be OpenSSL version specific)");
+            } else {
+                info!("✓ Limited signature algorithms to reduce ClientHello size");
+            }
+        }
+
+        // Protocol-specific options
+        match config.protocol {
+            EncryptionProtocol::Tls => {
+                // For TLS over UDP: disable read-ahead to enforce strict record boundaries
+                // Each UDP packet contains exactly one TLS record, and OpenSSL must not
+                // buffer beyond the current record. This prevents state desynchronization
+                // when mixing encrypt/decrypt operations.
+                unsafe {
+                    ffi::SSL_CTX_set_read_ahead(ctx_builder.as_ptr(), 0);
+                }
+                info!("🔐 TLS read-ahead disabled for datagram mode (one record per UDP packet)");
+            }
+            EncryptionProtocol::Dtls => {
+                // DTLS needs read-ahead for packet loss handling
+                // Ensure OpenSSL does not attempt to probe MTU on its own
+                ctx_builder.set_options(SslOptions::NO_QUERY_MTU);
+            }
+        }
+
         ctx_builder.set_mode(SslMode::AUTO_RETRY);
 
         let ssl_context = ctx_builder.build();
+        let protocol = config.protocol;
 
         Ok(Self {
             ssl_context,
@@ -95,13 +219,22 @@ impl DtlsUdpSocket {
             config,
             handshake_complete: false,
             ssl_conn: None,
+            protocol,
         })
     }
 
-    /// Start DTLS handshake and return ClientHello packet to send
+    /// Start TLS/DTLS handshake and return ClientHello packet to send
     /// Call process_handshake_data() with server responses until handshake completes
     pub fn start_handshake(&mut self) -> Result<Vec<u8>> {
-        info!("🤝 Starting DTLS 1.2 handshake with {}", self.server_addr);
+        let protocol_name = match self.protocol {
+            EncryptionProtocol::Tls => "TLS",
+            EncryptionProtocol::Dtls => "DTLS",
+        };
+
+        info!(
+            "🤝 Starting {} 1.2 handshake with {}",
+            protocol_name, self.server_addr
+        );
 
         // Create SSL connection instance
         let mut ssl = Ssl::new(&self.ssl_context).context("Failed to create SSL connection")?;
@@ -110,12 +243,16 @@ impl DtlsUdpSocket {
         ssl.set_hostname(&self.config.server_name)
             .context("Failed to set SNI hostname")?;
 
-        // Configure DTLS specific options
+        // Configure protocol-specific options
         ssl.set_connect_state();
-        unsafe {
-            let ssl_ptr = Self::ssl_ptr(&ssl);
-            if ffi::SSL_set_mtu(ssl_ptr, CLIENT_MTU as libc::c_long) <= 0 {
-                debug!("Unable to set DTLS MTU to {}", CLIENT_MTU);
+
+        // Only set MTU for DTLS (not needed for TLS)
+        if self.protocol == EncryptionProtocol::Dtls {
+            unsafe {
+                let ssl_ptr = Self::ssl_ptr(&ssl);
+                if ffi::SSL_set_mtu(ssl_ptr, CLIENT_MTU as libc::c_long) <= 0 {
+                    debug!("Unable to set DTLS MTU to {}", CLIENT_MTU);
+                }
             }
         }
 
@@ -159,17 +296,97 @@ impl DtlsUdpSocket {
             .as_mut()
             .context("DTLS handshake not started - call start_handshake() first")?;
 
+        debug!(
+            "🔍 Processing {} bytes of TLS/DTLS handshake data. First 32 bytes: {:02x?}",
+            data.len(),
+            &data[..data.len().min(32)]
+        );
+
+        // Parse TLS record header to see what we're receiving
+        if data.len() >= 5 {
+            let record_type = data[0];
+            let version = u16::from_be_bytes([data[1], data[2]]);
+            let record_length = u16::from_be_bytes([data[3], data[4]]);
+            debug!(
+                "🔍 TLS record: type={} version=0x{:04x} length={} (total_data={})",
+                record_type,
+                version,
+                record_length,
+                data.len()
+            );
+
+            // Check if we have multiple records
+            let expected_total = 5 + record_length as usize;
+            if data.len() > expected_total {
+                debug!(
+                    "🔍 Multiple TLS records detected: first={} bytes, total={} bytes",
+                    expected_total,
+                    data.len()
+                );
+                // Check what the next record is
+                if expected_total + 5 <= data.len() {
+                    let next_type = data[expected_total];
+                    let next_version =
+                        u16::from_be_bytes([data[expected_total + 1], data[expected_total + 2]]);
+                    let next_length =
+                        u16::from_be_bytes([data[expected_total + 3], data[expected_total + 4]]);
+                    debug!(
+                        "🔍   Next record: type={} version=0x{:04x} length={}",
+                        next_type, next_version, next_length
+                    );
+                }
+            } else if data.len() < expected_total {
+                warn!(
+                    "🔍 Incomplete TLS record: have {} bytes, need {} bytes",
+                    data.len(),
+                    expected_total
+                );
+            }
+        }
+
         // Feed data into read BIO
         Self::write_to_rbio(ssl, data)?;
+
+        debug!(
+            "🔍 Calling SSL_do_handshake after feeding {} bytes...",
+            data.len()
+        );
 
         // Continue handshake
         let ret = unsafe { ffi::SSL_do_handshake(Self::ssl_ptr(ssl)) };
 
+        debug!("🔍 SSL_do_handshake returned: {}", ret);
+
+        // IMPORTANT: Always check for outgoing data first, even if there was an error
+        // OpenSSL might have prepared a response before encountering an error
+        // DO THIS BEFORE calling any other SSL functions that might crash on error state
+        let outgoing_packets = Self::drain_wbio(ssl)?;
+        if !outgoing_packets.is_empty() {
+            debug!(
+                "🔍 OpenSSL produced {} response packet(s) during handshake",
+                outgoing_packets.len()
+            );
+        }
+
         if ret == 1 {
             // Handshake complete
-            info!("✅ DTLS handshake complete");
-            self.handshake_complete = true;
-            return Ok(None);
+            let protocol_name = match self.protocol {
+                EncryptionProtocol::Tls => "TLS",
+                EncryptionProtocol::Dtls => "DTLS",
+            };
+            info!("✅ {} handshake complete", protocol_name);
+            // Note: Don't set handshake_complete = true yet!
+            // The caller needs to send the final handshake messages (ChangeCipherSpec, Finished)
+            // BEFORE encryption kicks in. The caller will mark it complete after sending.
+            if outgoing_packets.is_empty() {
+                // No final messages to send, mark complete now
+                self.handshake_complete = true;
+                return Ok(None);
+            } else {
+                // Return final messages but DON'T mark complete yet
+                // Caller must call mark_handshake_complete() after sending these
+                return Ok(Some(outgoing_packets));
+            }
         }
 
         // Check error code
@@ -178,23 +395,64 @@ impl DtlsUdpSocket {
 
         match error_code {
             ErrorCode::WANT_READ => {
-                // Need more data from server, extract any outgoing packets first
-                let packets = Self::drain_wbio(ssl)?;
-                if packets.is_empty() {
+                // Need more data from server
+                if outgoing_packets.is_empty() {
                     trace!("DTLS waiting for more server data");
                     Ok(None)
                 } else {
-                    trace!("DTLS handshake produced {} response packets", packets.len());
-                    Ok(Some(packets))
+                    trace!(
+                        "DTLS handshake produced {} response packets",
+                        outgoing_packets.len()
+                    );
+                    Ok(Some(outgoing_packets))
                 }
             }
             ErrorCode::WANT_WRITE => {
-                // Data ready to send
-                let packets = Self::drain_wbio(ssl)?;
-                trace!("DTLS handshake produced {} packets", packets.len());
-                Ok(Some(packets))
+                // Data ready to send (already extracted above)
+                trace!("DTLS handshake produced {} packets", outgoing_packets.len());
+                Ok(Some(outgoing_packets))
             }
-            other => Err(anyhow!("DTLS handshake failed (error {:?})", other)),
+            other => {
+                // Get detailed error information
+                let error_str = unsafe {
+                    let err = ffi::ERR_get_error();
+                    if err == 0 {
+                        // No error in queue - might be normal (e.g., need more data)
+                        // Treat like WANT_READ if we have packets to send
+                        if !outgoing_packets.is_empty() {
+                            debug!(
+                                "🔍 SSL_do_handshake needs more data, but produced {} packets - sending them",
+                                outgoing_packets.len()
+                            );
+                            return Ok(Some(outgoing_packets));
+                        }
+                        format!("No OpenSSL error details (error code {:?})", other)
+                    } else {
+                        let mut buf = vec![0u8; 256];
+                        ERR_error_string_n(err, buf.as_mut_ptr() as *mut i8, buf.len());
+                        let err_str = std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8)
+                            .to_string_lossy()
+                            .to_string();
+                        format!(
+                            "OpenSSL error: {} (code {:?}, raw: 0x{:x})",
+                            err_str, other, err
+                        )
+                    }
+                };
+                warn!("🔍 TLS/DTLS handshake error details: {}", error_str);
+
+                // Even though there's an error, we might have produced packets that need to be sent
+                // (e.g., a Finished message before encountering a decryption error on the next record)
+                if !outgoing_packets.is_empty() {
+                    warn!(
+                        "⚠️  Returning {} packets despite error - they may need to be sent",
+                        outgoing_packets.len()
+                    );
+                    Ok(Some(outgoing_packets))
+                } else {
+                    Err(anyhow!("DTLS handshake failed: {}", error_str))
+                }
+            }
         }
     }
 
@@ -203,24 +461,33 @@ impl DtlsUdpSocket {
         self.handshake_complete
     }
 
+    /// Manually mark the handshake as complete (e.g., when tunnel establishment confirms encryption is ready)
+    pub fn mark_handshake_complete(&mut self) {
+        self.handshake_complete = true;
+    }
+
     /// Encrypt plaintext payload(s) into DTLS records.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<Vec<u8>>> {
         if !self.handshake_complete {
-            return Err(anyhow!("Cannot encrypt: DTLS handshake not complete"));
+            return Err(anyhow!("Cannot encrypt: handshake not complete"));
         }
 
         if plaintext.len() > c_int::MAX as usize {
-            return Err(anyhow!("Plaintext payload too large for DTLS write"));
+            return Err(anyhow!("Plaintext payload too large for write"));
         }
 
         let ssl = self
             .ssl_conn
             .as_mut()
-            .context("DTLS session not initialized")?;
+            .context("SSL session not initialized")?;
 
-        Self::ssl_write_datagram(ssl, plaintext)
-            .with_context(|| format!("DTLS encrypt failed for {} bytes", plaintext.len()))?;
-        trace!("📤 DTLS encrypt {} bytes", plaintext.len());
+        Self::ssl_write_datagram(ssl, plaintext, self.protocol)
+            .with_context(|| format!("Encrypt failed for {} bytes", plaintext.len()))?;
+        let protocol_name = match self.protocol {
+            EncryptionProtocol::Tls => "TLS",
+            EncryptionProtocol::Dtls => "DTLS",
+        };
+        trace!("📤 {} encrypt {} bytes", protocol_name, plaintext.len());
 
         Self::drain_wbio(ssl)
     }
@@ -228,20 +495,20 @@ impl DtlsUdpSocket {
     /// Decrypt incoming DTLS record into plaintext payload(s).
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<Vec<u8>>> {
         if !self.handshake_complete {
-            return Err(anyhow!("Cannot decrypt: DTLS handshake not complete"));
+            return Err(anyhow!("Cannot decrypt: handshake not complete"));
         }
 
         if ciphertext.len() > c_int::MAX as usize {
-            return Err(anyhow!("Ciphertext payload too large for DTLS read"));
+            return Err(anyhow!("Ciphertext payload too large for read"));
         }
 
         let ssl = self
             .ssl_conn
             .as_mut()
-            .context("DTLS session not initialized")?;
+            .context("SSL session not initialized")?;
 
         Self::write_to_rbio(ssl, ciphertext)?;
-        Self::drain_plaintext(ssl)
+        Self::drain_plaintext(ssl, self.protocol)
     }
 
     #[inline]
@@ -266,7 +533,11 @@ impl DtlsUdpSocket {
         }
     }
 
-    fn ssl_write_datagram(ssl: &mut Ssl, buf: &[u8]) -> Result<usize> {
+    fn ssl_write_datagram(
+        ssl: &mut Ssl,
+        buf: &[u8],
+        protocol: EncryptionProtocol,
+    ) -> Result<usize> {
         unsafe {
             let ssl_ptr = Self::ssl_ptr(ssl);
             if buf.is_empty() {
@@ -280,12 +551,20 @@ impl DtlsUdpSocket {
                 Ok(ret as usize)
             } else {
                 let code = ErrorCode::from_raw(ffi::SSL_get_error(ssl_ptr, ret));
-                Err(anyhow!("DTLS SSL_write failed ({:?})", code))
+                let protocol_name = match protocol {
+                    EncryptionProtocol::Tls => "TLS",
+                    EncryptionProtocol::Dtls => "DTLS",
+                };
+                Err(anyhow!("{} SSL_write failed ({:?})", protocol_name, code))
             }
         }
     }
 
-    fn ssl_read_datagram(ssl: &mut Ssl, buf: &mut [u8]) -> Result<Option<usize>> {
+    fn ssl_read_datagram(
+        ssl: &mut Ssl,
+        buf: &mut [u8],
+        protocol: EncryptionProtocol,
+    ) -> Result<Option<usize>> {
         unsafe {
             let ssl_ptr = Self::ssl_ptr(ssl);
             if buf.is_empty() {
@@ -301,7 +580,33 @@ impl DtlsUdpSocket {
                 let code = ErrorCode::from_raw(ffi::SSL_get_error(ssl_ptr, ret));
                 match code {
                     ErrorCode::WANT_READ | ErrorCode::ZERO_RETURN => Ok(None),
-                    _ => Err(anyhow!("DTLS SSL_read failed ({:?})", code)),
+                    _ => {
+                        let protocol_name = match protocol {
+                            EncryptionProtocol::Tls => "TLS",
+                            EncryptionProtocol::Dtls => "DTLS",
+                        };
+
+                        // Get detailed OpenSSL error from error queue
+                        let err = ffi::ERR_get_error();
+                        let error_details = if err == 0 {
+                            format!(
+                                "{} SSL_read failed with {:?} but no OpenSSL error in queue",
+                                protocol_name, code
+                            )
+                        } else {
+                            let mut buf = vec![0u8; 256];
+                            ERR_error_string_n(err, buf.as_mut_ptr() as *mut i8, buf.len());
+                            let err_str = std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8)
+                                .to_string_lossy()
+                                .to_string();
+                            format!(
+                                "{} SSL_read failed: {} (code {:?}, raw: 0x{:x})",
+                                protocol_name, err_str, code, err
+                            )
+                        };
+
+                        Err(anyhow!("{}", error_details))
+                    }
                 }
             }
         }
@@ -330,6 +635,25 @@ impl DtlsUdpSocket {
                 }
 
                 buf.truncate(read as usize);
+
+                // Log TLS record type for debugging
+                if buf.len() >= 1 {
+                    let record_type = buf[0];
+                    let type_name = match record_type {
+                        20 => "ChangeCipherSpec",
+                        21 => "Alert",
+                        22 => "Handshake",
+                        23 => "Application Data",
+                        _ => "Unknown",
+                    };
+                    debug!(
+                        "🔍 OpenSSL produced {} byte TLS record, type={} ({})",
+                        buf.len(),
+                        record_type,
+                        type_name
+                    );
+                }
+
                 packets.push(buf);
             }
 
@@ -337,12 +661,16 @@ impl DtlsUdpSocket {
         }
     }
 
-    fn drain_plaintext(ssl: &mut Ssl) -> Result<Vec<Vec<u8>>> {
+    fn drain_plaintext(ssl: &mut Ssl, protocol: EncryptionProtocol) -> Result<Vec<Vec<u8>>> {
         let mut results = Vec::new();
         let mut buffer = vec![0u8; MAX_DTLS_RECORD_SIZE];
 
-        while let Some(len) = Self::ssl_read_datagram(ssl, &mut buffer)? {
-            trace!("📦 Decrypted DTLS payload ({} bytes)", len);
+        while let Some(len) = Self::ssl_read_datagram(ssl, &mut buffer, protocol)? {
+            let protocol_name = match protocol {
+                EncryptionProtocol::Tls => "TLS",
+                EncryptionProtocol::Dtls => "DTLS",
+            };
+            trace!("📦 Decrypted {} payload ({} bytes)", protocol_name, len);
             results.push(buffer[..len].to_vec());
         }
 
@@ -356,10 +684,28 @@ impl DtlsUdpSocket {
                 return Err(anyhow!("DTLS read BIO not present"));
             }
 
-            let written = ffi::BIO_write(rbio, data.as_ptr() as *const c_void, data.len() as c_int);
+            // BIO_write is allowed to accept fewer bytes than it was offered. Taking the return
+            // value as "done" drops the remainder, and for TLS on the reliable tunnel that is a
+            // hole in the middle of a record stream: every record from that point on fails its
+            // MAC check and the tunnel is dead. Keep writing until the whole buffer is in.
+            let mut offset = 0usize;
+            while offset < data.len() {
+                let remaining = &data[offset..];
+                let written = ffi::BIO_write(
+                    rbio,
+                    remaining.as_ptr() as *const c_void,
+                    remaining.len() as c_int,
+                );
 
-            if written <= 0 {
-                return Err(anyhow!("Failed to feed ciphertext into DTLS BIO"));
+                if written <= 0 {
+                    return Err(anyhow!(
+                        "Failed to feed ciphertext into DTLS BIO ({} of {} bytes written)",
+                        offset,
+                        data.len()
+                    ));
+                }
+
+                offset += written as usize;
             }
         }
 
@@ -383,6 +729,7 @@ mod tests {
         let config = DtlsConfig {
             server_name: "test.example.com".to_string(),
             verify_certificate: false,
+            protocol: EncryptionProtocol::Dtls,
         };
 
         let dtls = DtlsUdpSocket::new(server_addr, config);
