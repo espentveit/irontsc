@@ -14,8 +14,16 @@ use ironrdp_pdu::codecs::rfx::EntropyAlgorithm;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tracing::{debug, trace, warn};
+
+/// Whether decoded regions get a codec-coloured outline drawn around them.
+///
+/// Global because the drawing happens deep inside the decode path, where there is no settings
+/// object to consult; the connection dialog's codec grid switch sets it before a session
+/// starts, and there is only ever one session in a process.
+pub static DEBUG_CODEC_OUTLINES: AtomicBool = AtomicBool::new(false);
 
 /// Maximum surface dimension (8K resolution)
 const MAX_SURFACE_DIM: u16 = 8192;
@@ -1443,14 +1451,19 @@ impl GfxState {
     }
 
     /// Draw a debug outline rectangle around a decoded region
-    /// Controlled by RDP_DEBUG_CODEC_OUTLINES environment variable
+    ///
+    /// Enabled either by the settings' codec grid switch, through `DEBUG_CODEC_OUTLINES`, or by
+    /// the `RDP_DEBUG_CODEC_OUTLINES` environment variable for a run that never opens the
+    /// dialog.
     fn draw_debug_outline(
         surface: &mut GfxSurface,
         rect: &Rectangle,
         color: ironrdp_gfx::pdu::Color32,
     ) -> Result<()> {
         // Check if debug outlines are enabled
-        if std::env::var("RDP_DEBUG_CODEC_OUTLINES").unwrap_or_default() != "1" {
+        if !DEBUG_CODEC_OUTLINES.load(core::sync::atomic::Ordering::Relaxed)
+            && std::env::var("RDP_DEBUG_CODEC_OUTLINES").unwrap_or_default() != "1"
+        {
             return Ok(());
         }
 

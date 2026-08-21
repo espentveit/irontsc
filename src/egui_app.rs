@@ -24,6 +24,7 @@
 
 use core::num::NonZeroU32;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,7 +49,10 @@ use crate::rdp::{
     ArboardClipboardFactory, ConnectionStats, DvcPipeProxyFactory, ImageRegion, RdpClient,
     RdpEventSender, RdpInputEvent, RdpOutputEvent,
 };
-use crate::settings::RdpSettings;
+use crate::settings::{
+    ColorDepth, DEFAULT_RDP_FILE, DPI_SCALE_OPTIONS, RdpSettings, Resolution, dpi_index_from_value,
+    dpi_value_from_index,
+};
 
 /// Nearest-neighbour magnification keeps text crisp in the common case where the texture and
 /// the widget are the same size in physical pixels; linear minification stops the picture from
@@ -74,6 +78,10 @@ const SCROLL_POINTS_PER_NOTCH: f32 = 50.0;
 /// The connection form's window, in logical points so that a scaled display gets a dialog of
 /// the same apparent size. Narrow and short, in the shape mstsc uses.
 const DIALOG_SIZE: (f64, f64) = (420.0, 330.0);
+
+/// The same window with the options showing. mstsc grows its dialog rather than scrolling the
+/// options inside the small one, and so does this.
+const DIALOG_SIZE_OPTIONS: (f64, f64) = (470.0, 620.0);
 
 /// The pointer has to settle inside this band at the top of the window before the island is
 /// revealed in fullscreen.
@@ -145,6 +153,60 @@ pub struct ConnectForm {
 impl ConnectForm {
     fn is_complete(&self) -> bool {
         !self.server.trim().is_empty() && !self.username.trim().is_empty()
+    }
+}
+
+/// The tabs behind mstsc's Show Options. The set is ours rather than mstsc's -- it names what
+/// this client actually has -- but the arrangement is the same.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OptionsTab {
+    General,
+    Display,
+    Codecs,
+    Network,
+    Debug,
+}
+
+impl OptionsTab {
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Display,
+        Self::Codecs,
+        Self::Network,
+        Self::Debug,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Display => "Display",
+            Self::Codecs => "Codecs",
+            Self::Network => "Network",
+            Self::Debug => "Debug",
+        }
+    }
+}
+
+/// The connection dialog's own state: what it is showing, and which file it is editing.
+#[derive(Clone)]
+struct DialogState {
+    options_open: bool,
+    tab: OptionsTab,
+    /// The `.rdp` these settings were opened from or last saved to. `None` means the default
+    /// file, which is what mstsc's plain Save writes to.
+    file: Option<PathBuf>,
+    /// One line under the buttons saying what the last Save or Open did.
+    notice: Option<String>,
+}
+
+impl Default for DialogState {
+    fn default() -> Self {
+        Self {
+            options_open: false,
+            tab: OptionsTab::General,
+            file: None,
+            notice: None,
+        }
     }
 }
 
@@ -548,6 +610,7 @@ struct SessionApp {
     connect_error: Option<String>,
 
     island: Island,
+    dialog: DialogState,
     fullscreen: bool,
 
     proxy: Arc<Mutex<EventLoopProxy<UserEvent>>>,
@@ -578,6 +641,7 @@ impl SessionApp {
             settings,
             connect_error: None,
             island: Island::default(),
+            dialog: DialogState::default(),
             fullscreen: false,
             proxy,
             wakeup_pending,
@@ -1226,6 +1290,84 @@ impl SessionApp {
         }
     }
 
+    /// Sizes the dialog window to whichever of its two states is showing.
+    fn resize_dialog_window(&self) {
+        let Some(gl_window) = self.gl_window.as_ref() else {
+            return;
+        };
+
+        let (width, height) = if self.dialog.options_open {
+            DIALOG_SIZE_OPTIONS
+        } else {
+            DIALOG_SIZE
+        };
+
+        let _ = gl_window
+            .window()
+            .request_inner_size(winit::dpi::LogicalSize::new(width, height));
+    }
+
+    /// Folds the form's fields into the settings, which are what gets written to a `.rdp`.
+    fn store_form_in_settings(&mut self) {
+        self.settings.server = self.form.server.trim().to_owned();
+        self.settings.username = self.form.username.trim().to_owned();
+        self.settings.domain = self.form.domain.trim().to_owned();
+        self.settings.password = if self.settings.save_password {
+            self.form.password.clone()
+        } else {
+            String::new()
+        };
+    }
+
+    /// Writes the settings to `path`, or to the default file when there is none.
+    fn save_settings(&mut self, path: Option<PathBuf>) {
+        self.store_form_in_settings();
+
+        let default_path = RdpSettings::config_dir().map(|dir| dir.join(DEFAULT_RDP_FILE));
+        let target = path.or_else(|| default_path.clone());
+
+        let result = match target.as_ref() {
+            Some(path) => self.settings.save_to_file(path),
+            // No config directory to fall back on; `save_as_default` reports that itself.
+            None => self.settings.save_as_default(),
+        };
+
+        self.dialog.notice = Some(match (result, target) {
+            (Ok(()), Some(path)) => {
+                // Remember it, so a later plain Save goes back to the same file.
+                self.dialog.file = Some(path.clone());
+                format!("Saved to {}", path.display())
+            }
+            (Ok(()), None) => "Saved".to_owned(),
+            (Err(error), _) => format!("Could not save: {error}"),
+        });
+    }
+
+    /// Loads a `.rdp` into both the settings and the form fields it feeds.
+    fn open_settings(&mut self, path: &std::path::Path) {
+        match RdpSettings::load_from_file(path) {
+            Ok(settings) => {
+                self.form.server = settings.server.clone();
+                self.form.username = settings.username.clone();
+                self.form.domain = settings.domain.clone();
+                // A file that was not saved with its password has an empty one; do not leave
+                // the previous connection's password sitting in the field.
+                self.form.password = if settings.save_password {
+                    settings.password.clone()
+                } else {
+                    String::new()
+                };
+
+                self.settings = settings;
+                self.dialog.file = Some(path.to_path_buf());
+                self.dialog.notice = Some(format!("Opened {}", path.display()));
+            }
+            Err(error) => {
+                self.dialog.notice = Some(format!("Could not open {}: {error}", path.display()));
+            }
+        }
+    }
+
     /// Starts a session from the form and grows the window to fit it.
     fn connect(&mut self) {
         self.connect_error = None;
@@ -1239,16 +1381,15 @@ impl SessionApp {
         };
 
         if self.form.save {
-            self.settings.server = self.form.server.clone();
-            self.settings.username = self.form.username.clone();
-            self.settings.domain = self.form.domain.clone();
-            if self.settings.save_password {
-                self.settings.password = self.form.password.clone();
-            }
+            self.store_form_in_settings();
             if let Err(error) = self.settings.save_as_default() {
                 tracing::warn!(%error, "failed to save settings");
             }
         }
+
+        // The codec grid is read deep inside the decoder, which has no settings to consult.
+        crate::gfx::DEBUG_CODEC_OUTLINES
+            .store(self.settings.get_show_codec_grid(), Ordering::Relaxed);
 
         let (input_sender, input_receiver) = RdpInputEvent::create_channel();
         let (output_sender, output_receiver) = mpsc::unbounded_channel();
@@ -1267,11 +1408,19 @@ impl SessionApp {
         spawn_session_thread(config, input_sender.clone(), input_receiver, event_sender);
 
         // Grow the window to the session and only negotiate a desktop size once it gets there.
+        let fullscreen = self.settings.get_resolution() == Resolution::Fullscreen;
         if let Some(gl_window) = self.gl_window.as_ref() {
             let window = gl_window.window();
-            let _ = window.request_inner_size(session_size);
+            if fullscreen {
+                // The desktop size then comes from the window itself, through the resize that
+                // the first laid-out frame schedules.
+                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            } else {
+                let _ = window.request_inner_size(session_size);
+            }
             window.set_title(&format!("{} - IronTSC", self.form.server));
         }
+        self.fullscreen = fullscreen;
 
         // mstsc's connection bar names the machine; the domain only shows up in the details.
         let user = if self.form.domain.trim().is_empty() {
@@ -1297,7 +1446,9 @@ impl SessionApp {
             stats: SessionStats::new(),
             resize_deadline: Some(Instant::now() + RESIZE_DEBOUNCE),
             last_resize_sent: None,
-            pending_window_size: Some((session_size, Instant::now())),
+            // Fullscreen has no size to wait for: the compositor decides, and the window is
+            // already there.
+            pending_window_size: (!fullscreen).then_some((session_size, Instant::now())),
             shutting_down: false,
         });
     }
@@ -1324,12 +1475,9 @@ impl SessionApp {
             window.set_cursor_visible(true);
             window.set_fullscreen(None);
             self.fullscreen = false;
-            let _ = window.request_inner_size(winit::dpi::LogicalSize::new(
-                DIALOG_SIZE.0,
-                DIALOG_SIZE.1,
-            ));
             window.set_title("IronTSC");
         }
+        self.resize_dialog_window();
     }
 
     fn shutdown(&mut self) {
@@ -1411,6 +1559,8 @@ impl SessionApp {
         let island_view = self.island_view(scale_percent);
 
         let mut form = self.form.clone();
+        let mut settings = self.settings.clone();
+        let mut dialog = self.dialog.clone();
         let connect_error = self.connect_error.clone();
         let mut desktop_rect = egui::Rect::ZERO;
         let mut island_size = self.island.size;
@@ -1446,11 +1596,24 @@ impl SessionApp {
                     }
                 }
             } else {
-                show_connect_dialog(ctx, &mut form, connect_error.as_deref(), &mut actions);
+                show_connect_dialog(
+                    ctx,
+                    &mut form,
+                    &mut settings,
+                    &mut dialog,
+                    connect_error.as_deref(),
+                    &mut actions,
+                );
             }
         });
 
         self.form = form;
+        // Only while the dialog owns them: a session's frame leaves both untouched, and
+        // writing them back unconditionally would undo an Open that happened mid-session.
+        if !in_session {
+            self.settings = settings;
+            self.dialog = dialog;
+        }
         self.island.size = island_size;
 
         if in_session {
@@ -1515,6 +1678,48 @@ impl SessionApp {
             }
         }
 
+        if actions.toggle_options {
+            self.dialog.options_open = !self.dialog.options_open;
+            self.resize_dialog_window();
+        }
+
+        if actions.save_settings {
+            self.save_settings(self.dialog.file.clone());
+        }
+
+        if actions.save_settings_as {
+            let start = self
+                .dialog
+                .file
+                .clone()
+                .or_else(|| RdpSettings::config_dir().map(|dir| dir.join(DEFAULT_RDP_FILE)));
+
+            let mut picker = rfd::FileDialog::new()
+                .set_title("Save RDP File")
+                .add_filter("Remote Desktop", &["rdp"])
+                .set_file_name(DEFAULT_RDP_FILE);
+            if let Some(directory) = start.as_ref().and_then(|path| path.parent()) {
+                picker = picker.set_directory(directory);
+            }
+
+            if let Some(path) = picker.save_file() {
+                self.save_settings(Some(path));
+            }
+        }
+
+        if actions.open_settings {
+            let mut picker = rfd::FileDialog::new()
+                .set_title("Open RDP File")
+                .add_filter("Remote Desktop", &["rdp"]);
+            if let Some(directory) = RdpSettings::config_dir() {
+                picker = picker.set_directory(directory);
+            }
+
+            if let Some(path) = picker.pick_file() {
+                self.open_settings(&path);
+            }
+        }
+
         if actions.connect {
             self.connect();
         }
@@ -1541,6 +1746,10 @@ struct FrameActions {
     toggle_fullscreen: bool,
     minimize: bool,
     island_dragged: Option<f32>,
+    toggle_options: bool,
+    save_settings: bool,
+    save_settings_as: bool,
+    open_settings: bool,
 }
 
 /// Everything the island shows, owned, so the frame's UI closure borrows nothing else.
@@ -1784,93 +1993,356 @@ fn show_connection_details(ui: &mut egui::Ui, view: &IslandView) {
         });
 }
 
-/// The connection form, filling the small dialog-sized window.
+/// The connection dialog, in the shape mstsc uses: a small window with the logon fields, and
+/// Show Options to grow it into tabs. The tab set is ours -- it names what this client has --
+/// but the arrangement, the group boxes and the Save/Save As/Open row are mstsc's.
 fn show_connect_dialog(
     ctx: &egui::Context,
     form: &mut ConnectForm,
+    settings: &mut RdpSettings,
+    dialog: &mut DialogState,
     error: Option<&str>,
     actions: &mut FrameActions,
 ) {
+    let ready = form.is_complete();
+
+    // A bottom panel, so Connect stays on the window's bottom edge whether the options are
+    // showing or not, and the pages above it get whatever room is left.
+    egui::TopBottomPanel::bottom("irontsc-connect-actions")
+        .show_separator_line(false)
+        .show(ctx, |ui| {
+            ui.add_space(6.0);
+
+            if let Some(error) = error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                ui.add_space(4.0);
+            }
+            if let Some(notice) = dialog.notice.as_deref() {
+                ui.label(egui::RichText::new(notice).small().weak());
+                ui.add_space(4.0);
+            }
+
+            ui.horizontal(|ui| {
+                // Plain words rather than a chevron: egui's bundled fonts do not cover the
+                // triangle glyphs, which would simply draw as nothing.
+                let label = if dialog.options_open {
+                    "Hide Options"
+                } else {
+                    "Show Options"
+                };
+                if ui.button(label).clicked() {
+                    actions.toggle_options = true;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Connect"))
+                        .clicked()
+                    {
+                        actions.connect = true;
+                    }
+                    if ui.button("Quit").clicked() {
+                        actions.quit = true;
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+        });
+
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.add_space(6.0);
         ui.heading("Remote Desktop Connection");
         ui.add_space(8.0);
 
+        if dialog.options_open {
+            ui.horizontal(|ui| {
+                for tab in OptionsTab::ALL {
+                    ui.selectable_value(&mut dialog.tab, tab, tab.label());
+                }
+            });
+            ui.add_space(8.0);
+        }
+
         let mut submit = false;
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Collapsed, the dialog is the General page without the file buttons, which is
+                // how mstsc's small window relates to its General tab.
+                let page = if dialog.options_open {
+                    dialog.tab
+                } else {
+                    OptionsTab::General
+                };
+
+                match page {
+                    OptionsTab::General => {
+                        submit = show_logon_settings(ui, form, settings);
+                        if dialog.options_open {
+                            show_connection_settings(ui, dialog, actions);
+                        }
+                    }
+                    OptionsTab::Display => show_display_settings(ui, settings),
+                    OptionsTab::Codecs => show_codec_settings(ui, settings),
+                    OptionsTab::Network => show_network_settings(ui, settings),
+                    OptionsTab::Debug => show_debug_settings(ui, settings),
+                }
+            });
+
+        if submit && ready {
+            actions.connect = true;
+        }
+    });
+}
+
+/// A titled box, standing in for the group boxes mstsc builds its tabs from.
+fn settings_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.label(egui::RichText::new(title).strong());
+    ui.add_space(2.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        add(ui);
+    });
+    ui.add_space(10.0);
+}
+
+/// A checkbox with the explanatory line GTK's settings put under every switch.
+fn switch_row(ui: &mut egui::Ui, value: &mut bool, label: &str, description: &str) {
+    ui.checkbox(value, label);
+    // Hand-indented rather than `Ui::indent`, which draws a vertical rule down the margin and
+    // turns a page of these into a ladder.
+    ui.horizontal(|ui| {
+        ui.add_space(22.0);
+        ui.label(egui::RichText::new(description).small().weak());
+    });
+    ui.add_space(6.0);
+}
+
+/// The logon fields. Returns true when Enter was pressed in one of them.
+fn show_logon_settings(
+    ui: &mut egui::Ui,
+    form: &mut ConnectForm,
+    settings: &mut RdpSettings,
+) -> bool {
+    let mut submit = false;
+
+    settings_group(ui, "Logon settings", |ui| {
+        ui.label("Enter the name of the remote computer.");
+        ui.add_space(6.0);
 
         egui::Grid::new("irontsc-connect-grid")
             .num_columns(2)
             .spacing([8.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Computer:");
-                submit |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut form.server)
-                            .hint_text("host or host:port")
+                let mut field = |ui: &mut egui::Ui,
+                                 label: &str,
+                                 value: &mut String,
+                                 hint: &str,
+                                 password: bool| {
+                    ui.label(label);
+                    let response = ui.add(
+                        egui::TextEdit::singleline(value)
+                            .hint_text(hint)
+                            .password(password)
                             .desired_width(f32::INFINITY),
-                    )
-                    .lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.end_row();
+                    );
+                    submit |=
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.end_row();
+                };
 
-                ui.label("User name:");
-                submit |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut form.username)
-                            .desired_width(f32::INFINITY),
-                    )
-                    .lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.end_row();
-
-                ui.label("Password:");
-                submit |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut form.password)
-                            .password(true)
-                            .desired_width(f32::INFINITY),
-                    )
-                    .lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.end_row();
-
-                ui.label("Domain:");
-                submit |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut form.domain)
-                            .hint_text("optional")
-                            .desired_width(f32::INFINITY),
-                    )
-                    .lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.end_row();
+                field(
+                    ui,
+                    "Computer:",
+                    &mut form.server,
+                    "host or host:port",
+                    false,
+                );
+                field(ui, "User name:", &mut form.username, "", false);
+                field(ui, "Password:", &mut form.password, "", true);
+                field(ui, "Domain:", &mut form.domain, "optional", false);
             });
 
         ui.add_space(6.0);
-        ui.checkbox(&mut form.save, "Remember these settings");
+        ui.checkbox(&mut form.save, "Remember these settings")
+            .on_hover_text("Write the computer, user name and domain back to the settings file when you connect");
+        ui.checkbox(&mut settings.save_password, "Save password")
+            .on_hover_text("Stores the password in the .rdp file in plaintext");
+    });
 
-        if let Some(error) = error {
-            ui.add_space(6.0);
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
-        }
+    submit
+}
 
-        ui.add_space(10.0);
+/// mstsc's Connection settings group: save this connection to a file, or open a saved one.
+fn show_connection_settings(ui: &mut egui::Ui, dialog: &DialogState, actions: &mut FrameActions) {
+    settings_group(ui, "Connection settings", |ui| {
+        ui.label("Save the current connection settings to an RDP file or open a saved connection.");
+        ui.add_space(6.0);
+
         ui.horizontal(|ui| {
-            let ready = form.is_complete();
-            if ui
-                .add_enabled(ready, egui::Button::new("Connect"))
-                .clicked()
-            {
-                actions.connect = true;
+            if ui.button("Save").clicked() {
+                actions.save_settings = true;
             }
-            if ui.button("Quit").clicked() {
-                actions.quit = true;
+            if ui.button("Save As...").clicked() {
+                actions.save_settings_as = true;
             }
-
-            if submit && ready {
-                actions.connect = true;
+            if ui.button("Open...").clicked() {
+                actions.open_settings = true;
             }
         });
+
+        ui.add_space(4.0);
+        let file = dialog
+            .file
+            .as_ref()
+            .map(|file| file.display().to_string())
+            .unwrap_or_else(|| format!("the default {DEFAULT_RDP_FILE}"));
+        ui.label(
+            egui::RichText::new(format!("Save writes to {file}"))
+                .small()
+                .weak(),
+        );
+    });
+}
+
+fn show_display_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
+    settings_group(ui, "Display configuration", |ui| {
+        ui.label("Choose the size of your remote desktop:");
+        ui.add_space(4.0);
+
+        // A Small-to-Large slider over the fixed list, which is both what mstsc shows and what
+        // the GTK client did.
+        let mut index = settings.get_resolution().to_index();
+        if ui
+            .add(egui::Slider::new(&mut index, 0..=4).show_value(false))
+            .changed()
+        {
+            settings.set_resolution(Resolution::from_index(index));
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Small").small().weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new("Large").small().weak());
+            });
+        });
+
+        ui.add_space(4.0);
+        ui.label(Resolution::from_index(index).to_string());
+    });
+
+    settings_group(ui, "Colors", |ui| {
+        ui.label("Select the color depth:");
+        ui.add_space(4.0);
+
+        let mut depth = settings.get_color_depth();
+        egui::ComboBox::from_id_salt("irontsc-colors")
+            .selected_text(depth.to_string())
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for candidate in [
+                    ColorDepth::Bpp32,
+                    ColorDepth::Bpp24,
+                    ColorDepth::Bpp16,
+                    ColorDepth::Bpp15,
+                ] {
+                    ui.selectable_value(&mut depth, candidate, candidate.to_string());
+                }
+            });
+        settings.set_color_depth(depth);
+    });
+
+    settings_group(ui, "DPI scaling", |ui| {
+        ui.label("Set DPI scaling:");
+        ui.add_space(4.0);
+
+        let mut selected = dpi_index_from_value(settings.get_dpi_scaling());
+        let label = DPI_SCALE_OPTIONS
+            .get(selected as usize)
+            .map_or("Current screen", |(_, label)| *label);
+
+        egui::ComboBox::from_id_salt("irontsc-dpi")
+            .selected_text(label)
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for (index, (_, label)) in DPI_SCALE_OPTIONS.iter().enumerate() {
+                    ui.selectable_value(&mut selected, index as u32, *label);
+                }
+            });
+        settings.set_dpi_scaling(dpi_value_from_index(selected));
+    });
+}
+
+fn show_codec_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
+    settings_group(ui, "H.264 hardware acceleration", |ui| {
+        let mut enabled = settings.get_h264_hw_accel();
+        switch_row(
+            ui,
+            &mut enabled,
+            "Enable H.264 hardware acceleration",
+            "Use the GPU for H.264 decoding (may not work on all systems)",
+        );
+        settings.set_h264_hw_accel(enabled);
+    });
+
+    settings_group(ui, "Codec options", |ui| {
+        ui.label(
+            egui::RichText::new(
+                "AVC420 uses 4:2:0 chroma subsampling for partial screen updates (dirty \
+                 regions). AVC444 uses 4:4:4 full chroma for higher quality full-screen \
+                 rendering. AVC444 must be enabled on the server via group policy to be \
+                 available.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(8.0);
+
+        let mut disable_avc420 = settings.get_disable_avc420();
+        switch_row(
+            ui,
+            &mut disable_avc420,
+            "Disable H.264 AVC420",
+            "Disable the AVC420 codec (4:2:0 chroma subsampling)",
+        );
+        settings.set_disable_avc420(disable_avc420);
+
+        let mut disable_avc444 = settings.get_disable_avc444();
+        switch_row(
+            ui,
+            &mut disable_avc444,
+            "Disable H.264 AVC444",
+            "Disable the AVC444 codec (4:4:4 chroma subsampling, higher quality)",
+        );
+        settings.set_disable_avc444(disable_avc444);
+    });
+}
+
+fn show_network_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
+    settings_group(ui, "UDP transport", |ui| {
+        let mut disable_udp = settings.get_disable_udp();
+        switch_row(
+            ui,
+            &mut disable_udp,
+            "Disable UDP",
+            "Force TCP-only mode (disable UDP multitransport for graphics)",
+        );
+        settings.set_disable_udp(disable_udp);
+    });
+}
+
+fn show_debug_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
+    settings_group(ui, "Visualization", |ui| {
+        let mut show_grid = settings.get_show_codec_grid();
+        switch_row(
+            ui,
+            &mut show_grid,
+            "Show grid indicating codec in use for cell",
+            "Outline each decoded region in the colour of the codec that produced it",
+        );
+        settings.set_show_codec_grid(show_grid);
     });
 }
 
@@ -1913,6 +2385,10 @@ impl ApplicationHandler<UserEvent> for SessionApp {
         // to the session and let the window grow before it is ever painted small.
         if core::mem::take(&mut self.pending_autoconnect) {
             self.connect();
+        } else {
+            // The window is created at the collapsed size; this is what makes the dialog state
+            // rather than the constructor decide how big it actually is.
+            self.resize_dialog_window();
         }
 
         self.request_redraw();
@@ -2188,7 +2664,7 @@ pub fn build_config(form: &ConnectForm, settings: &RdpSettings) -> anyhow::Resul
             {
                 match crate::h264_codec_caps::create_bitmap_config_with_h264(
                     false,
-                    32,
+                    u32::from(settings.session_bpp),
                     settings.get_disable_avc420(),
                     settings.get_disable_avc444(),
                 ) {
