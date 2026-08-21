@@ -18,6 +18,15 @@ use crate::pdu::{CmdId, Header, Rectangle};
 
 /// A ZGFX descriptor saying the packet is one segment rather than several.
 const ZGFX_SEGMENTED_SINGLE: u8 = 0xE0;
+/// The same for a packet split across several.
+const ZGFX_SEGMENTED_MULTIPART: u8 = 0xE1;
+
+/// How much a single segment may carry.
+///
+/// Not a suggestion: a decoder sizes its history window to this, and a segment claiming more
+/// is refused outright -- which is what a full uncompressed 2560x1600 frame in one segment
+/// looks like from the other end, `zgfx_decompress failure! status: -1`.
+const MAX_SEGMENT: usize = 65535;
 
 /// The size `RDPGFX_RESET_GRAPHICS_PDU` is required to be, whatever it contains.
 const RESET_GRAPHICS_SIZE: usize = 340;
@@ -28,11 +37,35 @@ const RESET_GRAPHICS_SIZE: usize = 340;
 /// are already an encoded bitstream, and compressing an AV1 frame with the ZGFX matcher would
 /// spend CPU to make it slightly larger.
 pub fn segment(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 2);
-    out.put_u8(ZGFX_SEGMENTED_SINGLE);
-    // Segment flags. Bit 0 is "compressed"; everything else is reserved.
-    out.put_u8(0x00);
-    out.extend_from_slice(payload);
+    // The flags byte counts towards the segment, so the payload of one is a byte short of the
+    // limit.
+    const PER_SEGMENT: usize = MAX_SEGMENT - 1;
+
+    if payload.len() <= PER_SEGMENT {
+        let mut out = Vec::with_capacity(payload.len() + 2);
+        out.put_u8(ZGFX_SEGMENTED_SINGLE);
+        // Segment flags. Bit 0 is "compressed"; everything else is reserved.
+        out.put_u8(0x00);
+        out.extend_from_slice(payload);
+        return out;
+    }
+
+    let chunks = payload.chunks(PER_SEGMENT);
+    let count = chunks.len();
+
+    let mut out = Vec::with_capacity(payload.len() + count * 5 + 7);
+    out.put_u8(ZGFX_SEGMENTED_MULTIPART);
+    out.put_u16_le(count as u16);
+    // What the segments come to once decoded, which is what a decoder allocates against.
+    out.put_u32_le(payload.len() as u32);
+
+    for chunk in chunks {
+        // Each segment is sized including its own flags byte.
+        out.put_u32_le((chunk.len() + 1) as u32);
+        out.put_u8(0x00);
+        out.extend_from_slice(chunk);
+    }
+
     out
 }
 
@@ -388,5 +421,40 @@ mod tests {
 
         let out = zgfx::decompress(&framed).expect("decompress");
         assert_eq!(out, payload);
+    }
+
+    /// A frame larger than one segment is where a client stops being forgiving.
+    #[test]
+    fn a_large_payload_is_split_and_comes_back_whole() {
+        // Big enough for several segments, and patterned so a misplaced boundary shows up as
+        // a mismatch rather than as the right length of wrong bytes.
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let framed = segment(&payload);
+
+        assert_eq!(framed[0], ZGFX_SEGMENTED_MULTIPART);
+        let count = u16::from_le_bytes([framed[1], framed[2]]);
+        assert_eq!(count, 4, "200,000 bytes is four segments of 65,534");
+        assert_eq!(
+            u32::from_le_bytes([framed[3], framed[4], framed[5], framed[6]]) as usize,
+            payload.len()
+        );
+
+        let out = zgfx::decompress(&framed).expect("decompress");
+        assert_eq!(out, payload);
+    }
+
+    /// The boundary itself: exactly one segment's worth stays single.
+    #[test]
+    fn the_largest_single_segment_stays_single() {
+        let payload = vec![7u8; MAX_SEGMENT - 1];
+        let framed = segment(&payload);
+
+        assert_eq!(framed[0], ZGFX_SEGMENTED_SINGLE);
+        assert_eq!(zgfx::decompress(&framed).expect("decompress"), payload);
+
+        let payload = vec![7u8; MAX_SEGMENT];
+        let framed = segment(&payload);
+        assert_eq!(framed[0], ZGFX_SEGMENTED_MULTIPART);
+        assert_eq!(zgfx::decompress(&framed).expect("decompress"), payload);
     }
 }

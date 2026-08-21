@@ -177,6 +177,31 @@ impl dvc::DvcProcessor for BoxedProcessor {
 
 impl dvc::DvcServerProcessor for BoxedProcessor {}
 
+/// Bytes that are already in their channel's own format.
+///
+/// Everything above the channel encodes its own PDUs, so by the time data reaches the server
+/// event there is nothing left to encode -- this only carries it.
+#[derive(Debug)]
+struct RawDvcData(Vec<u8>);
+
+impl ironrdp_core::Encode for RawDvcData {
+    fn encode(&self, dst: &mut ironrdp_core::WriteCursor<'_>) -> ironrdp_core::EncodeResult<()> {
+        ironrdp_core::ensure_size!(in: dst, size: self.0.len());
+        dst.write_slice(&self.0);
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "dvc-data"
+    }
+
+    fn size(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl dvc::DvcEncode for RawDvcData {}
+
 struct DisplayControlBackend {
     display: Arc<Mutex<Box<dyn RdpServerDisplay>>>,
 }
@@ -283,6 +308,15 @@ pub enum ServerEvent {
     Rdpsnd(RdpsndServerMessage),
     SetCredentials(Credentials),
     GetLocalAddr(oneshot::Sender<Option<SocketAddr>>),
+    /// Raw bytes for a dynamic channel, which is how a server pushes on one unprompted.
+    ///
+    /// Dynamic channels otherwise only speak when spoken to: a processor returns messages in
+    /// reply to what the client sent. A graphics pipeline is the other way round -- the server
+    /// drives, and frames arrive when the screen changes rather than when the client asks.
+    DvcData {
+        channel: String,
+        data: Vec<u8>,
+    },
 }
 
 pub trait ServerEventSender {
@@ -578,6 +612,33 @@ impl RdpServer {
                 }
                 ServerEvent::SetCredentials(creds) => {
                     self.set_credentials(Some(creds));
+                }
+                ServerEvent::DvcData { channel, data } => {
+                    let Some(dvc) = self.get_svc_processor::<dvc::DrdynvcServer>() else {
+                        warn!("No dynamic channel support, dropping event");
+                        continue;
+                    };
+
+                    let Some(channel_id) = dvc.open_channel_id(&channel) else {
+                        // Normal early on: the client opens the channel when it is ready, and
+                        // anything produced before that has nowhere to go.
+                        debug!(channel, "Dynamic channel not open yet, dropping data");
+                        continue;
+                    };
+
+                    let messages = dvc::encode_dvc_messages(
+                        channel_id,
+                        vec![Box::new(RawDvcData(data))],
+                        ironrdp_svc::ChannelFlags::empty(),
+                    )
+                    .context("failed to encode dynamic channel data")?;
+
+                    let svc_channel_id = self
+                        .get_channel_id_by_type::<dvc::DrdynvcServer>()
+                        .ok_or_else(|| anyhow!("SVC channel not found"))?;
+                    let encoded =
+                        server_encode_svc_messages(messages, svc_channel_id, user_channel_id)?;
+                    writer.write_all(&encoded).await?;
                 }
                 ServerEvent::Rdpsnd(s) => {
                     let Some(rdpsnd) = self.get_svc_processor::<RdpsndServer>() else {
