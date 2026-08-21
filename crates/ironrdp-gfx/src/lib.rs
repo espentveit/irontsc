@@ -50,6 +50,7 @@ pub mod caps;
 pub mod client;
 pub mod codec;
 pub mod pdu;
+pub mod server;
 
 pub use client::{GfxClient, GfxContext};
 pub use codec::*;
