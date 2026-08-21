@@ -16,6 +16,7 @@ mod core_input_channel;
 mod dtls_udp;
 mod gfx;
 mod gfx_channel;
+mod gl_surface;
 mod h264_codec_caps;
 mod mouse_cursor_channel;
 mod rdp;
@@ -850,7 +851,7 @@ impl RdpSettings {
 #[derive(Clone)]
 struct GtkRdpWidget {
     root: gtk::Overlay,
-    picture: gtk::Picture,
+    surface: gl_surface::GlSurface,
     placeholder_label: gtk::Label,
     size_probe: gtk::DrawingArea,
     buffer_size: Rc<RefCell<(u16, u16)>>,
@@ -864,10 +865,7 @@ struct GtkRdpWidget {
 
 impl GtkRdpWidget {
     fn new(input_event_sender: mpsc::UnboundedSender<RdpInputEvent>) -> Self {
-        let picture = gtk::Picture::new();
-        picture.set_hexpand(true);
-        picture.set_vexpand(true);
-        picture.set_content_fit(gtk::ContentFit::Fill);
+        let surface = gl_surface::GlSurface::new();
 
         let placeholder_label = gtk::Label::new(Some("Connecting to RDP server..."));
         placeholder_label.set_halign(gtk::Align::Center);
@@ -888,7 +886,7 @@ impl GtkRdpWidget {
         root.set_vexpand(true);
         root.set_can_focus(true);
         root.set_focusable(true);
-        root.set_child(Some(&picture));
+        root.set_child(Some(surface.widget()));
         root.add_overlay(&placeholder_label);
         root.add_overlay(&size_probe);
 
@@ -902,7 +900,7 @@ impl GtkRdpWidget {
 
         let widget = Self {
             root: root.clone(),
-            picture: picture.clone(),
+            surface: surface.clone(),
             placeholder_label: placeholder_label.clone(),
             size_probe: size_probe.clone(),
             buffer_size: buffer_size.clone(),
@@ -1303,9 +1301,7 @@ impl GtkRdpWidget {
         );
 
         if width == 0 || height == 0 {
-            self.cancel_pending_upload();
-            self.picture
-                .set_paintable(Option::<&gtk::gdk::Texture>::None);
+            self.surface.clear();
             self.placeholder_label.set_visible(true);
             *self.buffer_size.borrow_mut() = (0, 0);
             if let Ok(mut state) = self.framebuffer.lock() {
@@ -1318,6 +1314,9 @@ impl GtkRdpWidget {
         let stride = width as usize * 4;
         let frame_len = stride * height as usize;
 
+        let mut full_frame = false;
+        let mut damage: Option<(u32, u32, u32, u32, Vec<u8>)> = None;
+
         {
             let mut state = self.framebuffer.lock().expect("framebuffer mutex poisoned");
 
@@ -1325,57 +1324,18 @@ impl GtkRdpWidget {
                 None => {
                     debug_assert_eq!(buffer.len(), frame_len);
 
-                    state.frame = buffer.clone();
-                    // A full frame replaces everything, so the spare is now stale by the entire
-                    // image rather than by the few regions recorded in `deferred`. Replaying
-                    // those onto it would leave the rest of the buffer showing an older frame,
-                    // so drop it and let it be reseeded from the new contents.
-                    state.spare = None;
-                    state.deferred.clear();
-                    state.staging = Some(buffer);
-                    state.staging_ready = true;
+                    state.frame = buffer;
                     state.frame_version = state.frame_version.wrapping_add(1);
+                    full_frame = true;
                 }
                 Some(region) => {
                     if state.frame.len() != frame_len {
                         state.frame = Arc::new(vec![0; frame_len]);
-                        state.spare = None;
-                        state.deferred.clear();
                     }
 
-                    state.staging = None;
-                    state.staging_ready = false;
-
-                    // The texture handed to GTK last frame still references this buffer, so
-                    // compositing in place would make Arc::make_mut clone the whole framebuffer
-                    // -- megabytes every frame, even on an idle desktop. Rotate onto the spare
-                    // and replay only the regions it missed instead.
-                    if Arc::strong_count(&state.frame) > 1 {
-                        match state.spare.take() {
-                            Some(spare)
-                                if Arc::strong_count(&spare) == 1 && spare.len() == frame_len =>
-                            {
-                                let presented = std::mem::replace(&mut state.frame, spare);
-                                state.spare = Some(presented);
-                                let deferred = std::mem::take(&mut state.deferred);
-                                let target = Arc::make_mut(&mut state.frame);
-                                for write in &deferred {
-                                    blit_region(target, stride, write);
-                                }
-                            }
-                            existing => {
-                                // No spare yet, or it is still being read. Seed one from the
-                                // current contents so later frames can rotate; this costs a
-                                // single copy rather than one per frame.
-                                state.spare = existing
-                                    .or_else(|| Some(Arc::new(state.frame.as_ref().clone())));
-                                state.deferred.clear();
-                            }
-                        }
-                    }
-
+                    // Nothing else holds the framebuffer now that the GPU keeps its own copy,
+                    // so this writes in place instead of cloning megabytes per frame.
                     let frame_vec = Arc::make_mut(&mut state.frame);
-
                     if frame_vec.len() != frame_len {
                         frame_vec.resize(frame_len, 0);
                     }
@@ -1395,84 +1355,37 @@ impl GtkRdpWidget {
                             .copy_from_slice(&buffer[src_offset..src_offset + bytes_per_row]);
                     }
 
-                    if state.spare.is_some() {
-                        state.deferred.push(DeferredWrite {
-                            x: usize::from(region.x),
-                            y: usize::from(region.y),
-                            width: region_width,
-                            height: region_height,
-                            pixels: buffer.clone(),
-                        });
-                        // Past a certain backlog a full resync is cheaper than replaying, so
-                        // drop the spare and let it be reseeded.
-                        if state.deferred.len() > 64 {
-                            state.spare = None;
-                            state.deferred.clear();
-                        }
-                    }
-
                     state.frame_version = state.frame_version.wrapping_add(1);
+                    damage = Some((
+                        u32::from(region.x),
+                        u32::from(region.y),
+                        region_width as u32,
+                        region_height as u32,
+                        buffer.as_ref().clone(),
+                    ));
                 }
             }
         }
 
-        self.schedule_upload(width, height);
+        self.surface.resize(u32::from(width), u32::from(height));
+
+        if full_frame {
+            let frame = self
+                .framebuffer
+                .lock()
+                .expect("framebuffer mutex poisoned")
+                .frame
+                .as_ref()
+                .clone();
+            self.surface
+                .update_region(0, 0, u32::from(width), u32::from(height), frame);
+        } else if let Some((x, y, region_width, region_height, pixels)) = damage {
+            self.surface
+                .update_region(x, y, region_width, region_height, pixels);
+        }
+
         self.placeholder_label.set_visible(false);
         *self.buffer_size.borrow_mut() = (width, height);
-    }
-
-    fn schedule_upload(&self, width: u16, height: u16) {
-        // Upload immediately to avoid frame skipping during fast updates
-        self.upload_framebuffer(width, height);
-        self.root.queue_draw();
-    }
-
-    fn cancel_pending_upload(&self) {
-        if let Some(source) = self.upload_source.borrow_mut().take() {
-            source.remove();
-        }
-        self.pending_upload.borrow_mut().take();
-    }
-
-    fn upload_framebuffer(&self, width: u16, height: u16) {
-        tracing::debug!("🖼️ upload_framebuffer called: {}x{}", width, height);
-
-        let stride = width as usize * 4;
-        let frame_len = stride * height as usize;
-        let bytes = {
-            let mut state = self.framebuffer.lock().expect("framebuffer mutex poisoned");
-
-            if state.frame.len() != frame_len {
-                state.frame = Arc::new(vec![0; frame_len]);
-                state.staging_ready = false;
-            }
-
-            if !state.staging_ready
-                || state
-                    .staging
-                    .as_ref()
-                    .map(|arc| arc.len() != frame_len)
-                    .unwrap_or(true)
-            {
-                state.staging = Some(state.frame.clone());
-                state.staging_ready = true;
-            }
-
-            let staging_arc = state.staging.as_ref().unwrap().clone();
-
-            gtk::glib::Bytes::from_owned(FrameBytes::new(staging_arc))
-        };
-
-        let texture = gtk::gdk::MemoryTexture::new(
-            width as i32,
-            height as i32,
-            gtk::gdk::MemoryFormat::B8g8r8a8, // Native BGRA format - no conversion needed!
-            &bytes,
-            stride,
-        );
-
-        self.picture.set_paintable(Some(&texture));
-        tracing::debug!("✅ Texture uploaded and set on picture widget");
     }
 
     fn surface_fractional_scale(surface: &gdk::Surface) -> f64 {
@@ -1579,21 +1492,12 @@ fn blit_region(dst: &mut [u8], stride: usize, write: &DeferredWrite) {
 struct FrameState {
     frame: Arc<Vec<u8>>,
     /// A second framebuffer to composite into while a live texture is still reading the other.
-    spare: Option<Arc<Vec<u8>>>,
-    /// Writes applied to `frame` that `spare` has not received yet.
-    deferred: Vec<DeferredWrite>,
-    staging: Option<Arc<Vec<u8>>>,
-    staging_ready: bool,
     frame_version: u64,
 }
 
 impl FrameState {
     fn clear(&mut self) {
         self.frame = Arc::new(Vec::new());
-        self.spare = None;
-        self.deferred.clear();
-        self.staging = None;
-        self.staging_ready = false;
         self.frame_version = 0;
     }
 }
@@ -1602,10 +1506,6 @@ impl Default for FrameState {
     fn default() -> Self {
         Self {
             frame: Arc::new(Vec::new()),
-            spare: None,
-            deferred: Vec::new(),
-            staging: None,
-            staging_ready: false,
             frame_version: 0,
         }
     }
