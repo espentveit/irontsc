@@ -2451,6 +2451,12 @@ async fn active_session<T: RdpEventSender + Clone>(
                             }
                         }
                     }
+                    Some(UdpTransportEvent::RoundTrip { micros, .. }) => {
+                        // The server here has network characteristics detection switched off, so
+                        // the auto-detect RTT never arrives. The tunnel's own acknowledgements
+                        // give a real measurement instead.
+                        last_rtt_ms = Some((micros as f64 / 1000.0).round() as u32);
+                    }
                     Some(UdpTransportEvent::DataReceived { request_id, data }) => {
                         debug!("📦 Received UDP data from tunnel request_id={} ({} bytes)", request_id, data.len());
                         use crate::gfx_channel::GfxDvcProcessor;

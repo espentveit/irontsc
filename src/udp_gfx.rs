@@ -45,6 +45,8 @@ impl UdpGfxChannel {
 
         while let Some(event) = self.transport_rx.recv().await {
             match event {
+                // Round trip reports are for the status display and mean nothing here.
+                UdpTransportEvent::RoundTrip { .. } => {}
                 UdpTransportEvent::Connected { request_id } => {
                     info!("✅ UDP connection established (request_id={})", request_id);
                     self.connected = true;
@@ -102,6 +104,7 @@ impl UdpGfxChannel {
     /// Receive data from UDP transport (non-blocking)
     pub fn try_recv_data(&mut self) -> Option<Vec<u8>> {
         match self.transport_rx.try_recv() {
+            Ok(UdpTransportEvent::RoundTrip { .. }) => None,
             Ok(UdpTransportEvent::DataReceived { data, .. }) => Some(data),
             Ok(UdpTransportEvent::Disconnected { reason, .. }) => {
                 warn!("UDP disconnected: {}", reason);
