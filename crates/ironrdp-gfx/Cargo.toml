@@ -13,6 +13,8 @@ thiserror = "1.0"
 tracing = "0.1"
 
 [dev-dependencies]
+# The framing this crate writes has to be the framing it reads, and the reader lives there.
+zgfx = { path = "../zgfx" }
 
 [features]
 default = []
