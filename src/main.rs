@@ -536,7 +536,9 @@ impl Default for RdpSettings {
             session_bpp: 32,
             full_screen: false,
             dpi_scaling: None,
-            h264_hw_accel: false, // Default to software decoding for compatibility
+            // The decoder tries each hardware backend in turn and falls back to software if
+            // none initialise, so defaulting this on costs nothing where it is unavailable.
+            h264_hw_accel: true,
             disable_avc420: false,
             disable_avc444: false,
             disable_udp: false,
@@ -571,13 +573,20 @@ impl RdpSettings {
                 continue;
             }
 
-            let parts: Vec<&str> = line.splitn(3, ':').collect();
-            if parts.len() < 3 {
+            // An .rdp line is `name:type:value`, and both halves may contain colons: the name
+            // does for our own `irontsc:` settings, and the value does for `full address` with
+            // a port. Splitting on the first two colons mis-parses the former and splitting on
+            // the last two mis-parses the latter, so split at the first type marker instead.
+            let Some((separator, marker_len)) = [":i:", ":s:", ":b:"]
+                .iter()
+                .filter_map(|marker| line.find(marker).map(|at| (at, marker.len())))
+                .min_by_key(|(at, _)| *at)
+            else {
                 continue;
-            }
+            };
 
-            let key = parts[0];
-            let value = parts[2];
+            let key = &line[..separator];
+            let value = &line[separator + marker_len..];
 
             match key {
                 "full address" => settings.server = value.to_string(),
@@ -1317,6 +1326,12 @@ impl GtkRdpWidget {
                     debug_assert_eq!(buffer.len(), frame_len);
 
                     state.frame = buffer.clone();
+                    // A full frame replaces everything, so the spare is now stale by the entire
+                    // image rather than by the few regions recorded in `deferred`. Replaying
+                    // those onto it would leave the rest of the buffer showing an older frame,
+                    // so drop it and let it be reseeded from the new contents.
+                    state.spare = None;
+                    state.deferred.clear();
                     state.staging = Some(buffer);
                     state.staging_ready = true;
                     state.frame_version = state.frame_version.wrapping_add(1);
@@ -1324,10 +1339,40 @@ impl GtkRdpWidget {
                 Some(region) => {
                     if state.frame.len() != frame_len {
                         state.frame = Arc::new(vec![0; frame_len]);
+                        state.spare = None;
+                        state.deferred.clear();
                     }
 
                     state.staging = None;
                     state.staging_ready = false;
+
+                    // The texture handed to GTK last frame still references this buffer, so
+                    // compositing in place would make Arc::make_mut clone the whole framebuffer
+                    // -- megabytes every frame, even on an idle desktop. Rotate onto the spare
+                    // and replay only the regions it missed instead.
+                    if Arc::strong_count(&state.frame) > 1 {
+                        match state.spare.take() {
+                            Some(spare)
+                                if Arc::strong_count(&spare) == 1 && spare.len() == frame_len =>
+                            {
+                                let presented = std::mem::replace(&mut state.frame, spare);
+                                state.spare = Some(presented);
+                                let deferred = std::mem::take(&mut state.deferred);
+                                let target = Arc::make_mut(&mut state.frame);
+                                for write in &deferred {
+                                    blit_region(target, stride, write);
+                                }
+                            }
+                            existing => {
+                                // No spare yet, or it is still being read. Seed one from the
+                                // current contents so later frames can rotate; this costs a
+                                // single copy rather than one per frame.
+                                state.spare = existing
+                                    .or_else(|| Some(Arc::new(state.frame.as_ref().clone())));
+                                state.deferred.clear();
+                            }
+                        }
+                    }
 
                     let frame_vec = Arc::make_mut(&mut state.frame);
 
@@ -1348,6 +1393,22 @@ impl GtkRdpWidget {
 
                         frame_vec[dst_offset..dst_offset + bytes_per_row]
                             .copy_from_slice(&buffer[src_offset..src_offset + bytes_per_row]);
+                    }
+
+                    if state.spare.is_some() {
+                        state.deferred.push(DeferredWrite {
+                            x: usize::from(region.x),
+                            y: usize::from(region.y),
+                            width: region_width,
+                            height: region_height,
+                            pixels: buffer.clone(),
+                        });
+                        // Past a certain backlog a full resync is cheaper than replaying, so
+                        // drop the spare and let it be reseeded.
+                        if state.deferred.len() > 64 {
+                            state.spare = None;
+                            state.deferred.clear();
+                        }
                     }
 
                     state.frame_version = state.frame_version.wrapping_add(1);
@@ -1492,8 +1553,35 @@ impl GtkRdpWidget {
     }
 }
 
+/// A region write that has been applied to one framebuffer but not yet to the other.
+struct DeferredWrite {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    pixels: Arc<Vec<u8>>,
+}
+
+/// Copies one region write into `dst`, which is laid out with `stride` bytes per row.
+fn blit_region(dst: &mut [u8], stride: usize, write: &DeferredWrite) {
+    let bytes_per_row = write.width * 4;
+    for row in 0..write.height {
+        let src_offset = row * bytes_per_row;
+        let dst_offset = (write.y + row) * stride + write.x * 4;
+        if dst_offset + bytes_per_row <= dst.len() && src_offset + bytes_per_row <= write.pixels.len()
+        {
+            dst[dst_offset..dst_offset + bytes_per_row]
+                .copy_from_slice(&write.pixels[src_offset..src_offset + bytes_per_row]);
+        }
+    }
+}
+
 struct FrameState {
     frame: Arc<Vec<u8>>,
+    /// A second framebuffer to composite into while a live texture is still reading the other.
+    spare: Option<Arc<Vec<u8>>>,
+    /// Writes applied to `frame` that `spare` has not received yet.
+    deferred: Vec<DeferredWrite>,
     staging: Option<Arc<Vec<u8>>>,
     staging_ready: bool,
     frame_version: u64,
@@ -1502,6 +1590,8 @@ struct FrameState {
 impl FrameState {
     fn clear(&mut self) {
         self.frame = Arc::new(Vec::new());
+        self.spare = None;
+        self.deferred.clear();
         self.staging = None;
         self.staging_ready = false;
         self.frame_version = 0;
@@ -1512,6 +1602,8 @@ impl Default for FrameState {
     fn default() -> Self {
         Self {
             frame: Arc::new(Vec::new()),
+            spare: None,
+            deferred: Vec::new(),
             staging: None,
             staging_ready: false,
             frame_version: 0,
@@ -1686,11 +1778,12 @@ fn create_remote_desktop_window(
     // Give the floating controls a defined edge so they read as a distinct surface instead of
     // blending into whatever the remote desktop is showing behind them.
     let island_css = gtk::CssProvider::new();
+    // Deliberately minimal: a shadow here has to be recomposited against whatever the remote
+    // desktop is drawing underneath, which glitches while the controls fade in and out.
     island_css.load_from_string(
         ".session-island {\
              border: 1px solid alpha(#ffffff, 0.22);\
              border-radius: 14px;\
-             box-shadow: 0 2px 6px alpha(#000000, 0.35);\
          }",
     );
     if let Some(display) = gdk::Display::default() {
