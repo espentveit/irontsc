@@ -290,24 +290,38 @@ impl<'de> Decode<'de> for ClientInfo {
             CharacterSet::Ansi
         };
 
-        let read_lp = |src: &mut ReadCursor<'_>, cs: CharacterSet| -> DecodeResult<String> {
-            let with_nt = usize::from(src.read_u16()) + cs.unit_bytes();
+        // All five lengths come first and only then the five strings -- [MS-RDPBCGR]
+        // 2.2.1.11.1.1. Reading them interleaved, a length followed by its own string, walks
+        // off the end of the field and turns whatever follows into nonsense lengths; it went
+        // unnoticed because this crate has only ever been used to encode this PDU, never to
+        // decode one.
+        let lengths = [
+            src.read_u16(),
+            src.read_u16(),
+            src.read_u16(),
+            src.read_u16(),
+            src.read_u16(),
+        ];
+
+        let read = |src: &mut ReadCursor<'_>, length: u16| -> DecodeResult<String> {
+            // The lengths on the wire exclude the terminator; the strings include it.
+            let with_nt = usize::from(length) + cs.unit_bytes();
             ensure_size!(in: src, size: with_nt);
             utils::decode_string(src.read_slice(with_nt), cs, true)
         };
 
         let domain = {
-            let s = read_lp(src, cs)?;
-            if s.is_empty() {
+            let domain = read(src, lengths[0])?;
+            if domain.is_empty() {
                 None
             } else {
-                Some(s)
+                Some(domain)
             }
         };
-        let username = read_lp(src, cs)?;
-        let password = read_lp(src, cs)?;
-        let alternate_shell = read_lp(src, cs)?;
-        let work_dir = read_lp(src, cs)?;
+        let username = read(src, lengths[1])?;
+        let password = read(src, lengths[2])?;
+        let alternate_shell = read(src, lengths[3])?;
+        let work_dir = read(src, lengths[4])?;
 
         let credentials = Credentials {
             username,
