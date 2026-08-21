@@ -2554,7 +2554,7 @@ impl ApplicationHandler<UserEvent> for SessionApp {
 ///
 /// The framebuffer the session produces is BGRA with an alpha byte that is not always
 /// meaningful, so the channels are swapped here and the desktop is forced opaque.
-fn bgra_to_color_image(width: usize, height: usize, bgra: &[u8]) -> egui::ColorImage {
+pub fn bgra_to_color_image(width: usize, height: usize, bgra: &[u8]) -> egui::ColorImage {
     let mut pixels = Vec::with_capacity(width * height);
 
     for pixel in bgra.chunks_exact(4).take(width * height) {
@@ -2569,14 +2569,19 @@ fn bgra_to_color_image(width: usize, height: usize, bgra: &[u8]) -> egui::ColorI
     }
 }
 
-/// Runs the RDP client on its own thread with its own Tokio runtime, exactly as the GTK
-/// frontend does; the two only ever meet through the channels.
-fn spawn_session_thread(
+/// Runs a session on its own thread with its own Tokio runtime; the two only ever meet
+/// through the channels.
+///
+/// Generic over the sender so that a shell with more than one session can tag events with
+/// whichever one produced them.
+pub fn spawn_session_thread<S>(
     config: Config,
     input_sender: mpsc::UnboundedSender<RdpInputEvent>,
     input_receiver: mpsc::UnboundedReceiver<RdpInputEvent>,
-    event_sender: SessionEventSender,
-) {
+    event_sender: S,
+) where
+    S: RdpEventSender + Clone + Send + 'static,
+{
     let spawned = std::thread::Builder::new()
         .name("rdp-session".to_owned())
         .spawn(move || {

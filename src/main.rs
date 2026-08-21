@@ -8,40 +8,13 @@
 //! The protocol layers below are frontend-agnostic and talk over `RdpInputEvent` and
 //! `RdpOutputEvent` channels.
 
-// Every module here is the same file the GTK binary compiles; `#[path]` keeps them shared
-// without turning the crate into a library, which would mean touching the working client.
-mod config;
-mod core_input_channel;
-mod dtls_udp;
-mod gfx;
-mod gfx_channel;
-mod h264_codec_caps;
-mod mouse_cursor_channel;
-mod rdp;
-mod stub_dvc;
-mod transport_rules;
-mod udp_gfx;
-mod udp_transport;
-
-#[cfg(feature = "video-redirection")]
-mod geometry_channel;
-#[cfg(feature = "video-redirection")]
-mod video_control_channel;
-#[cfg(feature = "video-redirection")]
-mod video_data_channel;
-#[cfg(feature = "video-redirection")]
-mod video_redirect;
-
-// The egui shell itself.
-mod egui_app;
-mod egui_scancode;
-mod egui_shortcuts;
-mod settings;
+// The client itself lives in the library next door, so that the tabbed shell can be built on
+// the same code rather than compiling these files a second time.
 
 use clap::Parser;
 
-use crate::egui_app::ConnectForm;
-use crate::settings::RdpSettings;
+use irontsc::egui_app::{self, ConnectForm};
+use irontsc::settings::RdpSettings;
 
 /// IronTSC.
 ///
