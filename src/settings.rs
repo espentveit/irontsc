@@ -200,6 +200,11 @@ pub struct RdpSettings {
     pub disable_udp: bool,
     #[serde(default)]
     pub show_codec_grid: bool,
+    /// Connect without CredSSP, which is the only way to reach a server that authenticates
+    /// against its host: NLA requires the server to know the password in advance, so a server
+    /// verifying credentials itself has to be spoken to under plain TLS.
+    #[serde(default)]
+    pub disable_nla: bool,
 }
 
 fn default_width() -> u16 {
@@ -232,6 +237,7 @@ impl Default for RdpSettings {
             disable_avc444: false,
             disable_udp: false,
             show_codec_grid: false,
+            disable_nla: false,
         }
     }
 }

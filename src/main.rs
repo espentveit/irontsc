@@ -44,6 +44,10 @@ struct Args {
     #[arg(long)]
     autologon: bool,
 
+    /// Connect without CredSSP, for a server that checks credentials itself.
+    #[arg(long)]
+    no_nla: bool,
+
     /// A `.rdp` file to load the settings from, the way `mstsc file.rdp` does.
     file: Option<std::path::PathBuf>,
 }
@@ -66,6 +70,11 @@ fn main() -> anyhow::Result<()> {
             .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?,
         None => RdpSettings::load_default(),
     };
+
+    let mut settings = settings;
+    if args.no_nla {
+        settings.disable_nla = true;
+    }
 
     let form = ConnectForm {
         server: args.computer.clone().unwrap_or_else(|| settings.server.clone()),
