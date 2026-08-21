@@ -70,6 +70,9 @@ struct Args {
     /// Connect immediately instead of showing the dialog.
     #[arg(long)]
     autologon: bool,
+
+    /// A `.rdp` file to load the settings from, the way `mstsc file.rdp` does.
+    file: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,8 +87,12 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    // The same file the GTK client reads and writes, so the two agree on defaults.
-    let settings = RdpSettings::load_default();
+    // A named `.rdp` wins over the default one, which is what mstsc does with a file argument.
+    let settings = match args.file.as_deref() {
+        Some(path) => RdpSettings::load_from_file(path)
+            .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?,
+        None => RdpSettings::load_default(),
+    };
 
     let form = ConnectForm {
         server: args.computer.clone().unwrap_or_else(|| settings.server.clone()),

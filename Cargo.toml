@@ -231,6 +231,11 @@ egui-winit = "0.31"
 winit = "0.30"
 glutin = "0.32"
 glutin-winit = "0.5"
+# Native file picker for Open/Save of .rdp files. The xdg-portal backend goes through
+# xdg-desktop-portal over D-Bus, so the dialog is the desktop's own without linking GTK back
+# in; the blocking API is fine because the picker only ever opens from the connection dialog,
+# where no session is running to keep alive.
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
 # System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
 # winit has no API for this, so it is done against the display server directly: the Wayland
