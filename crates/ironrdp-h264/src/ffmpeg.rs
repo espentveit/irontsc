@@ -175,15 +175,22 @@ impl HardwareContext {
             let has_display = env::var_os("DISPLAY").is_some();
             let mut result = Vec::new();
 
+            // Try the render node first, and regardless of DISPLAY. Opening VAAPI through the
+            // display connection needs a real X server; under Wayland, XWayland still sets
+            // DISPLAY while that connection fails, so making the render node the `else` branch
+            // put hardware decoding out of reach on exactly the systems that have a working
+            // driver installed.
+            if let Some(render_node) = HardwareContext::find_render_node() {
+                result.push(DeviceCandidate {
+                    device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                    device: Some(render_node),
+                });
+            }
+
             if has_display {
                 result.push(DeviceCandidate {
                     device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
                     device: None,
-                });
-            } else if let Some(render_node) = HardwareContext::find_render_node() {
-                result.push(DeviceCandidate {
-                    device_type: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                    device: Some(render_node),
                 });
             }
 
@@ -776,6 +783,17 @@ impl FfmpegDecoder {
             );
         } else if enable_hw_accel {
             debug!("Hardware acceleration requested but not available; using software decoding");
+        }
+
+        // Frame-level threading holds finished frames back so several can be decoded in
+        // parallel, which costs up to `threads - 1` frames of latency. That is a fine trade for
+        // file playback and a bad one for a remote desktop, where every frame is a response to
+        // something the user just did. Decode with slice threading and ask for low delay so a
+        // frame comes out as soon as it is complete.
+        unsafe {
+            let raw = context.as_mut_ptr();
+            (*raw).thread_type = ffmpeg::ffi::FF_THREAD_SLICE as i32;
+            (*raw).flags |= ffmpeg::ffi::AV_CODEC_FLAG_LOW_DELAY as i32;
         }
 
         // Create decoder context from codec
