@@ -229,6 +229,8 @@ pub struct UdpConnection {
 
     pending_ack: Option<PendingAck>,
 
+    /// Smoothed round trip time, sampled from acknowledgements of our own data packets.
+    smoothed_rtt: Option<Duration>,
     /// Reference point for the 24-bit, 4-microsecond ACK timestamps of [MS-RDPEUDP2] 3.1.1.1.4.
     epoch: Instant,
     /// Arrival time of the most recent DATA packet, for SendAckTimeGapInMs.
@@ -268,6 +270,7 @@ impl UdpConnection {
             source_block: Vec::new(),
             fec_index: 0,
             pending_ack: None,
+            smoothed_rtt: None,
             epoch: now,
             last_data_arrival: None,
             last_activity: now,
@@ -1175,6 +1178,36 @@ impl UdpConnection {
         });
     }
 
+    /// Round trip time as most recently measured, if any has been.
+    pub fn smoothed_rtt(&self) -> Option<Duration> {
+        self.smoothed_rtt
+    }
+
+    /// Takes a round trip sample from an acknowledged packet.
+    ///
+    /// Retransmitted packets are skipped: there is no way to tell which transmission the
+    /// acknowledgement refers to, so sampling them would corrupt the estimate (Karn's
+    /// algorithm). Samples are smoothed the usual way, 7/8 old to 1/8 new.
+    fn sample_rtt(&mut self, sequence: u16) {
+        let Some(pending) = self.pending_packets.get(&PendingKey::V3(sequence)) else {
+            return;
+        };
+        if pending.retransmit_count > 0 {
+            return;
+        }
+
+        let sample = Instant::now().duration_since(pending.last_sent);
+        self.smoothed_rtt = Some(match self.smoothed_rtt {
+            Some(previous) => (previous * 7 + sample) / 8,
+            None => sample,
+        });
+        debug!(
+            "📶 V3 RTT sample {:.1}ms from seq={sequence}, smoothed {:.1}ms",
+            sample.as_secs_f64() * 1000.0,
+            self.smoothed_rtt.unwrap_or_default().as_secs_f64() * 1000.0
+        );
+    }
+
     fn update_remote_ack_v3(&mut self, ack_sequence: u16) {
         if self
             .v3_remote_acked
@@ -1182,6 +1215,7 @@ impl UdpConnection {
         {
             return;
         }
+        self.sample_rtt(ack_sequence);
         self.v3_remote_acked = Some(ack_sequence);
         // Comparisons have to wrap: once the 16-bit space rolls over, a plain `>` keeps every
         // outstanding packet forever and turns into a retransmit storm.

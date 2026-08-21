@@ -103,6 +103,8 @@ pub enum UdpTransportEvent {
     DataReceived { request_id: u32, data: Vec<u8> },
     /// Connection lost (includes request_id to identify which tunnel)
     Disconnected { request_id: u32, reason: String },
+    /// Round trip time measured from acknowledgements of our own packets.
+    RoundTrip { request_id: u32, micros: u64 },
 }
 
 /// UDP Transport Manager
@@ -543,7 +545,16 @@ impl UdpTransportManager {
                         None
                     };
                     let terminated = conn.state() == ConnectionState::Terminated;
+                    let rtt = conn.smoothed_rtt();
                     drop(conn);
+
+                    if let Some(rtt) = rtt {
+                        let request_id = self.request_id.unwrap_or(0);
+                        let _ = self.event_tx.send(UdpTransportEvent::RoundTrip {
+                            request_id,
+                            micros: rtt.as_micros().min(u128::from(u64::MAX)) as u64,
+                        });
+                    }
 
                     for packet in retransmits {
                         match self.send_over_udp(&packet).await {
