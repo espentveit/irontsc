@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context as _, Result};
-use ironrdp_acceptor::{Acceptor, AcceptorResult, BeginResult, DesktopSize};
+use ironrdp_acceptor::{Acceptor, AcceptorResult, BeginResult, CredentialVerifier, DesktopSize};
 use ironrdp_async::Framed;
 use ironrdp_cliprdr::backend::ClipboardMessage;
 use ironrdp_cliprdr::CliprdrServer;
@@ -226,6 +226,9 @@ pub struct RdpServer {
     ev_sender: mpsc::UnboundedSender<ServerEvent>,
     ev_receiver: Arc<Mutex<mpsc::UnboundedReceiver<ServerEvent>>>,
     creds: Option<Credentials>,
+    /// Makes a verifier for each connection, when the server would rather decide for itself
+    /// whether a logon is good than be handed a password to compare against.
+    verifier: Option<Arc<dyn Fn() -> Box<dyn CredentialVerifier> + Send + Sync>>,
     local_addr: Option<SocketAddr>,
 }
 
@@ -280,6 +283,7 @@ impl RdpServer {
             ev_sender,
             ev_receiver: Arc::new(Mutex::new(ev_receiver)),
             creds: None,
+            verifier: None,
             local_addr: None,
         }
     }
@@ -327,6 +331,10 @@ impl RdpServer {
             capabilities,
             self.creds.clone(),
         );
+
+        if let Some(make) = self.verifier.as_ref() {
+            acceptor = acceptor.with_verifier(make());
+        }
 
         self.attach_channels(&mut acceptor);
 
@@ -1036,6 +1044,14 @@ impl RdpServer {
         }
 
         Ok(())
+    }
+
+    /// Decides logons with a verifier of the server's own rather than a fixed password.
+    pub fn set_credential_verifier(
+        &mut self,
+        verifier: Option<Arc<dyn Fn() -> Box<dyn CredentialVerifier> + Send + Sync>>,
+    ) {
+        self.verifier = verifier;
     }
 
     pub fn set_credentials(&mut self, creds: Option<Credentials>) {

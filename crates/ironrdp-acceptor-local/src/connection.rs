@@ -34,7 +34,19 @@ pub struct Acceptor {
     static_channels: StaticChannelSet,
     saved_for_reactivation: AcceptorState,
     pub(crate) creds: Option<Credentials>,
+    /// Consulted instead of comparing against `creds`, when the server wants to decide for
+    /// itself whether a logon is good -- against the host's own accounts, for instance.
+    ///
+    /// Only reachable under standard RDP security. CredSSP cannot use it: NTLM requires the
+    /// server to already know the secret in order to verify the response, so a verifier that
+    /// can only say yes or no has nothing to offer that exchange.
+    pub(crate) verifier: Option<Box<dyn CredentialVerifier>>,
     reactivation: bool,
+}
+
+/// Decides whether a set of logon credentials is acceptable.
+pub trait CredentialVerifier: Send + core::fmt::Debug {
+    fn verify(&mut self, credentials: &Credentials) -> bool;
 }
 
 #[derive(Debug)]
@@ -64,8 +76,15 @@ impl Acceptor {
             static_channels: StaticChannelSet::new(),
             saved_for_reactivation: Default::default(),
             creds,
+            verifier: None,
             reactivation: false,
         }
+    }
+
+    /// Hands the decision to a verifier rather than a fixed set of credentials.
+    pub fn with_verifier(mut self, verifier: Box<dyn CredentialVerifier>) -> Self {
+        self.verifier = Some(verifier);
+        self
     }
 
     pub fn new_deactivation_reactivation(
@@ -105,6 +124,7 @@ impl Acceptor {
             static_channels,
             saved_for_reactivation,
             creds: consumed.creds,
+            verifier: consumed.verifier,
             reactivation: true,
         })
     }
@@ -553,7 +573,12 @@ impl Sequence for Acceptor {
                 if !protocol.intersects(SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX) {
                     let creds = client_info.client_info.credentials;
 
-                    if self.creds.as_ref() != Some(&creds) {
+                    let accepted = match self.verifier.as_mut() {
+                        Some(verifier) => verifier.verify(&creds),
+                        None => self.creds.as_ref() == Some(&creds),
+                    };
+
+                    if !accepted {
                         // FIXME: How authorization should be denied with standard RDP security?
                         // Since standard RDP security is not a priority, we just send a ServerDeniedConnection ServerSetErrorInfo PDU.
                         let info = ServerSetErrorInfoPdu(ErrorInfo::ProtocolIndependentCode(
