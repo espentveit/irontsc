@@ -9,7 +9,12 @@ Cargo.lock
 .vscode/
 .idea/
 
-# Test artifacts: captures, TLS keylogs and trace logs produced by ./test.sh
+# The test rig and everything it produces. Kept out of the repository because the captures
+# are large and the keylogs and credentials in them are real; both stay on disk for testing.
+/samples/
+/test.sh
+
+# Captures and keylogs anywhere else in the tree, for the same reason.
 samples/*.pcap
 samples/*.pcapng
 samples/*.keys
