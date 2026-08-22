@@ -65,6 +65,13 @@ struct ConnectionArgs {
     #[arg(long)]
     no_nla: bool,
 
+    /// Give the session a camera.
+    ///
+    /// The same as `camerastoredirect:s:*` in a `.rdp` file. What the session sees is a picture
+    /// this client draws.
+    #[arg(long)]
+    camera: bool,
+
     /// Let the session record from this machine's microphone.
     ///
     /// The same as `audiocapturemode:i:1` in a `.rdp` file. Off unless asked for: the server
@@ -198,6 +205,10 @@ fn resolve(connection: &ConnectionArgs) -> anyhow::Result<(ConnectForm, RdpSetti
 
     if connection.audio_capture {
         settings.audio_capture = true;
+    }
+
+    if connection.camera {
+        settings.camera = true;
     }
 
     let form = ConnectForm {

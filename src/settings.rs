@@ -219,6 +219,13 @@ pub struct RdpSettings {
     /// a microphone is something to ask for, not something to inherit.
     #[serde(default)]
     pub audio_capture: bool,
+    /// Give the session a camera.
+    ///
+    /// `camerastoredirect` in the file, which is what mstsc calls it. What the session sees is
+    /// currently a drawn picture rather than a real webcam -- the redirection is the same
+    /// either way, and only where the frames come from would differ.
+    #[serde(default)]
+    pub camera: bool,
 }
 
 fn default_width() -> u16 {
@@ -251,6 +258,7 @@ impl Default for RdpSettings {
             disable_avc444: false,
             disable_udp: false,
             audio_capture: false,
+            camera: false,
             // Empty: take this machine's layout, which is what the window already types with.
             keyboard_layout: String::new(),
             show_codec_grid: false,
@@ -357,6 +365,11 @@ impl RdpSettings {
                         settings.disable_udp = val != 0;
                     }
                 }
+                // mstsc writes a device list here, `*` meaning all of them. Anything but an
+                // empty list or a plain zero means the session is to have a camera.
+                "camerastoredirect" => {
+                    settings.camera = !value.is_empty() && value != "0";
+                }
                 "audiocapturemode" => {
                     if let Ok(val) = value.parse::<u8>() {
                         settings.audio_capture = val != 0;
@@ -397,6 +410,10 @@ impl RdpSettings {
             "compression:i:1".to_string(),
             "keyboardhook:i:2".to_string(),
             format!("audiocapturemode:i:{}", u8::from(self.audio_capture)),
+            format!(
+                "camerastoredirect:s:{}",
+                if self.camera { "*" } else { "" }
+            ),
             "videoplaybackmode:i:1".to_string(),
             "connection type:i:7".to_string(),
             "networkautodetect:i:1".to_string(),

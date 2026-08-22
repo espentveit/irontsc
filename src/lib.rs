@@ -15,6 +15,7 @@ pub use ironrdp;
 pub use smallvec;
 
 pub mod agent;
+pub mod camera;
 pub mod config;
 pub mod console;
 pub mod core_input_channel;
