@@ -9,12 +9,19 @@
 //! client can do belongs to a real client.
 
 use anyhow::{Context as _, anyhow};
+use http_body_util::{BodyExt as _, Full};
+use hyper::body::Bytes;
+use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 
 /// A connected session, with the id the server handed out at initialise.
+///
+/// One connection per request rather than a pool: this is a handful of loopback requests from
+/// a command that then exits, and the transport answers each POST with a stream it closes.
 pub struct Client {
-    http: reqwest::Client,
-    url: String,
+    host: String,
+    port: u16,
+    target: String,
     session_id: Option<String>,
     next_id: std::cell::Cell<u64>,
 }
@@ -29,16 +36,28 @@ pub struct ToolInfo {
 impl Client {
     /// Opens a session against the URL from the register.
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
+        let uri: hyper::Uri = url
+            .parse()
+            .with_context(|| format!("`{url}` is not a URL"))?;
+        if uri.scheme_str() != Some("http") {
+            anyhow::bail!("only plain http URLs are supported; the register hands out loopback");
+        }
+
         let client = Self {
-            http: reqwest::Client::builder()
-                .build()
-                .context("could not build an HTTP client")?,
-            url: url.to_owned(),
+            host: uri
+                .host()
+                .ok_or_else(|| anyhow!("`{url}` has no host"))?
+                .to_owned(),
+            port: uri.port_u16().unwrap_or(80),
+            target: uri
+                .path_and_query()
+                .map(|path| path.as_str().to_owned())
+                .unwrap_or_else(|| "/".to_owned()),
             session_id: None,
             next_id: std::cell::Cell::new(1),
         };
 
-        let (response, session_id) = client
+        let (_initialised, session_id) = client
             .post(
                 "initialize",
                 json!({
@@ -48,7 +67,6 @@ impl Client {
                 }),
             )
             .await?;
-        let _ = response;
 
         let mut client = client;
         client.session_id = session_id;
@@ -96,29 +114,11 @@ impl Client {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
 
-        let mut request = self
-            .http
-            .post(&self.url)
-            .header("content-type", "application/json")
-            // The transport may answer either way, and says which in its content type.
-            .header("accept", "application/json, text/event-stream")
-            .json(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-        if let Some(session_id) = &self.session_id {
-            request = request.header("mcp-session-id", session_id);
-        }
-
-        let response = request
-            .send()
+        let payload = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let (status, session_id, body) = self
+            .send(&payload.to_string())
             .await
             .with_context(|| format!("`{method}` could not reach the session"))?;
-
-        let status = response.status();
-        let session_id = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let body = response.text().await.context("unreadable reply")?;
 
         if !status.is_success() {
             let detail = body.trim();
@@ -144,20 +144,52 @@ impl Client {
 
     /// A notification, which by definition has no reply to wait for.
     async fn notify(&self, method: &str) -> anyhow::Result<()> {
-        let mut request = self
-            .http
-            .post(&self.url)
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .json(&json!({ "jsonrpc": "2.0", "method": method }));
-        if let Some(session_id) = &self.session_id {
-            request = request.header("mcp-session-id", session_id);
-        }
-        request
-            .send()
+        let payload = json!({ "jsonrpc": "2.0", "method": method });
+        self.send(&payload.to_string())
             .await
             .with_context(|| format!("`{method}` could not reach the session"))?;
         Ok(())
+    }
+
+    /// The HTTP itself: one connection, one POST, the whole reply read back.
+    async fn send(&self, body: &str) -> anyhow::Result<(hyper::StatusCode, Option<String>, String)> {
+        let stream = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
+            .await
+            .with_context(|| format!("nothing is listening on {}:{}", self.host, self.port))?;
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        // The connection has to be driven while the request is in flight, and is finished with
+        // once the reply has been read.
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let mut request = hyper::Request::post(&self.target)
+            .header("host", format!("{}:{}", self.host, self.port))
+            .header("content-type", "application/json")
+            // The transport may answer either way, and says which in its content type.
+            .header("accept", "application/json, text/event-stream");
+        if let Some(session_id) = &self.session_id {
+            request = request.header("mcp-session-id", session_id);
+        }
+
+        let response = sender
+            .send_request(request.body(Full::new(Bytes::from(body.to_owned())))?)
+            .await?;
+
+        let status = response.status();
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let collected = response.into_body().collect().await?.to_bytes();
+
+        Ok((
+            status,
+            session_id,
+            String::from_utf8_lossy(&collected).into_owned(),
+        ))
     }
 }
 
