@@ -701,6 +701,10 @@ struct SessionApp {
     island_deadline: Option<Instant>,
     /// Why MCP mode last refused to start, shown in the gear menu.
     mcp_error: Option<String>,
+    /// The docked terminal. One field, so the feature comes out in one piece.
+    console: crate::console::ConsoleHost,
+    /// Whether the window itself has focus, which capture follows along with the console.
+    window_focused: bool,
     /// Connect as soon as there is a window, skipping the dialog entirely.
     pending_autoconnect: bool,
     exiting: bool,
@@ -730,6 +734,8 @@ impl SessionApp {
             repaint_delay: Duration::MAX,
             island_deadline: None,
             mcp_error: None,
+            console: crate::console::ConsoleHost::default(),
+            window_focused: true,
             pending_autoconnect: false,
             exiting: false,
         }
@@ -821,6 +827,10 @@ impl SessionApp {
                     error: self.mcp_error.clone(),
                     ..McpView::default()
                 },
+            },
+            console: {
+                let (open, title, error) = self.console.status();
+                ConsoleView { open, title, error }
             },
         })
     }
@@ -1593,6 +1603,49 @@ impl SessionApp {
         }
     }
 
+    /// Where the pointer is in window coordinates, whatever it is over.
+    fn pointer_position(&self) -> Option<egui::Pos2> {
+        self.session.as_ref().and_then(|session| session.pointer_position)
+    }
+
+    /// True while the console has the keys.
+    fn console_focused(&self) -> bool {
+        self.console.is_focused()
+    }
+
+    /// Opens or closes the docked console.
+    fn toggle_console(&mut self) {
+        let Some(egui_glow) = self.egui_glow.as_ref() else {
+            return;
+        };
+        let ctx = egui_glow.egui_ctx.clone();
+        self.console.toggle(&ctx);
+        self.sync_shortcut_capture();
+    }
+
+    /// Gives the console the keys, or hands them back to the desktop.
+    ///
+    /// The keyboard grab goes with them: while the console is typing, Alt+Tab and the rest
+    /// have to reach this machine, so an inhibitor held for the remote desktop is released
+    /// and put back afterwards.
+    fn set_console_focus(&mut self, focused: bool) {
+        if self.console.set_focus(focused) {
+            self.sync_shortcut_capture();
+            self.request_redraw();
+        }
+    }
+
+    /// Holds the keyboard grab only while the remote desktop is the thing being typed at.
+    ///
+    /// Capture already follows window focus; a console with the keys is the same situation
+    /// seen from inside the window, so it feeds the same lever rather than a second one.
+    fn sync_shortcut_capture(&mut self) {
+        let wanted = self.window_focused && !self.console_focused();
+        if let Some(capture) = self.shortcut_capture.as_mut() {
+            capture.set_focused(wanted);
+        }
+    }
+
     /// Ends the session and returns to the connection dialog.
     fn disconnect(&mut self, message: Option<String>) {
         // Capture is released before anything else: whatever went wrong, the user must not be
@@ -1705,8 +1758,25 @@ impl SessionApp {
         let mut desktop_rect = egui::Rect::ZERO;
         let mut island_size = self.island.size;
 
+        // Moved out for the frame, the way `egui_glow` is: the closure needs it mutably, and
+        // `self` is borrowed for the window.
+        //
+        // It lives on the app rather than the session, so disconnecting does not kill what is
+        // running in it. The dialog does not draw it -- it has its own bottom panel, and a
+        // console belongs beside a desktop -- so between sessions it keeps running unseen and
+        // comes back on reconnect with the agent still where it was.
+        let mut console = std::mem::take(&mut self.console);
+        // Whatever the pty said since the last frame, including replies it is owed.
+        console.pump();
+
         egui_glow.run(gl_window.window(), |ctx| {
             if in_session {
+                // Declared before the central panel, which is what makes the desktop take
+                // the space that is left. `desktop_rect` follows from that, and with it the
+                // resize the session negotiates and the hit testing for the pointer -- so the
+                // console carves itself out of the desktop without any of that knowing.
+                console.show_docked(ctx);
+
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
                     .show(ctx, |ui| {
@@ -1779,6 +1849,8 @@ impl SessionApp {
         egui_glow.paint(gl_window.window());
         gl_window.swap_buffers();
 
+        self.console = console;
+
         self.egui_glow = Some(egui_glow);
         self.gl_window = Some(gl_window);
 
@@ -1803,6 +1875,10 @@ impl SessionApp {
 
         if actions.toggle_mcp {
             self.toggle_mcp();
+        }
+
+        if actions.toggle_console {
+            self.toggle_console();
         }
 
         if actions.toggle_capture {
@@ -1895,6 +1971,7 @@ struct FrameActions {
     save_settings_as: bool,
     open_settings: bool,
     toggle_mcp: bool,
+    toggle_console: bool,
 }
 
 /// Everything the island shows, owned, so the frame's UI closure borrows nothing else.
@@ -1912,6 +1989,15 @@ struct IslandView {
     capture_enabled: bool,
     capture_status: String,
     mcp: McpView,
+    console: ConsoleView,
+}
+
+/// What the gear menu shows about the console.
+#[derive(Default)]
+struct ConsoleView {
+    open: bool,
+    title: String,
+    error: Option<String>,
 }
 
 /// What the gear menu shows about MCP mode.
@@ -2124,6 +2210,28 @@ fn show_island(
 /// alone, and it is not something to put a click away from Disconnect.
 fn show_gear_menu(ui: &mut egui::Ui, view: &IslandView, actions: &mut FrameActions) {
     ui.set_min_width(320.0);
+
+    let mut console_open = view.console.open;
+    if ui
+        .checkbox(&mut console_open, "Console")
+        .on_hover_text(
+            "A terminal docked beside the desktop, for running an agent without leaving \n             the window. Click it to type into it, click the desktop to type there.",
+        )
+        .clicked()
+    {
+        actions.toggle_console = true;
+    }
+    if let Some(error) = view.console.error.as_ref() {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    } else if view.console.open && !view.console.title.is_empty() {
+        ui.label(
+            egui::RichText::new(&view.console.title)
+                .small()
+                .weak(),
+        );
+    }
+
+    ui.separator();
 
     let mut enabled = view.mcp.enabled;
     if ui
@@ -2696,9 +2804,8 @@ impl ApplicationHandler<UserEvent> for SessionApp {
             WindowEvent::Focused(focused) => {
                 // Capture follows focus, exactly as the GTK client does: taken on the way in,
                 // dropped on the way out so the compositor's own shortcuts come back.
-                if let Some(capture) = self.shortcut_capture.as_mut() {
-                    capture.set_focused(*focused);
-                }
+                self.window_focused = *focused;
+                self.sync_shortcut_capture();
 
                 // Both directions: focus can come back with the server still holding a key we
                 // never saw released, and this costs nothing when nothing is held.
@@ -2719,13 +2826,18 @@ impl ApplicationHandler<UserEvent> for SessionApp {
                 // In a session the keys belong to the remote desktop and egui never sees them:
                 // the island has no text entry, and letting egui consume Tab or Space would
                 // silently swallow them. On the connection dialog it is the other way round.
-                if self.session.is_some() {
+                //
+                // The console is the third case, and the only reason this is a condition and
+                // not an unconditional forward: while it has focus the keys are being typed
+                // at this machine, so they fall through to egui and reach the terminal like
+                // any other widget's input.
+                if self.session.is_some() && !self.console_focused() {
                     self.on_keyboard_input(key_event, *is_synthetic);
                     return;
                 }
             }
             WindowEvent::ModifiersChanged(_) => {
-                if self.session.is_some() {
+                if self.session.is_some() && !self.console_focused() {
                     // Modifiers reach the session as ordinary physical keys.
                     return;
                 }
@@ -2740,6 +2852,16 @@ impl ApplicationHandler<UserEvent> for SessionApp {
                 self.island.hover_since = None;
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                // Focus follows the click rather than a reserved chord: the console is a
+                // visible panel, so clicking the one you mean to type at is the obvious
+                // gesture, and it costs the remote desktop no key.
+                if matches!(state, ElementState::Pressed)
+                    && let Some(position) = self.pointer_position()
+                {
+                    let over_console = self.console.hit(position);
+                    self.set_console_focus(over_console);
+                }
+
                 self.on_mouse_button(*button, *state);
             }
             WindowEvent::MouseWheel { delta, .. } => {

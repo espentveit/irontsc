@@ -16,6 +16,7 @@ pub use smallvec;
 
 pub mod agent;
 pub mod config;
+pub mod console;
 pub mod core_input_channel;
 pub mod dtls_udp;
 pub mod gfx;

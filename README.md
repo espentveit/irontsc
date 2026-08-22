@@ -160,6 +160,22 @@ Coordinates are always in the desktop's own pixels, never the screenshot's, and 
 
 `find_regions` deserves a caveat: it finds axis-aligned blocks of near-uniform colour, which Windows chrome is largely made of, so buttons and fields do turn up in it — but so does anything else that happens to be a flat rectangle. It is a hint to check against the image, not a widget tree. A model reading the screenshot remains the better way to find a control.
 
+## Console
+
+A terminal docks beside the desktop, so an agent can be driven without leaving the window. Open it from the gear (`...`) in the session island, under **Console**.
+
+It runs your `$SHELL`, and the header has a **Start Claude** button that types `claude` at the prompt. Dock it to the bottom, right or left from the header, and drag the splitter to resize — the remote desktop takes whatever space is left and renegotiates its size to match, so Windows reflows rather than being letterboxed.
+
+**Keys follow the click.** Click the console to type into it, click the desktop to type there; the header says which has them. No shortcut is reserved, so the remote desktop keeps every key. While the console is typing, the keyboard grab that **Keys** mode holds is released, so Alt+Tab and friends reach this machine — and it is taken back when focus returns to the desktop.
+
+The console outlives a disconnect: it is not drawn on the connection dialog, but whatever is running in it keeps running and is still there when you reconnect.
+
+Emulation is `egui_term` over `alacritty_terminal`, so a full-screen TUI works properly — alternate screen, colours, cursor addressing, bracketed paste. It sits behind a `Terminal` trait, so the renderer can be replaced without touching the docking, focus or header code above it.
+
+Glyph coverage is a fallback **chain**, not a single font: egui's monospace family is an ordered list, and IronTSC appends to it. Hack stays first and keeps setting the metrics that hold the grid square — it already covers box drawing and blocks in full — and the fonts behind it are consulted only for what it lacks (Claude Code's spinner and bullet marks among them). The chain is per-platform: DejaVu Sans Mono, Noto Sans Symbols 2 and Symbola on Linux; Cascadia Mono, Consolas and Segoe UI Symbol on Windows; Menlo, SF Mono and Apple Symbols on macOS. Set `IRONTSC_CONSOLE_FONTS` to a path list to put your own fonts ahead of all of them.
+
+Every candidate is parsed before it is installed, because egui panics on font bytes it cannot read — a missing or unreadable font is skipped, and the console just looks plainer.
+
 ## Project Status
 
 IronTSC is under active development. Still very experimental and not using all features from IronRDP.
