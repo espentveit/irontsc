@@ -65,6 +65,13 @@ struct ConnectionArgs {
     #[arg(long)]
     no_nla: bool,
 
+    /// Let the session record from this machine's microphone.
+    ///
+    /// The same as `audiocapturemode:i:1` in a `.rdp` file. Off unless asked for: the server
+    /// opens its audio input channel the moment something in the session wants to record.
+    #[arg(long)]
+    audio_capture: bool,
+
     /// A `.rdp` file to load the settings from, the way `mstsc file.rdp` does.
     file: Option<std::path::PathBuf>,
 }
@@ -187,6 +194,10 @@ fn resolve(connection: &ConnectionArgs) -> anyhow::Result<(ConnectForm, RdpSetti
 
     if connection.no_nla {
         settings.disable_nla = true;
+    }
+
+    if connection.audio_capture {
+        settings.audio_capture = true;
     }
 
     let form = ConnectForm {

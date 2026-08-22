@@ -240,6 +240,65 @@ where
     }))
 }
 
+/// Puts dynamic channel messages on the wire the way that channel's traffic is flowing.
+fn send_on_dvc(
+    active_stage: &mut ActiveStage,
+    channel_id: u32,
+    messages: Vec<ironrdp_dvc::DvcMessage>,
+    udp_tunnels: &std::collections::HashMap<u32, ActiveUdpTunnel>,
+) -> SessionResult<Vec<ActiveStageOutput>> {
+    if messages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let messages = ironrdp_dvc::encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
+        .map_err(|e| session::custom_err!("DRDYNVC", e))?;
+
+    let transport = active_stage
+        .get_svc_processor::<ironrdp_dvc::DrdynvcClient>()
+        .and_then(|drdynvc| drdynvc.channel_transport(channel_id));
+
+    if let Some(TransportContext::UdpTunnel(request_id)) = transport {
+        let Some(tunnel) = udp_tunnels.get(&request_id) else {
+            warn!(request_id, channel_id, "dynamic channel has no tunnel to speak on");
+            return Ok(Vec::new());
+        };
+        for message in messages {
+            let data = message
+                .to_pdu_bytes()
+                .map_err(|e| session::custom_err!("DRDYNVC", e))?;
+            if let Err(e) = tunnel
+                .command_tx
+                .send(UdpTransportCommand::SendDvcData { request_id, data })
+            {
+                warn!("Failed to send a dynamic channel PDU over the tunnel: {:?}", e);
+            }
+        }
+        return Ok(Vec::new());
+    }
+
+    let frame = active_stage.encode_dvc_messages(messages)?;
+    Ok(vec![ActiveStageOutput::ResponseFrame(frame)])
+}
+
+/// Sends whatever the microphone has recorded since the last pass.
+fn drain_microphone(
+    active_stage: &mut ActiveStage,
+    udp_tunnels: &std::collections::HashMap<u32, ActiveUdpTunnel>,
+) -> SessionResult<Vec<ActiveStageOutput>> {
+    use crate::audio_input::AudioInput;
+
+    let Some((channel_id, messages)) = active_stage
+        .get_dvc_mut::<AudioInput>()
+        .and_then(|channel| channel.channel_processor_downcast_mut::<AudioInput>())
+        .and_then(|microphone| Some((microphone.channel_id()?, microphone.take_recorded())))
+    else {
+        return Ok(Vec::new());
+    };
+
+    send_on_dvc(active_stage, channel_id, messages, udp_tunnels)
+}
+
 /// Everything a redirected channel's processor has said, taken from it.
 fn take_redirected<P: SvcProcessor + 'static>(active_stage: &mut ActiveStage) -> Vec<SvcMessage> {
     type Bridge<P> = crate::dvc_bridge::RedirectedChannel<P>;
@@ -575,6 +634,13 @@ async fn connect(
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
         drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
+
+        // The microphone, when this connection asked for one. Registering the listener is what
+        // lets the server open the channel; it does so only when something in the session
+        // actually starts recording. See `crate::audio_input`.
+        if config.connector.audio_capture {
+            drdynvc = drdynvc.with_dynamic_channel(crate::audio_input::AudioInput::new());
+        }
 
         // Audio output is specified over a static `rdpsnd` channel or a dynamic
         // `AUDIO_PLAYBACK_DVC` one (MS-RDPEA), and this server opens the dynamic one and puts
@@ -2857,6 +2923,7 @@ async fn active_session<T: RdpEventSender + Clone>(
 
         let mut outputs = outputs;
         outputs.extend(drain_redirected(&mut active_stage)?);
+        outputs.extend(drain_microphone(&mut active_stage, &udp_tunnels)?);
 
         for out in outputs {
             match out {

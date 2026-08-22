@@ -218,6 +218,13 @@ pub struct Config {
     ///
     /// The name will be truncated to the 15 first characters.
     pub client_name: String,
+    /// Whether to tell the server this client can record ([MS-RDPBCGR] 2.2.1.11.1.1,
+    /// `INFO_AUDIOCAPTURE`).
+    ///
+    /// It is what allows the server to open the `AUDIO_INPUT` channel and ask for the
+    /// microphone, which it does the moment something in the session wants to record. Off
+    /// unless a connection asks for it.
+    pub audio_capture: bool,
     pub keyboard_type: gcc::KeyboardType,
     pub keyboard_subtype: u32,
     pub keyboard_functional_keys_count: u32,
