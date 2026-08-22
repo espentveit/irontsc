@@ -421,6 +421,45 @@ impl Models {
     }
 }
 
+/// Joins the lines of one heading back together.
+///
+/// The detector finds lines, not paragraphs, so a headline set over three lines arrives as
+/// three boxes -- and sorted down the page they interleave with whatever sits beside them in
+/// the next column. Lines that share a horizontal span and follow each other closely are one
+/// piece of text, and reading them as one is what makes a page of headlines legible.
+pub fn into_blocks(mut lines: Vec<Line>) -> Vec<Line> {
+    lines.sort_by_key(|line| (line.top, line.left));
+
+    let mut blocks: Vec<Line> = Vec::new();
+    for line in lines {
+        let height = line.bottom.saturating_sub(line.top).max(1);
+        let joined = blocks.iter_mut().find(|block| {
+            // Directly below, within a line's height of the one above it.
+            let gap = line.top.saturating_sub(block.bottom);
+            if line.top < block.bottom || gap > height {
+                return false;
+            }
+            // And sharing most of its width with what is above.
+            let overlap = block.right.min(line.right).saturating_sub(block.left.max(line.left));
+            let narrower = (block.right - block.left).min(line.right - line.left).max(1);
+            overlap * 2 > narrower
+        });
+
+        match joined {
+            Some(block) => {
+                block.text.push(' ');
+                block.text.push_str(&line.text);
+                block.left = block.left.min(line.left);
+                block.right = block.right.max(line.right);
+                block.bottom = line.bottom;
+                block.confidence = block.confidence.min(line.confidence);
+            }
+            None => blocks.push(line),
+        }
+    }
+    blocks
+}
+
 /// Non-maximum suppression: the same button is found several times, and one box is enough.
 fn suppress_overlaps(found: Vec<Target>, threshold: f32) -> Vec<Target> {
     let mut kept: Vec<Target> = Vec::new();
@@ -478,6 +517,33 @@ mod tests {
         );
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].confidence, 0.9);
+    }
+
+    #[test]
+    fn a_heading_over_three_lines_reads_as_one() {
+        let line = |text: &str, left, top, right, bottom| Line {
+            text: text.to_owned(),
+            confidence: 0.9,
+            left,
+            top,
+            right,
+            bottom,
+        };
+        // A headline in the left column, and something else beside it in the right.
+        let blocks = into_blocks(vec![
+            line("Fem", 64, 462, 172, 499),
+            line("Politi-advarsel.", 804, 427, 940, 443),
+            line("strake tap", 66, 508, 306, 545),
+            line("for meg", 66, 554, 380, 591),
+        ]);
+
+        assert_eq!(blocks.len(), 2, "two columns, two blocks");
+        let headline = blocks
+            .iter()
+            .find(|block| block.left < 500)
+            .expect("the left column");
+        assert_eq!(headline.text, "Fem strake tap for meg");
+        assert_eq!((headline.top, headline.bottom), (462, 591));
     }
 
     #[test]

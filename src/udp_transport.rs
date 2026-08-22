@@ -733,7 +733,19 @@ impl UdpTransportManager {
         // First, try to process as RDP UDP packet to extract payload
         let mut conn = self.connection.lock().await;
         let source_result = conn.process_source_packet(packet);
+        // [MS-RDPEUDP2] leaves retransmission entirely to the sender, so a stream waiting on a
+        // channel sequence the peer has written off never recovers. Rather than hold a session
+        // that cannot move, the transport gives up and the channels return to TCP.
+        let beyond_recovery = conn.is_beyond_recovery();
         drop(conn);
+
+        if beyond_recovery {
+            warn!(
+                "🧊 UDP transport gave up on a stalled stream; dropping it so its channels \
+                 go back over TCP"
+            );
+            return Err(anyhow::anyhow!("udp stream stalled beyond recovery"));
+        }
 
         match source_result {
             Ok(payloads) if !payloads.is_empty() => {
