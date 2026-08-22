@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 use ironrdp::input::{Database, MouseButton, MousePosition, Operation, WheelRotations};
 use smallvec::SmallVec;
 use tokio::sync::{Notify, mpsc};
+use winit::keyboard::KeyCode;
 
+use super::layout::{KeyboardLayout, Keystroke};
 use crate::config::{ClipboardType, Config};
 use crate::rdp::{ConnectionStats, ImageRegion, RdpEventSender, RdpInputEvent, RdpOutputEvent};
 
@@ -29,6 +31,42 @@ const ACTION_LOG_LIMIT: usize = 32;
 /// `type_text` is paced by the transport rather than arriving as one burst the server may
 /// coalesce or drop.
 const EVENTS_PER_BATCH: usize = 16;
+
+/// The press-and-release sequence for one keystroke, or `None` if any of its keys has no
+/// scancode.
+///
+/// Modifiers are let go before a dead key's space, so that the space is a plain one: AltGr and
+/// space together are a non-breaking space on more than one layout.
+fn stroke_operations(stroke: Keystroke) -> Option<Vec<Operation>> {
+    let scancode_for = crate::egui_scancode::scancode_for;
+
+    let key = scancode_for(stroke.key)?;
+    let mut modifiers = Vec::with_capacity(2);
+    if stroke.shift {
+        modifiers.push(scancode_for(KeyCode::ShiftLeft)?);
+    }
+    if stroke.altgr {
+        modifiers.push(scancode_for(KeyCode::AltRight)?);
+    }
+
+    let mut operations = Vec::with_capacity(modifiers.len() * 2 + 4);
+    for scancode in &modifiers {
+        operations.push(Operation::KeyPressed(*scancode));
+    }
+    operations.push(Operation::KeyPressed(key));
+    operations.push(Operation::KeyReleased(key));
+    for scancode in modifiers.iter().rev() {
+        operations.push(Operation::KeyReleased(*scancode));
+    }
+
+    if stroke.dead {
+        let space = scancode_for(KeyCode::Space)?;
+        operations.push(Operation::KeyPressed(space));
+        operations.push(Operation::KeyReleased(space));
+    }
+
+    Some(operations)
+}
 
 /// What went wrong, in terms an agent can act on.
 #[derive(Debug, Clone)]
@@ -316,11 +354,14 @@ pub struct AgentSession {
     pointer: Mutex<Option<(u16, u16)>>,
     /// True when this session is ours to close.
     owns_session: bool,
+    /// The layout the server reads scancodes against, which is what `type_text` needs to know
+    /// to put a character on the right key.
+    layout: KeyboardLayout,
 }
 
 impl AgentSession {
     /// Opens a session of its own, with no window. Headless mode.
-    pub fn spawn_headless(mut config: Config) -> Arc<Self> {
+    pub fn spawn_headless(mut config: Config, layout: KeyboardLayout) -> Arc<Self> {
         // Nothing here has a display to paste into, and the clipboard backend would try to
         // reach one.
         config.clipboard_type = ClipboardType::None;
@@ -337,18 +378,23 @@ impl AgentSession {
             },
         );
 
-        Arc::new(Self::new(frame, input_sender, true))
+        Arc::new(Self::new(frame, input_sender, true, layout))
     }
 
     /// Joins a session that a window already owns. In-session mode.
-    pub fn attach(frame: Arc<SharedFrame>, input: mpsc::UnboundedSender<RdpInputEvent>) -> Arc<Self> {
-        Arc::new(Self::new(frame, input, false))
+    pub fn attach(
+        frame: Arc<SharedFrame>,
+        input: mpsc::UnboundedSender<RdpInputEvent>,
+        layout: KeyboardLayout,
+    ) -> Arc<Self> {
+        Arc::new(Self::new(frame, input, false, layout))
     }
 
     fn new(
         frame: Arc<SharedFrame>,
         input: mpsc::UnboundedSender<RdpInputEvent>,
         owns_session: bool,
+        layout: KeyboardLayout,
     ) -> Self {
         Self {
             frame,
@@ -357,6 +403,7 @@ impl AgentSession {
             actions: Mutex::new(VecDeque::with_capacity(ACTION_LOG_LIMIT)),
             pointer: Mutex::new(None),
             owns_session,
+            layout,
         }
     }
 
@@ -591,31 +638,51 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Types text as Unicode, so the server's keyboard layout does not have to match ours.
+    /// Types text, a character at a time, as the keys that produce it.
     ///
-    /// Newlines and tabs are sent as the keys of those names instead: a Unicode `\n` is not
-    /// what an edit control is waiting for.
+    /// Characters go out as scancodes wherever the layout has a key for them, because that is
+    /// the only kind of keyboard event the Windows console reads: a Unicode event types
+    /// nothing at all into PowerShell, silently. Anything the layout cannot produce -- an
+    /// accent, an emoji, a character from another script -- still goes as Unicode, which works
+    /// everywhere but there.
+    ///
+    /// Newlines and tabs are sent as the keys of those names: a Unicode `\n` is not what an
+    /// edit control is waiting for.
     pub fn type_text(&self, text: &str) -> AgentResult<()> {
         if text.is_empty() {
             return Err(AgentError::BadRequest("nothing to type".to_owned()));
         }
 
+        let mut as_unicode = 0usize;
         for character in text.chars() {
-            match character {
-                '\n' | '\r' => self.press_chord("enter")?,
-                '\t' => self.press_chord("tab")?,
-                _ => self.apply([
-                    Operation::UnicodeKeyPressed(character),
-                    Operation::UnicodeKeyReleased(character),
-                ])?,
+            let stroke = match character {
+                '\n' | '\r' => Some(Keystroke::plain(KeyCode::Enter)),
+                '\t' => Some(Keystroke::plain(KeyCode::Tab)),
+                _ => self.layout.keystroke(character),
+            };
+
+            match stroke.and_then(stroke_operations) {
+                Some(operations) => self.apply(operations)?,
+                None => {
+                    as_unicode += 1;
+                    self.apply([
+                        Operation::UnicodeKeyPressed(character),
+                        Operation::UnicodeKeyReleased(character),
+                    ])?;
+                }
             }
         }
 
         let preview: String = text.chars().take(40).collect();
         self.record(format!(
-            "type {:?}{}",
+            "type {:?}{}{}",
             preview,
-            if text.chars().count() > 40 { "..." } else { "" }
+            if text.chars().count() > 40 { "..." } else { "" },
+            // Worth saying: these are the characters a console would have dropped.
+            match as_unicode {
+                0 => String::new(),
+                count => format!(" ({count} sent as Unicode)"),
+            }
         ));
         Ok(())
     }

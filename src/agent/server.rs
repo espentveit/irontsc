@@ -61,10 +61,18 @@ pub struct ScreenshotArgs {
     /// catches the desktop after it has finished reacting. Defaults to 250.
     #[serde(default)]
     pub settle_ms: Option<u64>,
-    /// Scale the image down to at most this many pixels wide to save tokens. Click
-    /// coordinates are always in the desktop's own pixels regardless.
+    /// Scale the image down to at most this many pixels wide to save tokens. Coordinates in
+    /// the reply are still the desktop's own, unless you pass them back with `from_width`.
     #[serde(default)]
     pub max_width: Option<u32>,
+    /// The width of the image a region was measured on, when it came off a scaled screenshot
+    /// rather than the desktop.
+    #[serde(default)]
+    pub from_width: Option<u32>,
+    /// How much smaller that image was, if that is easier to say than its width: `2` for a
+    /// half-size screenshot.
+    #[serde(default)]
+    pub scale: Option<f64>,
     /// Capture only part of the desktop. Left edge, in desktop pixels.
     #[serde(default)]
     pub x: Option<u16>,
@@ -87,6 +95,14 @@ pub struct PixelArgs {
     /// Y in desktop pixels. Defaults to wherever the pointer is.
     #[serde(default)]
     pub y: Option<u16>,
+    /// The width of the image these coordinates were measured on, when that is a scaled
+    /// screenshot rather than the desktop. Leave it off for desktop pixels.
+    #[serde(default)]
+    pub from_width: Option<u32>,
+    /// How much smaller that image was, if that is easier to say than its width: `2` for a
+    /// half-size screenshot, the number `screenshot` reports as the scale.
+    #[serde(default)]
+    pub scale: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -114,6 +130,14 @@ pub struct PointArgs {
     pub x: u16,
     /// Y in desktop pixels, from the top edge.
     pub y: u16,
+    /// The width of the image these coordinates were measured on, when that is a scaled
+    /// screenshot rather than the desktop. Leave it off for desktop pixels.
+    #[serde(default)]
+    pub from_width: Option<u32>,
+    /// How much smaller that image was, if that is easier to say than its width: `2` for a
+    /// half-size screenshot, the number `screenshot` reports as the scale.
+    #[serde(default)]
+    pub scale: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -128,6 +152,14 @@ pub struct ClickArgs {
     /// 1 for a single click, 2 for a double click. Defaults to 1.
     #[serde(default)]
     pub count: Option<u8>,
+    /// The width of the image these coordinates were measured on, when that is a scaled
+    /// screenshot rather than the desktop. Leave it off for desktop pixels.
+    #[serde(default)]
+    pub from_width: Option<u32>,
+    /// How much smaller that image was, if that is easier to say than its width: `2` for a
+    /// half-size screenshot, the number `screenshot` reports as the scale.
+    #[serde(default)]
+    pub scale: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -139,6 +171,14 @@ pub struct DragArgs {
     /// `left` (the default), `right` or `middle`.
     #[serde(default)]
     pub button: Option<String>,
+    /// The width of the image these coordinates were measured on, when that is a scaled
+    /// screenshot rather than the desktop. Leave it off for desktop pixels.
+    #[serde(default)]
+    pub from_width: Option<u32>,
+    /// How much smaller that image was, if that is easier to say than its width: `2` for a
+    /// half-size screenshot, the number `screenshot` reports as the scale.
+    #[serde(default)]
+    pub scale: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -182,6 +222,33 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(session: Arc<AgentSession>) -> Self {
         Self { session }
+    }
+
+    /// Maps a coordinate back into desktop pixels from the image it was measured on.
+    ///
+    /// An agent that asked for `max_width=1200` on a 4K desktop reads its coordinates off a
+    /// 1200-wide image; passing that width back means it never has to do the arithmetic, and
+    /// the tools keep one coordinate space -- the desktop's -- underneath.
+    #[expect(clippy::wrong_self_convention, reason = "reads as `from the image`, not a cast")]
+    fn from_image(&self, value: u16, from_width: Option<u32>, scale: Option<f64>) -> u16 {
+        let desktop = u32::from(self.session.frame().describe().width);
+
+        // Two ways of saying the same thing: the image's width, or how much smaller it is.
+        // The width wins if both arrive, being the one that cannot drift.
+        let factor = match (from_width.filter(|width| *width > 0), scale) {
+            (Some(width), _) if desktop > 0 => f64::from(desktop) / f64::from(width),
+            (None, Some(scale)) if scale.is_finite() && scale > 0.0 => scale,
+            _ => return value,
+        };
+        if (factor - 1.0).abs() < f64::EPSILON {
+            return value;
+        }
+
+        let scaled = (f64::from(value) * factor).round().max(0.0);
+        // The right and bottom edges of an image map just past the desktop, so a click on the
+        // last column lands on the last pixel rather than off the end.
+        let limit = f64::from(desktop.saturating_sub(1)).max(0.0);
+        scaled.min(limit) as u16
     }
 
     /// Nothing can be clicked before the first frame, so every input tool waits for it.
@@ -230,10 +297,10 @@ impl McpServer {
 
         let (bgra, width, height, origin) = if requested_region {
             let rect = super::screenshot::Crop {
-                x: args.x.unwrap_or(0),
-                y: args.y.unwrap_or(0),
-                width: args.width.unwrap_or(width),
-                height: args.height.unwrap_or(height),
+                x: self.from_image(args.x.unwrap_or(0), args.from_width, args.scale),
+                y: self.from_image(args.y.unwrap_or(0), args.from_width, args.scale),
+                width: self.from_image(args.width.unwrap_or(width), args.from_width, args.scale),
+                height: self.from_image(args.height.unwrap_or(height), args.from_width, args.scale),
             };
             match super::screenshot::crop(&bgra, width, height, rect) {
                 Ok((cropped, w, h)) => (cropped, w, h, Some((rect.x, rect.y))),
@@ -243,7 +310,15 @@ impl McpServer {
             (bgra, width, height, None)
         };
 
-        let max_width = args.max_width.and_then(NonZeroU32::new);
+        // `scale` is the same request as `max_width`, said the other way round: an agent that
+        // wants "half size" should not have to work out what half of this desktop is.
+        let max_width = match (args.max_width, args.scale) {
+            (Some(width), _) => NonZeroU32::new(width),
+            (None, Some(scale)) if scale.is_finite() && scale > 1.0 => {
+                NonZeroU32::new((f64::from(u32::from(width)) / scale).round() as u32)
+            }
+            _ => None,
+        };
         let shot = match super::screenshot::encode(&bgra, width, height, max_width) {
             Ok(shot) => shot,
             Err(message) => return Ok(bad_request(message)),
@@ -262,9 +337,12 @@ impl McpServer {
             ));
         }
         if shot.is_scaled() {
+            let scale = f64::from(shot.source_width) / f64::from(shot.width.max(1));
             note.push_str(&format!(
-                " The image below is scaled to {}x{}, so do not read coordinates off it directly.",
-                shot.width, shot.height
+                " The image below is {}x{}, {scale:.2}x smaller than what it shows. Either scale \
+                 coordinates read off it by {scale:.2}, or pass them as they are with \
+                 `from_width={}` (or `scale={scale:.2}`) and the tool will do it.",
+                shot.width, shot.height, shot.width
             ));
         }
         if !settled {
@@ -338,7 +416,11 @@ impl McpServer {
         }
 
         let (x, y, source) = match (args.x, args.y) {
-            (Some(x), Some(y)) => (x, y, "the given coordinates"),
+            (Some(x), Some(y)) => (
+                self.from_image(x, args.from_width, args.scale),
+                self.from_image(y, args.from_width, args.scale),
+                "the given coordinates",
+            ),
             (None, None) => match self.session.pointer_position() {
                 Some((x, y)) => (x, y, "the pointer"),
                 None => {
@@ -437,10 +519,11 @@ impl McpServer {
         if let Err(result) = self.ready().await {
             return Ok(result);
         }
-        match self.session.move_mouse(args.x, args.y) {
+        let x = self.from_image(args.x, args.from_width, args.scale);
+        let y = self.from_image(args.y, args.from_width, args.scale);
+        match self.session.move_mouse(x, y) {
             Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "moved to ({}, {})",
-                args.x, args.y
+                "moved to ({x}, {y})"
             ))])),
             Err(error) => Ok(error.into()),
         }
@@ -460,11 +543,12 @@ impl McpServer {
             Err(message) => return Ok(bad_request(message)),
         };
         let count = args.count.unwrap_or(1);
+        let x = self.from_image(args.x, args.from_width, args.scale);
+        let y = self.from_image(args.y, args.from_width, args.scale);
 
-        match self.session.click(button, args.x, args.y, count) {
+        match self.session.click(button, x, y, count) {
             Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "{button:?} click x{count} at ({}, {})",
-                args.x, args.y
+                "{button:?} click x{count} at ({x}, {y})"
             ))])),
             Err(error) => Ok(error.into()),
         }
@@ -484,22 +568,26 @@ impl McpServer {
             Err(message) => return Ok(bad_request(message)),
         };
 
-        if let Err(error) = self.session.mouse_down(button, args.from_x, args.from_y) {
+        let from_x = self.from_image(args.from_x, args.from_width, args.scale);
+        let from_y = self.from_image(args.from_y, args.from_width, args.scale);
+        let to_x = self.from_image(args.to_x, args.from_width, args.scale);
+        let to_y = self.from_image(args.to_y, args.from_width, args.scale);
+
+        if let Err(error) = self.session.mouse_down(button, from_x, from_y) {
             return Ok(error.into());
         }
         // A drag that teleports is ignored by some controls, which want to see the pointer
         // travel; a handful of intermediate positions is enough to convince them.
         for step in 1..=4u32 {
-            let x = interpolate(args.from_x, args.to_x, step, 5);
-            let y = interpolate(args.from_y, args.to_y, step, 5);
+            let x = interpolate(from_x, to_x, step, 5);
+            let y = interpolate(from_y, to_y, step, 5);
             if let Err(error) = self.session.move_mouse(x, y) {
                 return Ok(error.into());
             }
         }
-        match self.session.mouse_up(button, args.to_x, args.to_y) {
+        match self.session.mouse_up(button, to_x, to_y) {
             Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "dragged from ({}, {}) to ({}, {}) with {button:?}",
-                args.from_x, args.from_y, args.to_x, args.to_y
+                "dragged from ({from_x}, {from_y}) to ({to_x}, {to_y}) with {button:?}"
             ))])),
             Err(error) => Ok(error.into()),
         }

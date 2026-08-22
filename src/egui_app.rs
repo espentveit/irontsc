@@ -342,6 +342,10 @@ impl Session {
 struct McpBridge {
     session: Arc<crate::agent::AgentSession>,
     server: crate::agent::HttpServer,
+    /// Answers `irontsc sessions`, and stops when dropped. Missing if the register could not
+    /// be joined, which is not worth refusing MCP mode over.
+    #[expect(dead_code, reason = "held for its lifetime, not its value")]
+    beacon: Option<crate::agent::registry::Beacon>,
     /// Carries the accept loop. Declared last so it is dropped last, and never read: it is
     /// held only so that the runtime outlives the server running on it.
     #[expect(dead_code, reason = "held for its lifetime, not its value")]
@@ -354,8 +358,11 @@ impl McpBridge {
         frame: Arc<crate::agent::SharedFrame>,
         input_sender: mpsc::UnboundedSender<RdpInputEvent>,
         port: u16,
+        layout: crate::agent::KeyboardLayout,
+        computer: String,
+        username: String,
     ) -> anyhow::Result<Self> {
-        let session = crate::agent::AgentSession::attach(frame, input_sender);
+        let session = crate::agent::AgentSession::attach(frame, input_sender, layout);
 
         // Its own runtime: the window is not async, and the session threads have runtimes of
         // their own that belong to the protocol rather than to this.
@@ -378,9 +385,29 @@ impl McpBridge {
             }
         })?;
 
+        // Best effort: a session nobody can list still works, it is just harder to find.
+        let beacon = match crate::agent::registry::announce(
+            crate::agent::Descriptor {
+                pid: std::process::id(),
+                transport: "http".to_owned(),
+                url: Some(server.url()),
+                computer,
+                username,
+                started_at: crate::agent::registry::now(),
+            },
+            runtime.handle(),
+        ) {
+            Ok(beacon) => Some(beacon),
+            Err(error) => {
+                tracing::warn!(%error, "could not join the session register");
+                None
+            }
+        };
+
         Ok(Self {
             session,
             server,
+            beacon,
             runtime,
         })
     }
@@ -1586,10 +1613,14 @@ impl SessionApp {
             return;
         }
 
+        let layout = crate::agent::KeyboardLayout::resolve(&self.settings.keyboard_layout);
         match McpBridge::start(
             Arc::clone(&session.frame),
             session.input_sender.clone(),
             MCP_DEFAULT_PORT,
+            layout,
+            self.settings.server.clone(),
+            self.settings.username.clone(),
         ) {
             Ok(bridge) => {
                 tracing::info!(url = %bridge.server.url(), "MCP mode on");
