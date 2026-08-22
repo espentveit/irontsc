@@ -20,6 +20,12 @@ use crate::{DynamicChannelId, String, Vec};
 pub enum DrdynvcDataPdu {
     DataFirst(DataFirstPdu),
     Data(DataPdu),
+    /// The same as [`DrdynvcDataPdu::DataFirst`], with the block bulk-compressed.
+    ///
+    /// Only a version 3 DVC manager sends these, and only over a reliable transport.
+    DataFirstCompressed(DataFirstPdu),
+    /// The same as [`DrdynvcDataPdu::Data`], with the block bulk-compressed.
+    DataCompressed(DataPdu),
 }
 
 impl DrdynvcDataPdu {
@@ -28,8 +34,10 @@ impl DrdynvcDataPdu {
 
     pub fn channel_id(&self) -> DynamicChannelId {
         match self {
-            DrdynvcDataPdu::DataFirst(pdu) => pdu.channel_id,
-            DrdynvcDataPdu::Data(pdu) => pdu.channel_id,
+            DrdynvcDataPdu::DataFirst(pdu) | DrdynvcDataPdu::DataFirstCompressed(pdu) => {
+                pdu.channel_id
+            }
+            DrdynvcDataPdu::Data(pdu) | DrdynvcDataPdu::DataCompressed(pdu) => pdu.channel_id,
         }
     }
 }
@@ -37,8 +45,10 @@ impl DrdynvcDataPdu {
 impl Encode for DrdynvcDataPdu {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         match self {
-            DrdynvcDataPdu::DataFirst(pdu) => pdu.encode(dst),
-            DrdynvcDataPdu::Data(pdu) => pdu.encode(dst),
+            DrdynvcDataPdu::DataFirst(pdu) | DrdynvcDataPdu::DataFirstCompressed(pdu) => {
+                pdu.encode(dst)
+            }
+            DrdynvcDataPdu::Data(pdu) | DrdynvcDataPdu::DataCompressed(pdu) => pdu.encode(dst),
         }
     }
 
@@ -46,13 +56,15 @@ impl Encode for DrdynvcDataPdu {
         match self {
             DrdynvcDataPdu::DataFirst(_) => DataFirstPdu::name(),
             DrdynvcDataPdu::Data(_) => DataPdu::name(),
+            DrdynvcDataPdu::DataFirstCompressed(_) => "DYNVC_DATA_FIRST_COMPRESSED",
+            DrdynvcDataPdu::DataCompressed(_) => "DYNVC_DATA_COMPRESSED",
         }
     }
 
     fn size(&self) -> usize {
         match self {
-            DrdynvcDataPdu::DataFirst(pdu) => pdu.size(),
-            DrdynvcDataPdu::Data(pdu) => pdu.size(),
+            DrdynvcDataPdu::DataFirst(pdu) | DrdynvcDataPdu::DataFirstCompressed(pdu) => pdu.size(),
+            DrdynvcDataPdu::Data(pdu) | DrdynvcDataPdu::DataCompressed(pdu) => pdu.size(),
         }
     }
 }
@@ -114,6 +126,12 @@ impl Decode<'_> for DrdynvcClientPdu {
             Cmd::Data => Ok(Self::Data(DrdynvcDataPdu::Data(DataPdu::decode(
                 header, src,
             )?))),
+            Cmd::DataFirstCompressed => Ok(Self::Data(DrdynvcDataPdu::DataFirstCompressed(
+                DataFirstPdu::decode(header, src)?,
+            ))),
+            Cmd::DataCompressed => Ok(Self::Data(DrdynvcDataPdu::DataCompressed(
+                DataPdu::decode(header, src)?,
+            ))),
             Cmd::Close => Ok(Self::Close(ClosePdu::decode(header, src)?)),
             Cmd::Capability => Ok(Self::Capabilities(CapabilitiesResponsePdu::decode(
                 header, src,
@@ -186,6 +204,12 @@ impl Decode<'_> for DrdynvcServerPdu {
             Cmd::Data => Ok(Self::Data(DrdynvcDataPdu::Data(DataPdu::decode(
                 header, src,
             )?))),
+            Cmd::DataFirstCompressed => Ok(Self::Data(DrdynvcDataPdu::DataFirstCompressed(
+                DataFirstPdu::decode(header, src)?,
+            ))),
+            Cmd::DataCompressed => Ok(Self::Data(DrdynvcDataPdu::DataCompressed(
+                DataPdu::decode(header, src)?,
+            ))),
             Cmd::Close => Ok(Self::Close(ClosePdu::decode(header, src)?)),
             Cmd::Capability => Ok(Self::Capabilities(CapabilitiesRequestPdu::decode(
                 header, src,

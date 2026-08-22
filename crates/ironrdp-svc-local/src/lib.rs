@@ -107,6 +107,16 @@ impl fmt::Debug for SvcMessage {
 }
 
 impl SvcMessage {
+    /// The PDU on its own, without the static channel framing.
+    ///
+    /// A server that has agreed Soft-Sync hands the session's redirection channels to the
+    /// client as *dynamic* channels instead of static ones, and a dynamic channel carries the
+    /// bare PDU. The processors that produce these messages do not know or care which transport
+    /// they end up on, so this is how their output is put on a dynamic channel unchanged.
+    pub fn encode_to_vec(&self) -> ironrdp_core::EncodeResult<Vec<u8>> {
+        ironrdp_core::encode_vec(&*self.pdu)
+    }
+
     /// Adds additional SVC header flags to the message.
     #[must_use]
     pub fn with_flags(mut self, flags: ChannelFlags) -> Self {
@@ -477,11 +487,18 @@ impl Default for ChunkProcessor {
 
 /// Builds the [`ChannelOptions`] bitfield to be used in the [`ChannelDef`] structure.
 pub fn make_channel_options(channel: &StaticVirtualChannel) -> ChannelOptions {
-    match channel.compression_condition() {
-        CompressionCondition::Never => ChannelOptions::empty(),
-        CompressionCondition::WhenRdpDataIsCompressed => ChannelOptions::COMPRESS_RDP,
-        CompressionCondition::Always => ChannelOptions::COMPRESS,
-    }
+    // Older editions of MS-RDPBCGR read a definition without INITIALIZED as a placeholder the
+    // server must not set up; the current one calls the bit unused. mstsc and FreeRDP both set
+    // it on every channel they ask for, so there is no reason to be the one client that does
+    // not -- whichever edition the server was written against.
+    let options = ChannelOptions::INITIALIZED;
+
+    options
+        | match channel.compression_condition() {
+            CompressionCondition::Never => ChannelOptions::empty(),
+            CompressionCondition::WhenRdpDataIsCompressed => ChannelOptions::COMPRESS_RDP,
+            CompressionCondition::Always => ChannelOptions::COMPRESS,
+        }
 }
 
 /// Builds the [`ChannelDef`] structure containing information for this channel.

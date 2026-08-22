@@ -21,6 +21,12 @@ const ZGFX_SEGMENTED_SINGLE: u8 = 0xE0;
 /// The same for a packet split across several.
 const ZGFX_SEGMENTED_MULTIPART: u8 = 0xE1;
 
+/// The header byte on each segment: compression type in the low nibble, flags in the high one
+/// ([MS-RDPBCGR] 2.2.9.1.1.3.1.2.1). `PACKET_COMPR_TYPE_RDP8` is the only type this protocol
+/// has, and a decoder that reads the nibble refuses anything else -- a zero there is not
+/// "uncompressed", it is a type it does not know. Uncompressed is the *flag* left clear.
+const ZGFX_UNCOMPRESSED: u8 = 0x04;
+
 /// How much a single segment may carry.
 ///
 /// Not a suggestion: a decoder sizes its history window to this, and a segment claiming more
@@ -44,8 +50,7 @@ pub fn segment(payload: &[u8]) -> Vec<u8> {
     if payload.len() <= PER_SEGMENT {
         let mut out = Vec::with_capacity(payload.len() + 2);
         out.put_u8(ZGFX_SEGMENTED_SINGLE);
-        // Segment flags. Bit 0 is "compressed"; everything else is reserved.
-        out.put_u8(0x00);
+        out.put_u8(ZGFX_UNCOMPRESSED);
         out.extend_from_slice(payload);
         return out;
     }
@@ -60,9 +65,9 @@ pub fn segment(payload: &[u8]) -> Vec<u8> {
     out.put_u32_le(payload.len() as u32);
 
     for chunk in chunks {
-        // Each segment is sized including its own flags byte.
+        // Each segment is sized including its own header byte.
         out.put_u32_le((chunk.len() + 1) as u32);
-        out.put_u8(0x00);
+        out.put_u8(ZGFX_UNCOMPRESSED);
         out.extend_from_slice(chunk);
     }
 
@@ -409,7 +414,8 @@ mod tests {
     fn a_segment_says_it_is_not_compressed() {
         let framed = segment(&[0xAA, 0xBB]);
         assert_eq!(framed[0], ZGFX_SEGMENTED_SINGLE);
-        assert_eq!(framed[1] & 0x01, 0, "the compressed bit must be clear");
+        assert_eq!(framed[1] & 0x0F, 0x04, "the type must be RDP8");
+        assert_eq!(framed[1] & 0x20, 0, "the compressed flag must be clear");
         assert_eq!(&framed[2..], &[0xAA, 0xBB]);
     }
 
@@ -434,6 +440,8 @@ mod tests {
         assert_eq!(framed[0], ZGFX_SEGMENTED_MULTIPART);
         let count = u16::from_le_bytes([framed[1], framed[2]]);
         assert_eq!(count, 4, "200,000 bytes is four segments of 65,534");
+        // Every segment carries its own header byte, and it has to name the type too.
+        assert_eq!(framed[7 + 4] & 0x0F, 0x04, "the first segment's type");
         assert_eq!(
             u32::from_le_bytes([framed[3], framed[4], framed[5], framed[6]]) as usize,
             payload.len()

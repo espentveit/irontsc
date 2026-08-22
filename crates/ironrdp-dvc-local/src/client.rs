@@ -14,9 +14,13 @@ use tracing::{debug, info, warn};
 
 use crate::pdu::{
     CapabilitiesResponsePdu, CapsVersion, ClosePdu, CreateResponsePdu, CreationStatus,
-    DrdynvcClientPdu, DrdynvcServerPdu, SoftSyncRequestPdu, SoftSyncResponsePdu,
+    DataFirstPdu, DataPdu, DrdynvcClientPdu, DrdynvcDataPdu, DrdynvcServerPdu, SoftSyncRequestPdu,
+    SoftSyncResponsePdu,
 };
-use crate::{encode_dvc_messages, DvcProcessor, DynamicChannelSet, DynamicVirtualChannel};
+use crate::{
+    encode_dvc_messages, DvcCompression, DvcDecompressor, DvcProcessor, DynamicChannelId,
+    DynamicChannelSet, DynamicVirtualChannel,
+};
 
 pub trait DvcClientProcessor: DvcProcessor {}
 
@@ -47,6 +51,16 @@ pub struct DrdynvcClient {
     available_udp_tunnels: alloc::collections::BTreeSet<u32>,
     /// Buffered Soft-Sync request that arrived before tunnel was established
     pending_soft_sync: Option<SoftSyncRequestPdu>,
+    /// Where a channel's decompression context comes from, when the client can decompress.
+    ///
+    /// Its presence is what makes this a version 3 DVC manager, and so what allows the server
+    /// to send `DYNVC_DATA_COMPRESSED`.
+    compression: Option<alloc::boxed::Box<dyn DvcCompression>>,
+    /// One decompression context per channel, made on first use and dropped with the channel.
+    decompressors: BTreeMap<DynamicChannelId, alloc::boxed::Box<dyn DvcDecompressor>>,
+    /// Where each channel's traffic was last seen, so that anything this client starts saying
+    /// on a channel goes out the way the server is saying it.
+    channel_transports: BTreeMap<DynamicChannelId, ironrdp_svc::TransportContext>,
 }
 
 impl fmt::Debug for DrdynvcClient {
@@ -75,7 +89,20 @@ impl DrdynvcClient {
             udp_channels: BTreeMap::new(),
             available_udp_tunnels: alloc::collections::BTreeSet::new(),
             pending_soft_sync: None,
+            compression: None,
+            decompressors: BTreeMap::new(),
+            channel_transports: BTreeMap::new(),
         }
+    }
+
+    /// Lets the server compress channel data, by giving this client a way to undo it.
+    #[must_use]
+    pub fn with_compression<T>(mut self, compression: T) -> Self
+    where
+        T: DvcCompression + 'static,
+    {
+        self.compression = Some(alloc::boxed::Box::new(compression));
+        self
     }
 
     // FIXME(#61): it's likely we want to enable adding dynamic channels at any point during the session (message passing? other approach?)
@@ -94,6 +121,18 @@ impl DrdynvcClient {
         T: DvcProcessor + 'static,
     {
         self.dynamic_channels.insert(channel);
+    }
+
+    /// The transport a channel's traffic last arrived on.
+    ///
+    /// A server that has moved a channel onto a multitransport tunnel stops reading that
+    /// channel on TCP, so a message this client starts on its own has to follow the server
+    /// there rather than take the static channel it was first offered on.
+    pub fn channel_transport(
+        &self,
+        channel_id: DynamicChannelId,
+    ) -> Option<ironrdp_svc::TransportContext> {
+        self.channel_transports.get(&channel_id).copied()
     }
 
     /// Returns the tunnel type if soft-sync has been completed
@@ -162,12 +201,17 @@ impl DrdynvcClient {
     }
 
     fn create_capabilities_response(&mut self, server_version: CapsVersion) -> SvcMessage {
-        // Per MS-RDPEDYC §2.2.1.2, client MUST respond with the version level it supports
-        // We support up to V3, but must negotiate with server's requested version
-        const CLIENT_MAX_VERSION: CapsVersion = CapsVersion::V3;
+        // Per MS-RDPEDYC §2.2.1.2, client MUST respond with the version level it supports.
+        // Version 3 is the one that lets the server compress channel data, so it is only
+        // honest to ask for it when a decompressor has been supplied.
+        let client_max_version = if self.compression.is_some() {
+            CapsVersion::V3
+        } else {
+            CapsVersion::V2
+        };
 
         // Negotiate: use minimum of client max and server requested
-        let negotiated_version = match (CLIENT_MAX_VERSION, server_version) {
+        let negotiated_version = match (client_max_version, server_version) {
             (CapsVersion::V3, CapsVersion::V3) => CapsVersion::V3,
             (CapsVersion::V3, CapsVersion::V2) => CapsVersion::V2,
             (CapsVersion::V3, CapsVersion::V1) => CapsVersion::V1,
@@ -181,7 +225,7 @@ impl DrdynvcClient {
             DrdynvcClientPdu::Capabilities(CapabilitiesResponsePdu::new(negotiated_version));
         debug!(
             "Send DVC Capabilities Response PDU: {caps_response:?} (server requested {:?}, client max {:?}, negotiated {:?})",
-            server_version, CLIENT_MAX_VERSION, negotiated_version
+            server_version, client_max_version, negotiated_version
         );
         self.cap_handshake_done = true;
         SvcMessage::from(caps_response)
@@ -194,6 +238,46 @@ impl DrdynvcClient {
             crate::pdu::CapabilitiesRequestPdu::V2 { .. } => CapsVersion::V2,
             crate::pdu::CapabilitiesRequestPdu::V3 { .. } => CapsVersion::V3,
         }
+    }
+
+    /// Turns a compressed data PDU into the plain one the channel is waiting for.
+    ///
+    /// Everything downstream -- reassembly, the channel processor itself -- then sees the same
+    /// `DYNVC_DATA_FIRST` / `DYNVC_DATA` sequence it would have seen without compression.
+    fn decompress(&mut self, pdu: DrdynvcDataPdu) -> PduResult<DrdynvcDataPdu> {
+        match pdu {
+            DrdynvcDataPdu::DataFirstCompressed(pdu) => {
+                let data = self.inflate(pdu.channel_id, &pdu.data)?;
+                Ok(DrdynvcDataPdu::DataFirst(DataFirstPdu::new(
+                    pdu.channel_id,
+                    pdu.length,
+                    data,
+                )))
+            }
+            DrdynvcDataPdu::DataCompressed(pdu) => {
+                let data = self.inflate(pdu.channel_id, &pdu.data)?;
+                Ok(DrdynvcDataPdu::Data(DataPdu::new(pdu.channel_id, data)))
+            }
+            plain => Ok(plain),
+        }
+    }
+
+    /// Runs one block through the channel's own decompression context, making it on first use.
+    fn inflate(&mut self, channel_id: DynamicChannelId, data: &[u8]) -> PduResult<Vec<u8>> {
+        let Self {
+            compression,
+            decompressors,
+            ..
+        } = self;
+        let compression = compression.as_ref().ok_or_else(|| {
+            pdu_other_err!("server compressed channel data for a client that asked it not to")
+        })?;
+        let context = decompressors
+            .entry(channel_id)
+            .or_insert_with(|| compression.new_context());
+        let mut plain = Vec::new();
+        context.decompress(data, &mut plain)?;
+        Ok(plain)
     }
 
     fn handle_soft_sync_request(
@@ -426,6 +510,9 @@ impl SvcProcessor for DrdynvcClient {
                     // and get any start messages.
                     self.dynamic_channels
                         .attach_channel_id(channel_name.clone(), channel_id);
+                    // A reopened channel starts its compression history over.
+                    self.decompressors.remove(&channel_id);
+                    self.channel_transports.insert(channel_id, transport);
                     let dynamic_channel = self
                         .dynamic_channels
                         .get_by_channel_name_mut(&channel_name)
@@ -457,6 +544,9 @@ impl SvcProcessor for DrdynvcClient {
                 debug!("Got DVC Close Request PDU: {close_request:?}");
                 self.dynamic_channels
                     .remove_by_channel_id(close_request.channel_id);
+                // The compression history belongs to the channel, not to the id it was given.
+                self.decompressors.remove(&close_request.channel_id);
+                self.channel_transports.remove(&close_request.channel_id);
 
                 let close_response =
                     DrdynvcClientPdu::Close(ClosePdu::new(close_request.channel_id));
@@ -466,7 +556,9 @@ impl SvcProcessor for DrdynvcClient {
                 responses.push(SvcMessage::from(close_response).with_transport(transport));
             }
             DrdynvcServerPdu::Data(data) => {
+                let data = self.decompress(data)?;
                 let channel_id = data.channel_id();
+                self.channel_transports.insert(channel_id, transport);
 
                 let messages = self
                     .dynamic_channels

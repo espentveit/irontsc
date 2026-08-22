@@ -76,6 +76,9 @@ enum SegmentedDescriptor {
 #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
 enum CompressionType {
     Rdp8 = 0x4,
+    /// The variant a dynamic virtual channel uses ([MS-RDPEDYC] section 2.2.3.4): the same
+    /// token encoding, with the history limited to 8,192 bytes rather than 2,500,000.
+    Rdp8Lite = 0x6,
 }
 
 bitflags! {

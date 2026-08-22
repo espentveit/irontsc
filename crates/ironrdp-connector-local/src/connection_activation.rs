@@ -443,7 +443,12 @@ fn create_client_confirm_active(
         }),
         CapabilitySet::VirtualChannel(VirtualChannel {
             flags: VirtualChannelFlags::NO_COMPRESSION,
-            chunk_size: Some(0), // ignored
+            // MS-RDPBCGR 2.2.7.1.10 says the server ignores what a client puts here, but it
+            // also says the value MUST be at least CHANNEL_CHUNK_LENGTH. Nought satisfies the
+            // one sentence and breaks the other, and a server that reads the field before
+            // deciding how much it may write to a static virtual channel would be entitled to
+            // write nothing at all.
+            chunk_size: Some(ironrdp_svc::CHANNEL_CHUNK_LENGTH as u32),
         }),
         CapabilitySet::Sound(Sound {
             flags: SoundFlags::empty(),

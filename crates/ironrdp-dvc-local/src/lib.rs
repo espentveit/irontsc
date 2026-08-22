@@ -78,6 +78,29 @@ pub trait DvcProcessor: AsAny + Send {
 
 assert_obj_safe!(DvcProcessor);
 
+/// Undoes the bulk compression that a version 3 DVC manager may apply to channel data.
+///
+/// One of these is a compression *context*: [MS-RDPEDYC] section 3.1.5.1.4 requires a
+/// dedicated one per channel, because a compressed block may refer back to anything sent
+/// earlier on the same channel and to nothing sent on any other.
+pub trait DvcDecompressor: Send {
+    /// Appends the plain bytes of one `RDP_SEGMENTED_DATA` structure to `output`.
+    fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> PduResult<()>;
+}
+
+assert_obj_safe!(DvcDecompressor);
+
+/// Hands out those contexts, one per channel.
+///
+/// A client that supplies one advertises version 3 of the dynamic channel extension and so
+/// invites the server to compress; a client that does not asks for version 2 and is sent
+/// everything in the clear.
+pub trait DvcCompression: Send {
+    fn new_context(&self) -> Box<dyn DvcDecompressor>;
+}
+
+assert_obj_safe!(DvcCompression);
+
 pub fn encode_dvc_messages(
     channel_id: u32,
     messages: Vec<DvcMessage>,
