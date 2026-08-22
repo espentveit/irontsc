@@ -387,7 +387,7 @@ impl McpBridge {
         layout: crate::agent::KeyboardLayout,
         computer: String,
         username: String,
-        vision: Option<crate::agent::Vision>,
+        sight: Option<std::sync::Arc<crate::agent::Models>>,
     ) -> anyhow::Result<Self> {
         let session = crate::agent::AgentSession::attach(frame, input_sender, layout);
 
@@ -403,11 +403,11 @@ impl McpBridge {
         // Bound before this returns, so the URL the menu shows is already live. A busy port
         // falls back to an ephemeral one rather than refusing to start.
         let server = runtime.block_on(async {
-            match crate::agent::serve_http(Arc::clone(&session), port, vision.clone()).await {
+            match crate::agent::serve_http(Arc::clone(&session), port, sight.clone()).await {
                 Ok(server) => Ok(server),
                 Err(error) => {
                     tracing::warn!(%error, port, "MCP port unavailable, taking any free port");
-                    crate::agent::serve_http(Arc::clone(&session), 0, vision.clone()).await
+                    crate::agent::serve_http(Arc::clone(&session), 0, sight.clone()).await
                 }
             }
         })?;
@@ -1697,7 +1697,7 @@ impl SessionApp {
             layout,
             self.settings.server.clone(),
             self.settings.username.clone(),
-            self.preferences.vision(),
+            self.preferences.sight(),
         ) {
             Ok(bridge) => {
                 tracing::info!(url = %bridge.server.url(), "MCP mode on");
@@ -2667,35 +2667,57 @@ fn show_logon_settings(
     });
 
     settings_group(ui, "Agent settings", |ui| {
-        ui.label("A vision model to ask about the screen, for when MCP mode is on.");
-        ui.label("Kept with IronTSC's own settings, not in the .rdp file, since it is the same wherever you connect.");
+        ui.label("Models that let an agent read the screen here, rather than sending pictures of it.");
         ui.add_space(6.0);
 
+        let installed = preferences
+            .models_directory()
+            .is_some_and(|directory| crate::agent::Models::load(&directory).is_some());
+        ui.horizontal(|ui| {
+            ui.label("Models:");
+            ui.label(if installed {
+                "installed -- MCP mode offers find_text and find_targets"
+            } else {
+                "not installed -- those tools are not offered"
+            });
+        });
+        ui.add_space(6.0);
+
+        // Read before the field borrows the preferences mutably.
+        let default_directory = preferences
+            .models_directory()
+            .map(|directory| directory.display().to_string())
+            .unwrap_or_default();
+
         let mut edited = false;
-        egui::Grid::new("irontsc-vision-grid")
+        egui::Grid::new("irontsc-models-grid")
             .num_columns(2)
             .spacing([8.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Vision endpoint:");
+                ui.label("Models folder:");
                 edited |= ui
                     .add(
-                        egui::TextEdit::singleline(&mut preferences.vision_endpoint)
-                            .hint_text("http://server:8080/v1")
+                        egui::TextEdit::singleline(&mut preferences.models_dir)
+                            .hint_text(default_directory.clone())
                             .desired_width(f32::INFINITY),
                     )
                     .on_hover_text(
-                        "An OpenAI-shaped endpoint: llama.cpp, Ollama, vLLM. Set it and MCP \
-                         mode offers `ask_screen`; leave it empty and it does not.",
+                        "Where text-det.onnx, text-rec.onnx, charset.txt and widgets.onnx are \
+                         kept. Empty means the usual place.",
                     )
                     .lost_focus();
                 ui.end_row();
 
-                ui.label("Vision model:");
+                ui.label("Remote DPI:");
                 edited |= ui
                     .add(
-                        egui::TextEdit::singleline(&mut preferences.vision_model)
-                            .hint_text("optional -- named only where the server holds several")
-                            .desired_width(f32::INFINITY),
+                        egui::DragValue::new(&mut preferences.dpi_scale)
+                            .range(0..=500)
+                            .suffix("%"),
+                    )
+                    .on_hover_text(
+                        "What to tell the server this display's scaling is. Zero follows the \
+                         display; 100 keeps a remote desktop the size a 1:1 monitor would show.",
                     )
                     .lost_focus();
                 ui.end_row();

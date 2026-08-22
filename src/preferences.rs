@@ -25,13 +25,14 @@ const PREFERENCES_FILE: &str = "preferences.json";
 /// Settings that are about IronTSC rather than about one connection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Preferences {
-    /// An OpenAI-shaped endpoint with a vision model behind it, such as
-    /// `http://server:8080/v1` (llama.cpp) or `http://localhost:11434/v1` (Ollama).
+    /// Where the models that read the screen live. Empty means the usual place,
+    /// `~/.local/share/irontsc/models`.
+    ///
+    /// Four files are looked for there: `text-det.onnx` and `text-rec.onnx` (PP-OCRv6 tiny),
+    /// `charset.txt`, and `widgets.onnx` (a small YOLO over interface elements). Without them
+    /// MCP mode simply does not offer `find_text` and `find_targets`; nothing is downloaded.
     #[serde(default)]
-    pub vision_endpoint: String,
-    /// The model to ask for. Servers holding a single model ignore it.
-    #[serde(default)]
-    pub vision_model: String,
+    pub models_dir: String,
     /// The keyboard layout the servers you connect to have active: `us`, `no`. Empty means take
     /// this machine's.
     #[serde(default)]
@@ -96,9 +97,18 @@ impl Preferences {
         }
     }
 
-    /// Where to ask about the screen, if anywhere.
-    pub fn vision(&self) -> Option<crate::agent::Vision> {
-        crate::agent::Vision::from_settings(&self.vision_endpoint, &self.vision_model)
+    /// The directory to look in for the screen models.
+    pub fn models_directory(&self) -> Option<std::path::PathBuf> {
+        match self.models_dir.trim() {
+            "" => crate::agent::Models::default_directory(),
+            named => Some(std::path::PathBuf::from(named)),
+        }
+    }
+
+    /// The models themselves, or `None` when they are not installed.
+    pub fn sight(&self) -> Option<std::sync::Arc<crate::agent::Models>> {
+        let directory = self.models_directory()?;
+        crate::agent::Models::load(&directory).map(std::sync::Arc::new)
     }
 }
 
@@ -133,12 +143,18 @@ mod tests {
     }
 
     #[test]
-    fn vision_is_configured_only_when_an_endpoint_is() {
-        assert!(Preferences::default().vision().is_none());
-        let asked = Preferences {
-            vision_endpoint: "http://server:8080/v1".to_owned(),
+    fn the_models_directory_defaults_and_can_be_moved() {
+        assert_eq!(
+            Preferences::default().models_directory(),
+            crate::agent::Models::default_directory()
+        );
+        let elsewhere = Preferences {
+            models_dir: "/opt/screen-models".to_owned(),
             ..Preferences::default()
         };
-        assert!(asked.vision().is_some());
+        assert_eq!(
+            elsewhere.models_directory(),
+            Some(std::path::PathBuf::from("/opt/screen-models"))
+        );
     }
 }

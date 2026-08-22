@@ -105,42 +105,32 @@ pub struct PixelArgs {
     pub scale: Option<f64>,
 }
 
-/// What `ask_screen` asks when the caller does not say.
-const DEFAULT_ASK_QUESTION: &str = "Read out every piece of text on this screen.";
-
-/// The width `ask_screen` scales down to before sending, unless told otherwise.
-const DEFAULT_ASK_WIDTH: u32 = 1568;
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AskArgs {
-    /// What to ask about the screen. Defaults to reading out every piece of text on it.
+pub struct FindTextArgs {
+    /// Only report lines containing this, matched without regard to case. Left off, every line
+    /// on screen comes back.
     #[serde(default)]
-    pub question: Option<String>,
+    pub contains: Option<String>,
     /// Wait until the screen has not changed for this many milliseconds first. Defaults to 250.
     #[serde(default)]
     pub settle_ms: Option<u64>,
-    /// Scale the image down to at most this many pixels wide before asking. Defaults to 1568,
-    /// which is enough for a desktop's text.
+    /// Drop lines the recogniser is less sure of than this, from 0 to 1. Defaults to 0.5.
     #[serde(default)]
-    pub max_width: Option<u32>,
-    /// Ask about one part of the screen only. Left edge, in desktop pixels.
+    pub min_confidence: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindTargetsArgs {
+    /// Wait until the screen has not changed for this many milliseconds first. Defaults to 250.
     #[serde(default)]
-    pub x: Option<u16>,
-    /// Top edge of that region.
+    pub settle_ms: Option<u64>,
+    /// Drop anything the detector is less sure of than this, from 0 to 1. Defaults to 0.15,
+    /// which is low on purpose: a missed button costs more than a spurious box.
     #[serde(default)]
-    pub y: Option<u16>,
-    /// Width of that region.
+    pub min_confidence: Option<f32>,
+    /// Report at most this many, most confident first. Defaults to 30.
     #[serde(default)]
-    pub width: Option<u16>,
-    /// Height of that region.
-    #[serde(default)]
-    pub height: Option<u16>,
-    /// The width of the image the region was measured on, when it came off a scaled screenshot.
-    #[serde(default)]
-    pub from_width: Option<u32>,
-    /// How much smaller that image was, if that is easier to say than its width.
-    #[serde(default)]
-    pub scale: Option<f64>,
+    pub limit: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -255,24 +245,25 @@ pub struct WaitArgs {
 #[derive(Clone)]
 pub struct McpServer {
     session: Arc<AgentSession>,
-    /// Where to ask about the screen, when anywhere.
-    vision: Option<super::Vision>,
+    /// The models that read the screen here, when they are installed.
+    sight: Option<Arc<super::Models>>,
     /// The tool table this server actually offers, which is the generated one minus whatever
     /// this session cannot do.
     router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl McpServer {
-    pub fn new(session: Arc<AgentSession>, vision: Option<super::Vision>) -> Self {
+    pub fn new(session: Arc<AgentSession>, sight: Option<Arc<super::Models>>) -> Self {
         let mut router = Self::tool_router();
-        if vision.is_none() {
-            // No endpoint, no tool. An agent should not be shown something that can only fail,
+        if sight.is_none() {
+            // No models, no tools. An agent should not be shown something that can only fail,
             // and a tool it cannot see costs it no tokens to ignore.
-            router.remove_route("ask_screen");
+            router.remove_route("find_text");
+            router.remove_route("find_targets");
         }
         Self {
             session,
-            vision,
+            sight,
             router,
         }
     }
@@ -302,6 +293,30 @@ impl McpServer {
         // last column lands on the last pixel rather than off the end.
         let limit = f64::from(desktop.saturating_sub(1)).max(0.0);
         scaled.min(limit) as u16
+    }
+
+    /// A settled frame as an RGB image, for the models to look at.
+    async fn look(&self, settle_ms: Option<u64>) -> Result<image::RgbImage, CallToolResult> {
+        self.ready().await?;
+
+        let settle = Duration::from_millis(settle_ms.unwrap_or(DEFAULT_SETTLE_MS));
+        if !settle.is_zero() {
+            self.session
+                .wait_until_still(settle, Duration::from_millis(SETTLE_TIMEOUT_MS))
+                .await;
+        }
+
+        let Some((bgra, width, height, _generation)) = self.session.frame().snapshot() else {
+            return Err(bad_request("no frame has arrived from the server yet"));
+        };
+
+        let mut image = image::RgbImage::new(u32::from(width), u32::from(height));
+        for (index, pixel) in image.pixels_mut().enumerate() {
+            let at = index * 4;
+            // The mirror is BGRA and the alpha is not meaningful; the models want RGB.
+            *pixel = image::Rgb([bgra[at + 2], bgra[at + 1], bgra[at]]);
+        }
+        Ok(image)
     }
 
     /// Nothing can be clicked before the first frame, so every input tool waits for it.
@@ -712,76 +727,111 @@ impl McpServer {
         ))]))
     }
 
-    /// Ask a vision model about what is on the screen.
+    /// Read the text on the screen, with the position of every line.
     ///
-    /// The screenshot never comes back here: it goes to the model behind the configured
-    /// endpoint, and you get its answer as text. That is worth reaching for when the question
-    /// is small -- "what does the dialog say", "is the Save button greyed out", "read the
-    /// error" -- and a picture would cost more than the answer is worth. Ask for coordinates
-    /// and you will get a guess; use `screenshot` and your own eyes when position matters.
+    /// This is the cheap way to see: two small models run here, and you get lines and
+    /// coordinates rather than a picture. `contains` narrows it to the lines you are after --
+    /// `contains="OK"` to find a button before clicking it. The coordinates are the desktop's
+    /// own, so they go straight to `click`.
     #[rmcp::tool]
-    async fn ask_screen(
+    async fn find_text(
         &self,
-        Parameters(args): Parameters<AskArgs>,
+        Parameters(args): Parameters<FindTextArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let Some(vision) = self.vision.clone() else {
-            return Ok(bad_request("no vision endpoint is configured for this session"));
+        let Some(sight) = self.sight.clone() else {
+            return Ok(bad_request("no screen models are installed for this session"));
         };
-        if let Err(result) = self.ready().await {
-            return Ok(result);
+        let image = match self.look(args.settle_ms).await {
+            Ok(image) => image,
+            Err(result) => return Ok(result),
+        };
+
+        let lines = match tokio::task::spawn_blocking(move || sight.read(&image)).await {
+            Ok(Ok(lines)) => lines,
+            Ok(Err(error)) => return Ok(bad_request(format!("could not read the screen: {error}"))),
+            Err(error) => return Ok(bad_request(format!("reading the screen stopped: {error}"))),
+        };
+
+        let needle = args.contains.as_deref().map(str::to_lowercase);
+        let minimum = args.min_confidence.unwrap_or(0.5);
+        let matched: Vec<_> = lines
+            .into_iter()
+            .filter(|line| line.confidence >= minimum)
+            .filter(|line| {
+                needle
+                    .as_ref()
+                    .is_none_or(|needle| line.text.to_lowercase().contains(needle))
+            })
+            .collect();
+
+        if matched.is_empty() {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                match &args.contains {
+                    Some(needle) => format!("no text matching {needle:?} is on screen"),
+                    None => "no text was found on screen".to_owned(),
+                },
+            )]));
         }
 
-        let settle = Duration::from_millis(args.settle_ms.unwrap_or(DEFAULT_SETTLE_MS));
-        if !settle.is_zero() {
-            self.session
-                .wait_until_still(settle, Duration::from_millis(SETTLE_TIMEOUT_MS))
-                .await;
+        let mut report = format!("{} lines\n", matched.len());
+        for line in &matched {
+            let (x, y) = line.centre();
+            report.push_str(&format!(
+                "click ({x}, {y}) [{}, {}, {}, {}] {:.2}  {}\n",
+                line.left, line.top, line.right, line.bottom, line.confidence, line.text
+            ));
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(report)]))
+    }
+
+    /// List the things on screen that look clickable, whether or not they carry a label.
+    ///
+    /// Icons, toolbar buttons and tray items have no text for `find_text` to read; this finds
+    /// them by shape. It says where they are, not what they do -- pair it with `find_text`, or
+    /// take a screenshot of one box to see a single icon closely.
+    #[rmcp::tool]
+    async fn find_targets(
+        &self,
+        Parameters(args): Parameters<FindTargetsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(sight) = self.sight.clone() else {
+            return Ok(bad_request("no screen models are installed for this session"));
+        };
+        let image = match self.look(args.settle_ms).await {
+            Ok(image) => image,
+            Err(result) => return Ok(result),
+        };
+
+        let minimum = args.min_confidence.unwrap_or(0.15);
+        let targets = match tokio::task::spawn_blocking(move || sight.targets(&image, minimum)).await
+        {
+            Ok(Ok(targets)) => targets,
+            Ok(Err(error)) => return Ok(bad_request(format!("could not scan the screen: {error}"))),
+            Err(error) => return Ok(bad_request(format!("scanning the screen stopped: {error}"))),
+        };
+
+        if targets.is_empty() {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                "nothing on screen looks clickable".to_owned(),
+            )]));
         }
 
-        let Some((bgra, width, height, _generation)) = self.session.frame().snapshot() else {
-            return Ok(bad_request("no frame has arrived from the server yet"));
-        };
-
-        // A region is cut before scaling, the same way `screenshot` does it, so a question
-        // about one dialog is asked about that dialog rather than the whole desktop.
-        let requested_region = args.x.is_some()
-            || args.y.is_some()
-            || args.width.is_some()
-            || args.height.is_some();
-        let (bgra, width, height) = if requested_region {
-            let rect = super::screenshot::Crop {
-                x: self.from_image(args.x.unwrap_or(0), args.from_width, args.scale),
-                y: self.from_image(args.y.unwrap_or(0), args.from_width, args.scale),
-                width: self.from_image(args.width.unwrap_or(width), args.from_width, args.scale),
-                height: self.from_image(args.height.unwrap_or(height), args.from_width, args.scale),
-            };
-            match super::screenshot::crop(&bgra, width, height, rect) {
-                Ok((cropped, w, h)) => (cropped, w, h),
-                Err(message) => return Ok(bad_request(message)),
-            }
-        } else {
-            (bgra, width, height)
-        };
-
-        // Capped by default: the model is reading, not looking at art, and every pixel above
-        // this costs time at the far end without adding a letter.
-        let max_width = NonZeroU32::new(args.max_width.unwrap_or(DEFAULT_ASK_WIDTH));
-        let shot = match super::screenshot::encode(&bgra, width, height, max_width) {
-            Ok(shot) => shot,
-            Err(message) => return Ok(bad_request(message)),
-        };
-
-        let question = args
-            .question
-            .as_deref()
-            .map(str::trim)
-            .filter(|question| !question.is_empty())
-            .unwrap_or(DEFAULT_ASK_QUESTION);
-
-        match vision.ask(&shot.png, question).await {
-            Ok(answer) => Ok(CallToolResult::success(vec![ContentBlock::text(answer)])),
-            Err(error) => Ok(bad_request(format!("{error}"))),
+        let limit = usize::from(args.limit.unwrap_or(30)).max(1);
+        let mut report = format!("{} clickable\n", targets.len().min(limit));
+        for target in targets.iter().take(limit) {
+            let (x, y) = target.centre();
+            report.push_str(&format!(
+                "click ({x}, {y}) [{}, {}, {}, {}] {}x{} {:.2}\n",
+                target.left,
+                target.top,
+                target.right,
+                target.bottom,
+                target.right - target.left,
+                target.bottom - target.top,
+                target.confidence
+            ));
         }
+        Ok(CallToolResult::success(vec![ContentBlock::text(report)]))
     }
 
     /// Wait, for when something is loading and there is nothing to click yet.
@@ -821,7 +871,12 @@ Pass x, y, width and height to `screenshot` to grab one part of the screen at fu
 instead of the whole desktop scaled down; that is the cheap way to read a dialog or a status \
 bar. `pixel` reads one exact colour, by default under the pointer, which is how to check an \
 indicator without another screenshot. `find_regions` lists flat rectangles as candidate \
-controls -- treat it as a hint to check against the image, not as a widget tree."
+controls -- treat it as a hint to check against the image, not as a widget tree.\n\n\
+Where `find_text` and `find_targets` are listed, reach for them before a screenshot. They run \
+small models on this machine and answer in text: `find_text` gives every line and where it is, \
+`find_text` with `contains` finds one button, and `find_targets` gives the boxes worth clicking \
+including icons that carry no text. A screenshot then only has to settle an ambiguity rather \
+than carry the whole screen."
 )]
 impl ServerHandler for McpServer {}
 
@@ -836,9 +891,9 @@ fn interpolate(from: u16, to: u16, step: u32, steps: u32) -> u16 {
 /// Serves MCP over stdio and returns when the client goes away. Headless mode.
 pub async fn serve_stdio(
     session: Arc<AgentSession>,
-    vision: Option<super::Vision>,
+    sight: Option<Arc<super::Models>>,
 ) -> anyhow::Result<()> {
-    let service = McpServer::new(session, vision)
+    let service = McpServer::new(session, sight)
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|error| anyhow::anyhow!("failed to start the MCP server: {error}"))?;
@@ -890,7 +945,7 @@ impl Drop for HttpServer {
 pub async fn serve_http(
     session: Arc<AgentSession>,
     port: u16,
-    vision: Option<super::Vision>,
+    sight: Option<Arc<super::Models>>,
 ) -> anyhow::Result<HttpServer> {
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use rmcp::transport::streamable_http_server::{
@@ -910,7 +965,7 @@ pub async fn serve_http(
     config.cancellation_token = cancel.clone();
 
     let service = StreamableHttpService::new(
-        move || Ok(McpServer::new(Arc::clone(&session), vision.clone())),
+        move || Ok(McpServer::new(Arc::clone(&session), sight.clone())),
         Arc::new(LocalSessionManager::default()),
         config,
     );

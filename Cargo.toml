@@ -277,6 +277,18 @@ libc = "0.2"
 # The MCP session register describes each running session as one small JSON message.
 serde_json = "1"
 
+# Seeing the screen without sending it anywhere: PP-OCRv6 for text and a small YOLO for the
+# things worth clicking, both ONNX, both on the CPU. A screenful costs tens of milliseconds
+# here rather than a round trip and a thousand image tokens at the other end.
+#
+# Run against ONNX Runtime directly rather than through an OCR toolkit. The two algorithms
+# involved -- a threshold and connected components over DBNet's probability map, and a greedy
+# CTC decode -- are a page of code between them, and the toolkits that wrap them bring several
+# hundred crates and a document-understanding stack that is no use to a desktop.
+ort = "=2.0.0-rc.13"
+image = "0.25"
+imageproc = "0.27"
+
 
 [dev-dependencies]
 # Only to drive the MCP server's own HTTP surface in tests; already in the tree by way of
