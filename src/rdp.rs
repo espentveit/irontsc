@@ -758,13 +758,27 @@ impl CliprdrBackendFactory for ArboardClipboardFactory {
     }
 }
 
-#[derive(Debug)]
 struct ArboardClipboardBackend {
     sender: mpsc::UnboundedSender<RdpInputEvent>,
     clipboard_state: Arc<Mutex<ClipboardState>>,
     running: Arc<AtomicBool>,
     watcher: Option<thread::JoinHandle<()>>,
     temp_dir: String,
+    /// One clipboard for the life of the session, and the reason the remote's copies used to
+    /// vanish. Both X11 and Wayland hand the *owner* the job of serving what was copied, so a
+    /// `Clipboard` created for one `set_text` and dropped at the end of the call gives the
+    /// selection straight back: nothing errored, and nothing could be pasted either.
+    clipboard: Mutex<Option<Clipboard>>,
+}
+
+impl std::fmt::Debug for ArboardClipboardBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `arboard::Clipboard` is not `Debug`, and its contents are the user's business anyway.
+        formatter
+            .debug_struct("ArboardClipboardBackend")
+            .field("temp_dir", &self.temp_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 impl_as_any!(ArboardClipboardBackend);
@@ -1079,6 +1093,8 @@ impl ArboardClipboardBackend {
             running: Arc::new(AtomicBool::new(false)),
             watcher: None,
             temp_dir: std::env::temp_dir().display().to_string(),
+            // Opened on first use and then held: see the field's own note.
+            clipboard: Mutex::new(None),
         }
     }
 
@@ -1152,19 +1168,31 @@ impl ArboardClipboardBackend {
         }
     }
 
+    /// Runs `body` against the session's one clipboard, opening it on first use.
+    fn with_clipboard<T>(&self, body: impl FnOnce(&mut Clipboard) -> T) -> Option<T> {
+        let mut held = self.clipboard.lock().unwrap();
+        if held.is_none() {
+            match Clipboard::new() {
+                Ok(clipboard) => *held = Some(clipboard),
+                Err(err) => {
+                    warn!("Failed to access clipboard: {err}");
+                    return None;
+                }
+            }
+        }
+        held.as_mut().map(body)
+    }
+
     fn read_clipboard_text(&self) -> Option<String> {
-        let mut clipboard = Clipboard::new().ok()?;
-        ClipboardState::from_clipboard(&mut clipboard).text
+        self.with_clipboard(|clipboard| ClipboardState::from_clipboard(clipboard).text)?
     }
 
     fn set_clipboard_text(&self, text: &str) {
-        match Clipboard::new() {
-            Ok(mut clipboard) => {
-                if let Err(err) = clipboard.set_text(text.to_owned()) {
-                    warn!("Failed to set clipboard text: {err}");
-                }
-            }
-            Err(err) => warn!("Failed to access clipboard: {err}"),
+        let set = self.with_clipboard(|clipboard| clipboard.set_text(text.to_owned()));
+        match set {
+            Some(Err(err)) => warn!("Failed to set clipboard text: {err}"),
+            Some(Ok(())) => debug!("📋 clipboard from the remote desktop: {} bytes", text.len()),
+            None => {}
         }
 
         let mut state = self.clipboard_state.lock().unwrap();
@@ -1195,6 +1223,7 @@ impl CliprdrBackend for ArboardClipboardBackend {
     }
 
     fn on_ready(&mut self) {
+        info!("📋 cliprdr: server is ready, advertising what this machine has");
         self.ensure_watcher();
         self.advertise_current_clipboard();
     }
@@ -1206,11 +1235,16 @@ impl CliprdrBackend for ArboardClipboardBackend {
 
     fn on_process_negotiated_capabilities(
         &mut self,
-        _capabilities: ClipboardGeneralCapabilityFlags,
+        capabilities: ClipboardGeneralCapabilityFlags,
     ) {
+        info!(?capabilities, "📋 cliprdr: capabilities negotiated");
     }
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
+        info!(
+            "📋 cliprdr: the remote desktop copied something, {} formats offered",
+            available_formats.len()
+        );
         if let Some(format) = available_formats
             .iter()
             .find(|fmt| fmt.id == ClipboardFormatId::CF_UNICODETEXT)

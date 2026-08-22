@@ -219,7 +219,11 @@ ironrdp-async = { path = "crates/ironrdp-async-local", version = "0.7.0" }
 ironrdp-core = { path = "crates/ironrdp-core-local", version = "0.1.5" }
 ironrdp_udp = { path = "crates/irontsc-udp" }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-arboard = "3.6.1"
+# `wayland-data-control` is what makes the clipboard work on a Wayland session: without it
+# arboard is X11-only and reaches the desktop through XWayland, which is a different selection
+# space from the one Wayland applications read. The protocol it uses also works while the window
+# is unfocused, which matters for a session an agent drives in the background.
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 
 # egui frontend. Built as a second binary (src/bin/irontsc-egui.rs) next to the GTK one; the
 # window, GL context and event loop are driven directly by winit/glutin rather than eframe so
