@@ -1351,31 +1351,36 @@ fn detect_multitransport_request(
 
     // CRITICAL: MultiTransportRequest PDUs are ONLY sent on the MCS Message Channel!
     // Scanning other channels (especially Virtual Channels with arbitrary binary data)
-    // causes false positives when random bytes match the security header pattern.
-    if let Some(expected_channel) = message_channel_id {
-        if channel_id != expected_channel {
-            trace!(
-                channel_id,
-                expected_channel,
-                "Skipping multitransport detection on non-message MCS channel (avoiding false positives from binary data)"
-            );
-            return None;
-        }
+    // causes false positives when random bytes match the security header pattern. A server
+    // that negotiated no message channel therefore cannot be sending one at all -- and
+    // treating "no channel" as "any channel" is how a graphics frame becomes an invitation to
+    // open a UDP tunnel to a request id read out of the middle of a bitstream.
+    let expected_channel = message_channel_id?;
+    if channel_id != expected_channel {
+        trace!(
+            channel_id,
+            expected_channel,
+            "Skipping multitransport detection on non-message MCS channel (avoiding false positives from binary data)"
+        );
+        return None;
     }
 
-    // Search for a BasicSecurityHeader with the TRANSPORT_REQ flag inside the user_data
-    for offset in 0..user_data.len().saturating_sub(8) {
-        let mut cursor = ReadCursor::new(&user_data[offset..]);
+    // The security header begins the payload; it is not something to search for. Every extra
+    // offset tried is another chance for ordinary data to look like a request.
+    {
+        let offset = 0usize;
+        let mut cursor = ReadCursor::new(user_data);
+
+        if cursor.len() < 8 {
+            return None;
+        }
 
         // Manually decode the security header so we can capture the high flag field
         let flags_bits = cursor.read_u16();
-        let flags = match BasicSecurityHeaderFlags::from_bits(flags_bits) {
-            Some(f) => f,
-            None => continue,
-        };
+        let flags = BasicSecurityHeaderFlags::from_bits(flags_bits)?;
 
         if !flags.contains(BasicSecurityHeaderFlags::TRANSPORT_REQ) {
-            continue;
+            return None;
         }
 
         // A valid multitransport request shouldn't mix other security flags such as RESET_SEQNO
@@ -1389,7 +1394,7 @@ fn detect_multitransport_request(
                 flags = format_args!("0x{flags_bits:04x}"),
                 "Skipping candidate security header because it sets unrelated flags",
             );
-            continue;
+            return None;
         }
 
         let security_flags_hi = cursor.read_u16();
@@ -1401,7 +1406,7 @@ fn detect_multitransport_request(
                 security_flags_hi,
                 "Skipping candidate security header because FLAGSHI_VALID is not set",
             );
-            continue;
+            return None;
         }
 
         // Attempt to decode the request body
@@ -1466,39 +1471,40 @@ fn detect_autodetect_request(
     let channel_id = send_ctx.channel_id;
     let user_data = send_ctx.user_data;
 
-    // Auto-detect messages are sent on the MCS Message Channel
-    if let Some(expected_channel) = message_channel_id {
-        if channel_id != expected_channel {
-            return None;
-        }
+    // Auto-detect requests only ever arrive on the MCS message channel ([MS-RDPBCGR] 2.2.14.1),
+    // so a server that negotiated no message channel cannot be sending one. Guessing otherwise
+    // means inspecting every channel's traffic, and anything mistaken for auto-detect here is
+    // swallowed rather than processed -- which is what cost the dynamic channels their Create
+    // Requests against a server that offers no message channel.
+    let expected_channel = message_channel_id?;
+    if channel_id != expected_channel {
+        return None;
     }
 
-    // Look for security header with AUTODETECT_REQ flag
-    for offset in 0..user_data.len().saturating_sub(8) {
-        let mut cursor = ReadCursor::new(&user_data[offset..]);
-
-        let flags_bits = cursor.read_u16();
-        let flags = BasicSecurityHeaderFlags::from_bits(flags_bits)?;
-
-        if !flags.contains(BasicSecurityHeaderFlags::AUTODETECT_REQ) {
-            continue;
-        }
-
-        let _security_flags_hi = cursor.read_u16();
-
-        // The remaining data should be the auto-detect request PDU
-        let remaining = cursor.remaining();
-        if remaining.len() >= 6 {
-            // Minimum auto-detect header size
-            debug!(
-                "📊 Detected auto-detect request ({} bytes)",
-                remaining.len()
-            );
-            return Some(remaining.to_vec());
-        }
+    // The security header is the start of the payload, not something to be hunted for: scanning
+    // every offset for a u16 with the flag bit set finds one in almost any long enough frame.
+    if user_data.len() < 4 + 6 {
+        return None;
     }
 
-    None
+    let mut cursor = ReadCursor::new(user_data);
+
+    let flags_bits = cursor.read_u16();
+    let flags = BasicSecurityHeaderFlags::from_bits(flags_bits)?;
+
+    if !flags.contains(BasicSecurityHeaderFlags::AUTODETECT_REQ) {
+        return None;
+    }
+
+    let _security_flags_hi = cursor.read_u16();
+
+    let remaining = cursor.remaining();
+    debug!(
+        "📊 Detected auto-detect request ({} bytes)",
+        remaining.len()
+    );
+
+    Some(remaining.to_vec())
 }
 
 fn encode_multitransport_response_frame(

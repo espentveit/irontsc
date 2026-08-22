@@ -354,6 +354,10 @@ impl RdpSettings {
                         settings.show_codec_grid = val != 0;
                     }
                 }
+                // A layout belongs to the server being connected to, so it stays here rather
+                // than in the preferences; the vision endpoint is IronTSC's own and lives
+                // there, away from a file mstsc might also read.
+                "irontsc:keyboard_layout" => settings.keyboard_layout = value.to_owned(),
                 _ => {}
             }
         }
@@ -447,6 +451,11 @@ impl RdpSettings {
             "irontsc:show_codec_grid:i:{}",
             if self.show_codec_grid { 1 } else { 0 }
         ));
+
+        // Only written when set, so an untouched connection file stays as short as mstsc's.
+        if !self.keyboard_layout.trim().is_empty() {
+            lines.push(format!("irontsc:keyboard_layout:s:{}", self.keyboard_layout));
+        }
 
         lines.join("\n")
     }

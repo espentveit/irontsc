@@ -105,6 +105,44 @@ pub struct PixelArgs {
     pub scale: Option<f64>,
 }
 
+/// What `ask_screen` asks when the caller does not say.
+const DEFAULT_ASK_QUESTION: &str = "Read out every piece of text on this screen.";
+
+/// The width `ask_screen` scales down to before sending, unless told otherwise.
+const DEFAULT_ASK_WIDTH: u32 = 1568;
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AskArgs {
+    /// What to ask about the screen. Defaults to reading out every piece of text on it.
+    #[serde(default)]
+    pub question: Option<String>,
+    /// Wait until the screen has not changed for this many milliseconds first. Defaults to 250.
+    #[serde(default)]
+    pub settle_ms: Option<u64>,
+    /// Scale the image down to at most this many pixels wide before asking. Defaults to 1568,
+    /// which is enough for a desktop's text.
+    #[serde(default)]
+    pub max_width: Option<u32>,
+    /// Ask about one part of the screen only. Left edge, in desktop pixels.
+    #[serde(default)]
+    pub x: Option<u16>,
+    /// Top edge of that region.
+    #[serde(default)]
+    pub y: Option<u16>,
+    /// Width of that region.
+    #[serde(default)]
+    pub width: Option<u16>,
+    /// Height of that region.
+    #[serde(default)]
+    pub height: Option<u16>,
+    /// The width of the image the region was measured on, when it came off a scaled screenshot.
+    #[serde(default)]
+    pub from_width: Option<u32>,
+    /// How much smaller that image was, if that is easier to say than its width.
+    #[serde(default)]
+    pub scale: Option<f64>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RegionsArgs {
     /// Ignore blocks narrower than this. Defaults to 16.
@@ -217,11 +255,26 @@ pub struct WaitArgs {
 #[derive(Clone)]
 pub struct McpServer {
     session: Arc<AgentSession>,
+    /// Where to ask about the screen, when anywhere.
+    vision: Option<super::Vision>,
+    /// The tool table this server actually offers, which is the generated one minus whatever
+    /// this session cannot do.
+    router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl McpServer {
-    pub fn new(session: Arc<AgentSession>) -> Self {
-        Self { session }
+    pub fn new(session: Arc<AgentSession>, vision: Option<super::Vision>) -> Self {
+        let mut router = Self::tool_router();
+        if vision.is_none() {
+            // No endpoint, no tool. An agent should not be shown something that can only fail,
+            // and a tool it cannot see costs it no tokens to ignore.
+            router.remove_route("ask_screen");
+        }
+        Self {
+            session,
+            vision,
+            router,
+        }
     }
 
     /// Maps a coordinate back into desktop pixels from the image it was measured on.
@@ -659,6 +712,78 @@ impl McpServer {
         ))]))
     }
 
+    /// Ask a vision model about what is on the screen.
+    ///
+    /// The screenshot never comes back here: it goes to the model behind the configured
+    /// endpoint, and you get its answer as text. That is worth reaching for when the question
+    /// is small -- "what does the dialog say", "is the Save button greyed out", "read the
+    /// error" -- and a picture would cost more than the answer is worth. Ask for coordinates
+    /// and you will get a guess; use `screenshot` and your own eyes when position matters.
+    #[rmcp::tool]
+    async fn ask_screen(
+        &self,
+        Parameters(args): Parameters<AskArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(vision) = self.vision.clone() else {
+            return Ok(bad_request("no vision endpoint is configured for this session"));
+        };
+        if let Err(result) = self.ready().await {
+            return Ok(result);
+        }
+
+        let settle = Duration::from_millis(args.settle_ms.unwrap_or(DEFAULT_SETTLE_MS));
+        if !settle.is_zero() {
+            self.session
+                .wait_until_still(settle, Duration::from_millis(SETTLE_TIMEOUT_MS))
+                .await;
+        }
+
+        let Some((bgra, width, height, _generation)) = self.session.frame().snapshot() else {
+            return Ok(bad_request("no frame has arrived from the server yet"));
+        };
+
+        // A region is cut before scaling, the same way `screenshot` does it, so a question
+        // about one dialog is asked about that dialog rather than the whole desktop.
+        let requested_region = args.x.is_some()
+            || args.y.is_some()
+            || args.width.is_some()
+            || args.height.is_some();
+        let (bgra, width, height) = if requested_region {
+            let rect = super::screenshot::Crop {
+                x: self.from_image(args.x.unwrap_or(0), args.from_width, args.scale),
+                y: self.from_image(args.y.unwrap_or(0), args.from_width, args.scale),
+                width: self.from_image(args.width.unwrap_or(width), args.from_width, args.scale),
+                height: self.from_image(args.height.unwrap_or(height), args.from_width, args.scale),
+            };
+            match super::screenshot::crop(&bgra, width, height, rect) {
+                Ok((cropped, w, h)) => (cropped, w, h),
+                Err(message) => return Ok(bad_request(message)),
+            }
+        } else {
+            (bgra, width, height)
+        };
+
+        // Capped by default: the model is reading, not looking at art, and every pixel above
+        // this costs time at the far end without adding a letter.
+        let max_width = NonZeroU32::new(args.max_width.unwrap_or(DEFAULT_ASK_WIDTH));
+        let shot = match super::screenshot::encode(&bgra, width, height, max_width) {
+            Ok(shot) => shot,
+            Err(message) => return Ok(bad_request(message)),
+        };
+
+        let question = args
+            .question
+            .as_deref()
+            .map(str::trim)
+            .filter(|question| !question.is_empty())
+            .unwrap_or(DEFAULT_ASK_QUESTION);
+
+        match vision.ask(&shot.png, question).await {
+            Ok(answer) => Ok(CallToolResult::success(vec![ContentBlock::text(answer)])),
+            Err(error) => Ok(bad_request(format!("{error}"))),
+        }
+    }
+
     /// Wait, for when something is loading and there is nothing to click yet.
     #[rmcp::tool]
     async fn wait(
@@ -685,6 +810,7 @@ impl McpServer {
 }
 
 #[rmcp::tool_handler(
+    router = self.router,
     name = "irontsc",
     instructions = "Drives a Windows desktop over RDP. Call `screenshot` to see the screen, \
 then `click`, `type_text`, `key`, `scroll` and `drag` to act on it. Coordinates are always in \
@@ -708,8 +834,11 @@ fn interpolate(from: u16, to: u16, step: u32, steps: u32) -> u16 {
 }
 
 /// Serves MCP over stdio and returns when the client goes away. Headless mode.
-pub async fn serve_stdio(session: Arc<AgentSession>) -> anyhow::Result<()> {
-    let service = McpServer::new(session)
+pub async fn serve_stdio(
+    session: Arc<AgentSession>,
+    vision: Option<super::Vision>,
+) -> anyhow::Result<()> {
+    let service = McpServer::new(session, vision)
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|error| anyhow::anyhow!("failed to start the MCP server: {error}"))?;
@@ -758,7 +887,11 @@ impl Drop for HttpServer {
 /// The listener is bound before this returns, so the caller can show a URL that is already
 /// live. A token is required on every request: anything running as this user could otherwise
 /// drive the desktop, and "it is only on localhost" is not an access control.
-pub async fn serve_http(session: Arc<AgentSession>, port: u16) -> anyhow::Result<HttpServer> {
+pub async fn serve_http(
+    session: Arc<AgentSession>,
+    port: u16,
+    vision: Option<super::Vision>,
+) -> anyhow::Result<HttpServer> {
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -777,7 +910,7 @@ pub async fn serve_http(session: Arc<AgentSession>, port: u16) -> anyhow::Result
     config.cancellation_token = cancel.clone();
 
     let service = StreamableHttpService::new(
-        move || Ok(McpServer::new(Arc::clone(&session))),
+        move || Ok(McpServer::new(Arc::clone(&session), vision.clone())),
         Arc::new(LocalSessionManager::default()),
         config,
     );

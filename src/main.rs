@@ -79,6 +79,14 @@ enum Command {
     /// With no tool it prints the ones that session offers, which is the palette to pick from.
     Session(SessionCommand),
 
+    /// Read or write IronTSC's own preferences, which apply to every connection.
+    ///
+    /// `irontsc config` lists them, `irontsc config vision_endpoint` reads one, and
+    /// `irontsc config vision_endpoint http://server:8080/v1` writes it. With `--file`, the
+    /// same three forms read and write one connection's `.rdp` instead, which is how a single
+    /// desktop gets a setting the others do not have.
+    Config(ConfigCommand),
+
     /// Serve MCP over stdio, driving a session of its own with no window.
     ///
     /// This is the form an MCP client starts for itself. To let an agent drive a session you
@@ -111,6 +119,19 @@ struct McpCommand {
     /// lands correctly.
     #[arg(long)]
     keyboard_layout: Option<String>,
+}
+
+#[derive(ClapArgs, Debug)]
+struct ConfigCommand {
+    /// The setting to read or write. Left off, every setting is listed.
+    name: Option<String>,
+
+    /// The value to write. Left off, the setting is only read.
+    value: Option<String>,
+
+    /// Read and write this connection's `.rdp` file instead of the preferences.
+    #[arg(long, value_name = "PATH")]
+    file: Option<std::path::PathBuf>,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -161,6 +182,9 @@ fn resolve(connection: &ConnectionArgs) -> anyhow::Result<(ConnectForm, RdpSetti
         None => RdpSettings::load_default(),
     };
 
+    // What IronTSC prefers fills in what the connection did not say.
+    irontsc::preferences::Preferences::load().apply_to(&mut settings);
+
     if connection.no_nla {
         settings.disable_nla = true;
     }
@@ -208,6 +232,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     match args.command {
+        Some(Command::Config(command)) => run_config(&command),
         Some(Command::Sessions(command)) => run_sessions(&command),
         Some(Command::Session(command)) => run_session(&command),
         Some(Command::Mcp(mcp)) => run_mcp(mcp),
@@ -258,6 +283,10 @@ fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
             .unwrap_or(&settings.keyboard_layout),
     );
 
+    // Only offered when there is somewhere to ask; see `agent::ask`. Global, so `irontsc mcp`
+    // and the window agree without either `.rdp` mentioning it.
+    let vision = irontsc::preferences::Preferences::load().vision();
+
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| anyhow::anyhow!("failed to start the Tokio runtime: {error}"))?;
 
@@ -279,7 +308,7 @@ fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
 
     runtime.block_on(async move {
         let session = irontsc::agent::AgentSession::spawn_headless(config, layout);
-        irontsc::agent::serve_stdio(session).await
+        irontsc::agent::serve_stdio(session, vision).await
     })
 }
 
@@ -519,4 +548,106 @@ fn uptime(started_at: u64) -> String {
         60..3600 => format!("{}m", seconds / 60),
         _ => format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60),
     }
+}
+
+/// Reads or writes one setting in the `.rdp` file the window uses.
+///
+/// The settings are serde-shaped, so this goes through JSON rather than a hand-written match:
+/// a field added to `RdpSettings` shows up here the day it is added, with no second list to
+/// keep in step.
+fn run_config(command: &ConfigCommand) -> anyhow::Result<()> {
+    let (settings, preferences) = match &command.file {
+        Some(path) => (
+            Some(RdpSettings::load_from_file(path).map_err(|error| {
+                anyhow::anyhow!("could not read {}: {error}", path.display())
+            })?),
+            None,
+        ),
+        None => (None, Some(irontsc::preferences::Preferences::load())),
+    };
+
+    let as_json = match (&settings, &preferences) {
+        (Some(settings), _) => serde_json::to_value(settings)?,
+        (_, Some(preferences)) => serde_json::to_value(preferences)?,
+        _ => unreachable!("one of the two is always read"),
+    };
+    let mut fields = match as_json {
+        serde_json::Value::Object(fields) => fields,
+        _ => anyhow::bail!("the settings are not an object, which should not happen"),
+    };
+
+    let Some(name) = command.name.as_deref().map(str::trim) else {
+        for (name, value) in &fields {
+            println!("{name} = {}", show(name, value));
+        }
+        return Ok(());
+    };
+
+    let Some(current) = fields.get(name).cloned() else {
+        let known: Vec<_> = fields.keys().map(String::as_str).collect();
+        anyhow::bail!("no setting called `{name}`; there is {}", known.join(", "));
+    };
+
+    let Some(value) = command.value.as_deref() else {
+        // Named explicitly, so print it as it is -- including a password, which the caller has
+        // just asked for by name.
+        println!("{}", as_text(&current));
+        return Ok(());
+    };
+
+    // Keep the field's own type: a bool stays a bool, a number stays a number.
+    let parsed = match &current {
+        serde_json::Value::Bool(_) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => serde_json::Value::Bool(true),
+            "false" | "no" | "off" | "0" => serde_json::Value::Bool(false),
+            _ => anyhow::bail!("`{name}` is true or false, not `{value}`"),
+        },
+        serde_json::Value::Number(_) => value
+            .trim()
+            .parse::<u64>()
+            .map(serde_json::Value::from)
+            .map_err(|_| anyhow::anyhow!("`{name}` is a number, not `{value}`"))?,
+        serde_json::Value::Null if value.trim().parse::<u64>().is_ok() => {
+            serde_json::Value::from(value.trim().parse::<u64>().expect("just parsed"))
+        }
+        _ => serde_json::Value::String(value.to_owned()),
+    };
+
+    fields.insert(name.to_owned(), parsed.clone());
+    let updated = serde_json::Value::Object(fields);
+
+    match &command.file {
+        Some(path) => {
+            let settings: RdpSettings = serde_json::from_value(updated)?;
+            settings.save_to_file(path).map_err(|error| {
+                anyhow::anyhow!("could not write {}: {error}", path.display())
+            })?;
+        }
+        None => {
+            let preferences: irontsc::preferences::Preferences = serde_json::from_value(updated)?;
+            preferences
+                .save()
+                .map_err(|error| anyhow::anyhow!("could not write the preferences: {error}"))?;
+        }
+    }
+
+    println!("{name} = {}", as_text(&parsed));
+    Ok(())
+}
+
+/// A value as a person would type it, without JSON's quotes.
+fn as_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// The same, but a password is not printed just because the whole file was listed.
+fn show(name: &str, value: &serde_json::Value) -> String {
+    if name == "password" && !as_text(value).is_empty() {
+        return "(set)".to_owned();
+    }
+    as_text(value)
 }

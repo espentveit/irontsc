@@ -68,6 +68,29 @@ const SURFACE_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
 /// a full deactivate/reactivate on the server, so it must not run on every motion event.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// How long to leave the first resize alone after connecting.
+///
+/// A resize goes out on the DisplayControl dynamic channel, and that channel is opened by the
+/// server some way into the connection sequence. Ask before it is there and the request is
+/// dropped without a word -- the desktop then stays at the size the connector negotiated, which
+/// is what made MCP sessions come up at 1024x768 no matter how big the window was. Waiting is
+/// only half the fix; [`RESIZE_CONFIRM`] is the other half.
+const INITIAL_RESIZE_DELAY: Duration = Duration::from_millis(1500);
+
+/// How long to give the server to act on a resize before asking again.
+///
+/// The server does not acknowledge a resize; the only evidence it arrived is the desktop coming
+/// back the size that was asked for. If it has not by the time this is up, the request went
+/// nowhere and is worth repeating.
+const RESIZE_CONFIRM: Duration = Duration::from_millis(2500);
+
+/// How many times to repeat an unacknowledged resize before letting it be.
+const RESIZE_ATTEMPTS: u8 = 3;
+
+/// How far the granted desktop may sit from the one asked for and still count as granted.
+/// Servers align the width they hand back, so an exact match is the wrong test.
+const RESIZE_TOLERANCE: u16 = 8;
+
 /// RDP counts a wheel notch as 120 units.
 const WHEEL_UNITS_PER_NOTCH: f32 = 120.0;
 
@@ -258,6 +281,9 @@ struct Session {
 
     resize_deadline: Option<Instant>,
     last_resize_sent: Option<(u16, u16, u32)>,
+    /// When the last resize went out, and how many times it has been asked for, so that one
+    /// the server never saw can be asked for again.
+    resize_sent_at: Option<(Instant, u8)>,
     /// The window size asked for when the session started. No desktop size is negotiated until
     /// the window has actually reached it, or this expires -- otherwise the remote desktop
     /// comes up at the dimensions of the connection dialog.
@@ -361,6 +387,7 @@ impl McpBridge {
         layout: crate::agent::KeyboardLayout,
         computer: String,
         username: String,
+        vision: Option<crate::agent::Vision>,
     ) -> anyhow::Result<Self> {
         let session = crate::agent::AgentSession::attach(frame, input_sender, layout);
 
@@ -376,11 +403,11 @@ impl McpBridge {
         // Bound before this returns, so the URL the menu shows is already live. A busy port
         // falls back to an ephemeral one rather than refusing to start.
         let server = runtime.block_on(async {
-            match crate::agent::serve_http(Arc::clone(&session), port).await {
+            match crate::agent::serve_http(Arc::clone(&session), port, vision.clone()).await {
                 Ok(server) => Ok(server),
                 Err(error) => {
                     tracing::warn!(%error, port, "MCP port unavailable, taking any free port");
-                    crate::agent::serve_http(Arc::clone(&session), 0).await
+                    crate::agent::serve_http(Arc::clone(&session), 0, vision.clone()).await
                 }
             }
         })?;
@@ -714,6 +741,9 @@ struct SessionApp {
     session: Option<Session>,
     form: ConnectForm,
     settings: RdpSettings,
+    /// IronTSC's own settings, which are not part of any connection and are not written into
+    /// a `.rdp`.
+    preferences: crate::preferences::Preferences,
     connect_error: Option<String>,
 
     island: Island,
@@ -756,6 +786,8 @@ impl SessionApp {
             session: None,
             form,
             settings,
+            // IronTSC's own, read once here rather than on every frame that wants them.
+            preferences: crate::preferences::Preferences::load(),
             connect_error: None,
             island: Island::default(),
             dialog: DialogState::default(),
@@ -1164,9 +1196,42 @@ impl SessionApp {
         let scale_factor = ((ppp * 100.0).round() as u32).clamp(100, 500);
 
         if session.last_resize_sent == Some((width, height, scale_factor)) {
+            // Already asked. Ask again only if the desktop never became that size, and only a
+            // few times: past that it is the server's answer, not a lost request.
+            let Some((sent_at, attempts)) = session.resize_sent_at else {
+                return;
+            };
+            // `surface_size` is the desktop as it actually arrives, which is the only
+            // acknowledgement a resize gets. Within a few pixels counts: a server aligns the
+            // width it grants, so asking for 1023 and being given 1022 is a yes.
+            let desktop_matches = session.surface_size.0.abs_diff(width) <= RESIZE_TOLERANCE
+                && session.surface_size.1.abs_diff(height) <= RESIZE_TOLERANCE;
+            if desktop_matches || attempts >= RESIZE_ATTEMPTS || sent_at.elapsed() < RESIZE_CONFIRM
+            {
+                if desktop_matches {
+                    session.resize_sent_at = None;
+                }
+                return;
+            }
+
+            tracing::info!(
+                width,
+                height,
+                attempts,
+                "desktop did not take the resize, asking again"
+            );
+            session.resize_sent_at = Some((Instant::now(), attempts + 1));
+            let _ = session.input_sender.send(RdpInputEvent::Resize {
+                width,
+                height,
+                scale_factor,
+                physical_size: None,
+            });
+            session.resize_deadline = Some(Instant::now() + RESIZE_CONFIRM);
             return;
         }
         session.last_resize_sent = Some((width, height, scale_factor));
+        session.resize_sent_at = Some((Instant::now(), 1));
 
         tracing::info!(width, height, scale_factor, "requesting desktop resize");
 
@@ -1593,8 +1658,9 @@ impl SessionApp {
             server: self.form.server.clone(),
             user,
             stats: SessionStats::new(),
-            resize_deadline: Some(Instant::now() + RESIZE_DEBOUNCE),
+            resize_deadline: Some(Instant::now() + INITIAL_RESIZE_DELAY),
             last_resize_sent: None,
+            resize_sent_at: None,
             // Fullscreen has no size to wait for: the compositor decides, and the window is
             // already there.
             pending_window_size: (!fullscreen).then_some((session_size, Instant::now())),
@@ -1626,6 +1692,7 @@ impl SessionApp {
             layout,
             self.settings.server.clone(),
             self.settings.username.clone(),
+            self.preferences.vision(),
         ) {
             Ok(bridge) => {
                 tracing::info!(url = %bridge.server.url(), "MCP mode on");
@@ -1789,6 +1856,7 @@ impl SessionApp {
 
         let mut form = self.form.clone();
         let mut settings = self.settings.clone();
+        let mut preferences = self.preferences.clone();
         let mut dialog = self.dialog.clone();
         let connect_error = self.connect_error.clone();
         let mut desktop_rect = egui::Rect::ZERO;
@@ -1846,6 +1914,7 @@ impl SessionApp {
                     ctx,
                     &mut form,
                     &mut settings,
+                    &mut preferences,
                     &mut dialog,
                     connect_error.as_deref(),
                     &mut actions,
@@ -1854,6 +1923,7 @@ impl SessionApp {
         });
 
         self.form = form;
+        self.preferences = preferences;
         // Only while the dialog owns them: a session's frame leaves both untouched, and
         // writing them back unconditionally would undo an Open that happened mid-session.
         if !in_session {
@@ -2417,6 +2487,7 @@ fn show_connect_dialog(
     ctx: &egui::Context,
     form: &mut ConnectForm,
     settings: &mut RdpSettings,
+    preferences: &mut crate::preferences::Preferences,
     dialog: &mut DialogState,
     error: Option<&str>,
     actions: &mut FrameActions,
@@ -2496,7 +2567,7 @@ fn show_connect_dialog(
 
                 match page {
                     OptionsTab::General => {
-                        submit = show_logon_settings(ui, form, settings);
+                        submit = show_logon_settings(ui, form, settings, preferences);
                         if dialog.options_open {
                             show_connection_settings(ui, dialog, actions);
                         }
@@ -2542,6 +2613,7 @@ fn show_logon_settings(
     ui: &mut egui::Ui,
     form: &mut ConnectForm,
     settings: &mut RdpSettings,
+    preferences: &mut crate::preferences::Preferences,
 ) -> bool {
     let mut submit = false;
 
@@ -2587,6 +2659,47 @@ fn show_logon_settings(
             .on_hover_text("Write the computer, user name and domain back to the settings file when you connect");
         ui.checkbox(&mut settings.save_password, "Save password")
             .on_hover_text("Stores the password in the .rdp file in plaintext");
+    });
+
+    settings_group(ui, "Agent settings", |ui| {
+        ui.label("A vision model to ask about the screen, for when MCP mode is on.");
+        ui.label("Kept with IronTSC's own settings, not in the .rdp file, since it is the same wherever you connect.");
+        ui.add_space(6.0);
+
+        let mut edited = false;
+        egui::Grid::new("irontsc-vision-grid")
+            .num_columns(2)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Vision endpoint:");
+                edited |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut preferences.vision_endpoint)
+                            .hint_text("http://server:8080/v1")
+                            .desired_width(f32::INFINITY),
+                    )
+                    .on_hover_text(
+                        "An OpenAI-shaped endpoint: llama.cpp, Ollama, vLLM. Set it and MCP \
+                         mode offers `ask_screen`; leave it empty and it does not.",
+                    )
+                    .lost_focus();
+                ui.end_row();
+
+                ui.label("Vision model:");
+                edited |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut preferences.vision_model)
+                            .hint_text("optional -- named only where the server holds several")
+                            .desired_width(f32::INFINITY),
+                    )
+                    .lost_focus();
+                ui.end_row();
+            });
+
+        // Written as soon as the field is left, so it is there next time without a Save.
+        if edited && let Err(error) = preferences.save() {
+            tracing::warn!(%error, "could not write the preferences");
+        }
     });
 
     submit
