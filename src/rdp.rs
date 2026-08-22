@@ -176,21 +176,21 @@ fn frame_clipboard<F>(
 where
     F: FnOnce(&cliprdr::CliprdrClient) -> SessionResult<Vec<SvcMessage>>,
 {
-    use crate::cliprdr_channel::CliprdrDvcProcessor;
+    type Bridge = crate::redirected_channel::RedirectedChannel<cliprdr::CliprdrClient>;
 
     let dynamic_channel = active_stage
-        .get_dvc_mut::<CliprdrDvcProcessor>()
+        .get_dvc_mut::<Bridge>()
         .and_then(|channel| channel.channel_id());
 
     let messages = if dynamic_channel.is_some() {
         let Some(bridge) = active_stage
-            .get_dvc_mut::<CliprdrDvcProcessor>()
-            .and_then(|channel| channel.channel_processor_downcast_ref::<CliprdrDvcProcessor>())
+            .get_dvc_mut::<Bridge>()
+            .and_then(|channel| channel.channel_processor_downcast_ref::<Bridge>())
         else {
             warn!("Clipboard event received, but the dynamic channel went away");
             return Ok(None);
         };
-        build(bridge.clipboard())?
+        build(bridge.processor())?
     } else {
         let Some(clipboard) = active_stage.get_svc_processor::<cliprdr::CliprdrClient>() else {
             warn!("Clipboard event received, but Cliprdr is not available");
@@ -221,8 +221,8 @@ where
         warn!("Clipboard event received, but there is no channel to send it on");
         return Ok(None);
     };
-    let messages =
-        CliprdrDvcProcessor::wrap(messages).map_err(|e| session::custom_err!("CLIPRDR", e))?;
+    let messages = crate::redirected_channel::wrap(messages)
+        .map_err(|e| session::custom_err!("CLIPRDR", e))?;
     let messages = ironrdp_dvc::encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
         .map_err(|e| session::custom_err!("DRDYNVC", e))?;
     let transport = active_stage
@@ -238,6 +238,46 @@ where
         messages,
         transport,
     }))
+}
+
+/// Everything a redirected channel's processor has said, taken from it.
+fn take_redirected<P: SvcProcessor + 'static>(active_stage: &mut ActiveStage) -> Vec<SvcMessage> {
+    type Bridge<P> = crate::redirected_channel::RedirectedChannel<P>;
+
+    active_stage
+        .get_dvc_mut::<Bridge<P>>()
+        .and_then(|channel| channel.channel_processor_downcast_mut::<Bridge<P>>())
+        .map(|bridge| bridge.take_outgoing())
+        .unwrap_or_default()
+}
+
+/// Sends what the redirected channels have to say, on the static channels the server reads.
+///
+/// Their processors reply from inside `process`, where a dynamic channel would normally frame
+/// the reply and send it back the way it came. That is the one direction this server does not
+/// read, so the replies are collected instead and go out here.
+fn drain_redirected(active_stage: &mut ActiveStage) -> SessionResult<Vec<ActiveStageOutput>> {
+    let mut outputs = Vec::new();
+
+    let clipboard = take_redirected::<cliprdr::CliprdrClient>(active_stage);
+    if !clipboard.is_empty() {
+        debug!(count = clipboard.len(), "📋 clipboard: replying on the static channel");
+        let frame = active_stage.process_svc_processor_messages(
+            ironrdp::svc::SvcProcessorMessages::<cliprdr::CliprdrClient>::new(clipboard),
+        )?;
+        outputs.push(ActiveStageOutput::ResponseFrame(frame));
+    }
+
+    let devices = take_redirected::<rdpdr::Rdpdr>(active_stage);
+    if !devices.is_empty() {
+        debug!(count = devices.len(), "🖴 rdpdr: replying on the static channel");
+        let frame = active_stage.process_svc_processor_messages(
+            ironrdp::svc::SvcProcessorMessages::<rdpdr::Rdpdr>::new(devices),
+        )?;
+        outputs.push(ActiveStageOutput::ResponseFrame(frame));
+    }
+
+    Ok(outputs)
 }
 
 /// Puts framed clipboard PDUs on the wire, by way of whichever channel they were framed for.
@@ -513,15 +553,23 @@ async fn connect(
         drdynvc = drdynvc.with_dynamic_channel(CoreInputProcessor::new());
         drdynvc = drdynvc.with_dynamic_channel(MouseCursorProcessor::new());
 
-        // `cliprdr` is a static virtual channel by the specification, and one is attached below
-        // as well. A server that has agreed Soft-Sync moves it to a dynamic channel of the same
-        // name and abandons the static id, so the clipboard is taken on whichever of the two the
-        // server decides to use. See `crate::cliprdr_channel`.
+        // `cliprdr` and `rdpdr` are static virtual channels by their specifications, and both
+        // are attached as such below. A server that has agreed Soft-Sync opens dynamic channels
+        // of the same names to write on and stops writing on the static ids -- while going on
+        // reading the static ones. See `crate::redirected_channel`.
+        use crate::redirected_channel::RedirectedChannel;
+
         if let Some(builder) = cliprdr_factory {
-            drdynvc = drdynvc.with_dynamic_channel(
-                crate::cliprdr_channel::CliprdrDvcProcessor::new(builder.build_cliprdr_backend()),
-            );
+            drdynvc = drdynvc.with_dynamic_channel(RedirectedChannel::new(
+                "cliprdr",
+                cliprdr::CliprdrClient::new(builder.build_cliprdr_backend()),
+            ));
         }
+
+        drdynvc = drdynvc.with_dynamic_channel(RedirectedChannel::new(
+            "rdpdr",
+            rdpdr::Rdpdr::new(Box::new(NoopRdpdrBackend {}), "IronRDP".to_owned()).with_smartcard(0),
+        ));
 
         drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
@@ -2797,6 +2845,9 @@ async fn active_session<T: RdpEventSender + Clone>(
                 }
             }
         };
+
+        let mut outputs = outputs;
+        outputs.extend(drain_redirected(&mut active_stage)?);
 
         for out in outputs {
             match out {
