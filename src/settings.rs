@@ -200,6 +200,13 @@ pub struct RdpSettings {
     pub disable_udp: bool,
     #[serde(default)]
     pub show_codec_grid: bool,
+    /// The keyboard layout the *server* has active, as XKB spells it: `us`, `no`. Empty means
+    /// take this machine's, which is right whenever the user's own typing lands correctly.
+    ///
+    /// Only MCP mode reads it: the window sends physical key positions, which need no layout,
+    /// but an agent types characters and something has to know which key each one is on.
+    #[serde(default)]
+    pub keyboard_layout: String,
     /// Connect without CredSSP, which is the only way to reach a server that authenticates
     /// against its host: NLA requires the server to know the password in advance, so a server
     /// verifying credentials itself has to be spoken to under plain TLS.
@@ -236,6 +243,8 @@ impl Default for RdpSettings {
             disable_avc420: false,
             disable_avc444: false,
             disable_udp: false,
+            // Empty: take this machine's layout, which is what the window already types with.
+            keyboard_layout: String::new(),
             show_codec_grid: false,
             disable_nla: false,
         }
