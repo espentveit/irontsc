@@ -28,6 +28,12 @@ tshark -r samples/working-rdp.pcapng -Y "rdpudp" is the correct way to analyze U
 # RDP Specs
 vendor/rdp-specs-md contains the different RDP specs in markdown format
 
+# MCP mode
+- `src/agent/` is the agent-facing side: `session.rs` is the desktop (framebuffer mirror plus input), `server.rs` the MCP tool surface, `vision.rs` the pixel and flat-rectangle queries, `keys.rs` chord parsing.
+- Both modes share `AgentSession`. Headless (`irontsc mcp`) owns its RDP session and speaks stdio; the island's gear toggle attaches to the window's session and serves loopback HTTP.
+- `tests/mcp_http.rs` drives the real HTTP surface against a synthetic desktop, so the rmcp wiring is covered without an RDP server.
+- Key names map to `winit::keyboard::KeyCode` and then through `egui_scancode::scancode_for`, so there is one scancode table rather than two that can drift.
+
 # Documentation
 Only document if there is a good reason to do so (big plan). Don't document minor changes or tasks
 that are not necessary to read about in the future.

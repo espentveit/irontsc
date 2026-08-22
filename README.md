@@ -117,6 +117,49 @@ This feature is useful for:
 - **[egui](https://github.com/emilk/egui)** on **winit** and **glutin**: the window, the GL context and the event loop
 - **FFmpeg**: H.264 (AVC420/AVC444) decoding for RDPEGFX
 
+## MCP mode
+
+IronTSC can hand a remote desktop to an AI agent over the [Model Context Protocol](https://modelcontextprotocol.io). The agent takes screenshots and sends clicks and keystrokes; there is one tool set, reachable two ways depending on who owns the session.
+
+### In a session you are watching
+
+Open the gear (`...`) in the session island and tick **MCP mode**. The agent joins the desktop already on screen, so you see everything it does as it happens, and you can take the mouse back at any moment. Nothing restarts.
+
+The menu shows a URL to hand to a client:
+
+```bash
+claude mcp add --transport http irontsc 'http://127.0.0.1:7444/mcp?t=<token>'
+```
+
+The server binds to loopback only and requires the token in that URL, as a bearer header or the `t` parameter — anything running as your user could otherwise drive your desktop. A fresh token is generated each time MCP mode is switched on, so re-copy the URL after switching it off and on. The button reads **MCP** in blue while it is listening; switching it off releases anything the agent was holding down.
+
+### Headless, with no window
+
+For an agent that should open its own session, `irontsc mcp` speaks MCP over stdio — the form an MCP client starts for itself:
+
+```bash
+claude mcp add irontsc -- irontsc mcp --computer server.example.com -u user -p secret
+```
+
+It takes the same connection flags as the client, or a `.rdp` file. `--width` and `--height` set the desktop size. UDP multitransport is off unless you pass `--udp`: an agent works in clicks and screenshots, where a few milliseconds buy nothing and the extra transport is one more thing to go wrong. Logging goes to stderr here, because stdout is the protocol.
+
+### Tools
+
+| Tool | What it does |
+| --- | --- |
+| `screenshot` | The desktop as a PNG. Waits for the screen to stop changing first. `x`/`y`/`width`/`height` grab one region at full detail; `max_width` scales the result down to save tokens. |
+| `pixel` | The exact colour at a point, or under the pointer if none is given. |
+| `find_regions` | Flat rectangles on screen, largest first, as candidate controls. |
+| `click`, `move_mouse`, `drag`, `scroll` | Mouse input, in desktop pixels. |
+| `type_text` | Types as Unicode, so the server's keyboard layout need not match yours. |
+| `key` | A chord: `enter`, `F5`, `ctrl+c`, `alt+tab`, `win+r`, `ctrl+alt+delete`. |
+| `status` | Connection state, desktop size, and what the agent did recently. |
+| `wait`, `disconnect` | Pause; close a session this server opened. |
+
+Coordinates are always in the desktop's own pixels, never the screenshot's, and every reply that could be ambiguous says so.
+
+`find_regions` deserves a caveat: it finds axis-aligned blocks of near-uniform colour, which Windows chrome is largely made of, so buttons and fields do turn up in it — but so does anything else that happens to be a flat rectangle. It is a hint to check against the image, not a widget tree. A model reading the screenshot remains the better way to find a control.
+
 ## Project Status
 
 IronTSC is under active development. Still very experimental and not using all features from IronRDP.

@@ -236,6 +236,14 @@ glutin-winit = "0.5"
 # in; the blocking API is fine because the picker only ever opens from the connection dialog,
 # where no session is running to keep alive.
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+rmcp = { version = "3.1.4", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
+schemars = "1.2.2"
+png = "0.18.1"
+base64 = "0.23.1"
+hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "service"] }
+tower-service = "0.3.3"
+http-body-util = "0.1.5"
 
 # System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
 # winit has no API for this, so it is done against the display server directly: the Wayland
@@ -263,6 +271,14 @@ tokio-openssl = "0.6"
 openssl-sys = "0.9"
 foreign-types = "0.3"
 libc = "0.2"
+
+[dev-dependencies]
+# Only to drive the MCP server's own HTTP surface in tests; already in the tree by way of
+# ironrdp-tokio, so it costs nothing to build. `rustls-tls` is there purely to settle on a
+# crypto provider -- another crate enables rustls without one, and reqwest's client panics at
+# construction if none is installed. The tests themselves never leave loopback HTTP.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
 
 [features]
 # h264 is back on by default: ffmpeg-sys-next 9 builds against FFmpeg 8, and without it every
