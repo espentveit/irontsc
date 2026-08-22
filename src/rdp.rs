@@ -635,6 +635,15 @@ async fn connect(
         drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
 
+        // The camera, when this connection asked for one. Both channels are registered up
+        // front: the server opens the enumerator itself, and opens the device channel by the
+        // name this client announces on it. See `crate::camera`.
+        if config.camera {
+            drdynvc = drdynvc
+                .with_dynamic_channel(crate::camera::CameraEnumerator::new())
+                .with_dynamic_channel(crate::camera::Camera::new());
+        }
+
         // The microphone, when this connection asked for one. Registering the listener is what
         // lets the server open the channel; it does so only when something in the session
         // actually starts recording. See `crate::audio_input`.

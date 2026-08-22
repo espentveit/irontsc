@@ -36,6 +36,9 @@ pub struct Config {
     /// Enable H.264 hardware acceleration (default: false for compatibility)
     pub h264_hw_accel: bool,
 
+    /// Give the session a camera, whose picture this client draws.
+    pub camera: bool,
+
     /// Disable H.264 AVC420 codec
     pub disable_avc420: bool,
 
@@ -299,6 +302,10 @@ struct Args {
     #[clap(long)]
     audio_capture: bool,
 
+    /// Give the session a camera, whose picture this client draws
+    #[clap(long)]
+    camera: bool,
+
     /// The clipboard type
     #[clap(long, value_enum, default_value_t = ClipboardType::Default)]
     clipboard_type: ClipboardType,
@@ -506,6 +513,7 @@ impl Config {
             rdcleanpath,
             dvc_pipe_proxies: args.dvc_proxy,
             h264_hw_accel: false, // Set via UI, default to false for CLI mode
+            camera: args.camera,
             disable_avc420: false,
             disable_avc444: false,
             disable_udp: false,
