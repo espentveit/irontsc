@@ -305,7 +305,7 @@ serde_json = "1"
 [features]
 # h264 is back on by default: ffmpeg-sys-next 9 builds against FFmpeg 8, and without it every
 # frame of full-motion video is forced through the progressive codec on the CPU.
-default = ["gfx", "h264"]
+default = ["gfx", "h264", "video-redirection"]
 gfx = []
 h264 = ["ironrdp-h264", "ironrdp-gfx/h264"]
 video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264", "ironrdp-gfx/h264"]
