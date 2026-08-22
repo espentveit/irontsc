@@ -244,6 +244,9 @@ hyper = { version = "1.11.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "service"] }
 tower-service = "0.3.3"
 http-body-util = "0.1.5"
+egui_term = "0.1.0"
+alacritty_terminal = "0.25"
+ab_glyph = "0.2"
 
 # System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
 # winit has no API for this, so it is done against the display server directly: the Wayland
