@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 /// One connection per request rather than a pool: this is a handful of loopback requests from
 /// a command that then exits, and the transport answers each POST with a stream it closes.
 pub struct Client {
+    url: String,
     host: String,
     port: u16,
     target: String,
@@ -44,6 +45,7 @@ impl Client {
         }
 
         let client = Self {
+            url: url.to_owned(),
             host: uri
                 .host()
                 .ok_or_else(|| anyhow!("`{url}` has no host"))?
@@ -153,44 +155,95 @@ impl Client {
 
     /// The HTTP itself: one connection, one POST, the whole reply read back.
     async fn send(&self, body: &str) -> anyhow::Result<(hyper::StatusCode, Option<String>, String)> {
-        let stream = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
-            .await
-            .with_context(|| format!("nothing is listening on {}:{}", self.host, self.port))?;
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-        // The connection has to be driven while the request is in flight, and is finished with
-        // once the reply has been read.
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-
-        let mut request = hyper::Request::post(&self.target)
-            .header("host", format!("{}:{}", self.host, self.port))
-            .header("content-type", "application/json")
+        let mut headers = vec![
             // The transport may answer either way, and says which in its content type.
-            .header("accept", "application/json, text/event-stream");
+            ("accept", "application/json, text/event-stream".to_owned()),
+        ];
         if let Some(session_id) = &self.session_id {
-            request = request.header("mcp-session-id", session_id);
+            headers.push(("mcp-session-id", session_id.clone()));
         }
 
-        let response = sender
-            .send_request(request.body(Full::new(Bytes::from(body.to_owned())))?)
-            .await?;
-
-        let status = response.status();
-        let session_id = response
-            .headers()
+        let (status, response_headers, body) =
+            post_json(&self.url, &self.target, &headers, body.to_owned()).await?;
+        let session_id = response_headers
             .get("mcp-session-id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let collected = response.into_body().collect().await?.to_bytes();
 
-        Ok((
-            status,
-            session_id,
-            String::from_utf8_lossy(&collected).into_owned(),
-        ))
+        Ok((status, session_id, body))
     }
+}
+
+/// One GET from a plain `http://` URL, for the endpoints that answer questions about
+/// themselves rather than taking work.
+pub(super) async fn get_json(
+    url: &str,
+    target: &str,
+) -> anyhow::Result<(hyper::StatusCode, hyper::HeaderMap, String)> {
+    request(url, hyper::Method::GET, target, &[], String::new()).await
+}
+
+/// One POST of JSON to a plain `http://` URL, with the whole reply read back.
+///
+/// Shared by the MCP client and by [`super::ask`], which talks to an OpenAI-shaped endpoint:
+/// both are one small request to a machine on the near side of the network, and neither wants a
+/// TLS stack dragged in behind it.
+pub(super) async fn post_json(
+    url: &str,
+    target: &str,
+    headers: &[(&str, String)],
+    body: String,
+) -> anyhow::Result<(hyper::StatusCode, hyper::HeaderMap, String)> {
+    request(url, hyper::Method::POST, target, headers, body).await
+}
+
+/// The HTTP itself, shared by both.
+async fn request(
+    url: &str,
+    method: hyper::Method,
+    target: &str,
+    headers: &[(&str, String)],
+    body: String,
+) -> anyhow::Result<(hyper::StatusCode, hyper::HeaderMap, String)> {
+    let uri: hyper::Uri = url.parse().with_context(|| format!("`{url}` is not a URL"))?;
+    let host = uri
+        .host()
+        .ok_or_else(|| anyhow!("`{url}` has no host"))?
+        .to_owned();
+    let port = uri.port_u16().unwrap_or(80);
+
+    let stream = tokio::net::TcpStream::connect((host.as_str(), port))
+        .await
+        .with_context(|| format!("nothing is listening on {host}:{port}"))?;
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    // The connection has to be driven while the request is in flight, and is finished with once
+    // the reply has been read.
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut request = hyper::Request::builder()
+        .method(method)
+        .uri(target)
+        .header("host", format!("{host}:{port}"))
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, value);
+    }
+
+    let response = sender
+        .send_request(request.body(Full::new(Bytes::from(body)))?)
+        .await?;
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let collected = response.into_body().collect().await?.to_bytes();
+
+    Ok((
+        status,
+        response_headers,
+        String::from_utf8_lossy(&collected).into_owned(),
+    ))
 }
 
 /// Pulls the JSON-RPC message out of a reply, which is either JSON itself or a stream of
