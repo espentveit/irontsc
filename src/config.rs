@@ -292,6 +292,13 @@ struct Args {
     #[clap(long, alias = "no-nla")]
     no_credssp: bool,
 
+    /// Let the session record from this machine's microphone
+    ///
+    /// The server opens its audio input channel when something in the session asks to record,
+    /// and cannot open it at all unless this is set.
+    #[clap(long)]
+    audio_capture: bool,
+
     /// The clipboard type
     #[clap(long, value_enum, default_value_t = ClipboardType::Default)]
     clipboard_type: ClipboardType,
@@ -441,6 +448,7 @@ impl Config {
             credentials: Credentials::UsernamePassword { username, password },
             domain: args.domain,
             enable_tls: !args.no_tls,
+            audio_capture: args.audio_capture,
             enable_credssp: !args.no_credssp,
             keyboard_type: KeyboardType::parse(args.keyboard_type),
             keyboard_subtype: args.keyboard_subtype,

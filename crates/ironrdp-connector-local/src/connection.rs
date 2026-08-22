@@ -927,6 +927,10 @@ fn create_client_info_pdu(config: &Config, client_addr: &SocketAddr) -> rdp::Cli
         | ClientInfoFlags::ENABLE_WINDOWS_KEY
         | ClientInfoFlags::MAXIMIZE_SHELL;
 
+    if config.audio_capture {
+        flags |= ClientInfoFlags::AUDIO_CAPTURE;
+    }
+
     if config.autologon {
         flags |= ClientInfoFlags::AUTOLOGON;
     }

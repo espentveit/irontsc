@@ -3272,6 +3272,7 @@ pub fn build_config(form: &ConnectForm, settings: &RdpSettings) -> anyhow::Resul
         autologon: true,
         desktop_scale_factor: settings.get_dpi_scaling().unwrap_or(0),
         enable_tls: true,
+        audio_capture: settings.audio_capture,
         enable_credssp: !settings.disable_nla,
         keyboard_type: ironrdp::pdu::gcc::KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,

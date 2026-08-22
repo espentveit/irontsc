@@ -212,6 +212,13 @@ pub struct RdpSettings {
     /// verifying credentials itself has to be spoken to under plain TLS.
     #[serde(default)]
     pub disable_nla: bool,
+    /// Let the session record from this machine's microphone.
+    ///
+    /// `audiocapturemode` in the file, which is what mstsc calls it, so a connection saved here
+    /// and opened there means the same thing. Off by default: a remote session that can turn on
+    /// a microphone is something to ask for, not something to inherit.
+    #[serde(default)]
+    pub audio_capture: bool,
 }
 
 fn default_width() -> u16 {
@@ -243,6 +250,7 @@ impl Default for RdpSettings {
             disable_avc420: false,
             disable_avc444: false,
             disable_udp: false,
+            audio_capture: false,
             // Empty: take this machine's layout, which is what the window already types with.
             keyboard_layout: String::new(),
             show_codec_grid: false,
@@ -349,6 +357,11 @@ impl RdpSettings {
                         settings.disable_udp = val != 0;
                     }
                 }
+                "audiocapturemode" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.audio_capture = val != 0;
+                    }
+                }
                 "irontsc:show_codec_grid" => {
                     if let Ok(val) = value.parse::<u8>() {
                         settings.show_codec_grid = val != 0;
@@ -383,7 +396,7 @@ impl RdpSettings {
             "winposstr:s:0,3,0,0,800,600".to_string(),
             "compression:i:1".to_string(),
             "keyboardhook:i:2".to_string(),
-            "audiocapturemode:i:0".to_string(),
+            format!("audiocapturemode:i:{}", u8::from(self.audio_capture)),
             "videoplaybackmode:i:1".to_string(),
             "connection type:i:7".to_string(),
             "networkautodetect:i:1".to_string(),
