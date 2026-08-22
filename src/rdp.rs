@@ -377,9 +377,10 @@ async fn connect(
         drdynvc = drdynvc.with_dynamic_channel(CoreInputProcessor::new());
         drdynvc = drdynvc.with_dynamic_channel(MouseCursorProcessor::new());
 
-        // Input-related channels - stubs for now (Microsoft::Windows::RDS::Input uses advanced input protocol MS-RDPEAI)
-        drdynvc =
-            drdynvc.with_dynamic_channel(StubDvcProcessor::new("cliprdr"));
+        // Not `cliprdr`: the clipboard is a *static* virtual channel, and one is attached
+        // below with a real backend. Registering the name here as well advertised a dynamic
+        // channel the server was happy to use instead, where a stub swallowed every format
+        // list -- so a copy on the remote desktop never reached this machine.
         drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
         drdynvc =
@@ -391,7 +392,7 @@ async fn connect(
         // drdynvc = drdynvc.with_dynamic_channel(StubDvcProcessor::new("RDCamera_Device_Enumerator"));
 
         info!(
-            "DVC handlers registered: CoreInput, MouseCursor, Input (stub), TextInput (stub), Notify (stub), RDCamera (stub)"
+            "DVC handlers registered: CoreInput, MouseCursor, Input (stub), TextInput (stub)"
         );
     }
 
@@ -1897,6 +1898,8 @@ async fn active_session<T: RdpEventSender + Clone>(
     let mut transport_rules = TransportRules::new();
 
     // Track active UDP transport tunnel (currently only one tunnel is supported)
+    // Said once when the tunnels have gone, rather than for every frame the server sends.
+    let mut reported_missing_tunnels = false;
     let mut udp_tunnels: std::collections::HashMap<u32, ActiveUdpTunnel> =
         std::collections::HashMap::new();
 
@@ -2851,7 +2854,16 @@ async fn active_session<T: RdpEventSender + Clone>(
                     }
 
                     if udp_tunnels.is_empty() {
-                        warn!("Received tunnel data but no UDP tunnels active");
+                        // Soft-Sync moved the dynamic channels onto a transport that has since
+                        // gone. The data still arrives here on TCP, which is where it belongs:
+                        // saying so once is useful, saying so every two seconds is noise.
+                        if !reported_missing_tunnels {
+                            reported_missing_tunnels = true;
+                            warn!(
+                                "Tunnel data arrived with no UDP tunnel active; carrying the \
+                                 channels on TCP instead"
+                            );
+                        }
                     }
                 }
                 ActiveStageOutput::Terminate(reason) => break 'outer reason,

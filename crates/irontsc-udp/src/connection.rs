@@ -34,6 +34,17 @@ const V3_RECEIVE_WINDOW: u16 = 4096;
 /// simply stops and the session looks frozen for no visible reason.
 const CHANNEL_STALL_WARN: Duration = Duration::from_millis(1500);
 
+/// How long a stalled stream is given before the transport is written off.
+///
+/// [MS-RDPEUDP2] 3.1.5.1.3 puts reliability entirely on the sender: a lost packet is "resent
+/// with a new sequence number ... the ChannelSeqNum remains the same", and the receiver's only
+/// move is to buffer and wait -- there is no way to ask for a channel sequence again. So once
+/// the sender has written a packet off (an AckOfAcks moved our window past it) and no
+/// retransmission carries its ChannelSeqNum, the stream cannot recover, and waiting longer only
+/// keeps a dead session on screen. The transport is dropped instead, and the dynamic channels it
+/// carried go back over TCP, which is where they were before Soft-Sync moved them.
+const CHANNEL_STALL_FATAL: Duration = Duration::from_secs(4);
+
 /// Largest ACK vector we will build, in bytes (the wire field is 7 bits wide).
 const V3_MAX_ACKVEC_BYTES: usize = 0x7f;
 
@@ -946,6 +957,13 @@ impl UdpConnection {
     /// Reports, once, that the stream has stopped moving while chunks pile up behind a channel
     /// sequence that never arrives. Everything else stays healthy in that state -- the transport
     /// keeps acknowledging and the peer keeps sending -- so the session just appears to freeze.
+    /// True once a stalled stream has been given up on, so the transport can be torn down.
+    pub fn is_beyond_recovery(&self) -> bool {
+        self.v3_channel_stalled_since
+            .is_some_and(|since| Instant::now().duration_since(since) >= CHANNEL_STALL_FATAL)
+            && !self.v3_channel_buffer.is_empty()
+    }
+
     fn check_channel_stall(&mut self) {
         if self.v3_channel_buffer.is_empty() {
             self.v3_channel_stalled_since = None;
@@ -981,14 +999,16 @@ impl UdpConnection {
         warn!(
             "🧊 V3 stream stalled for {:?}: awaiting channel sequence {:?}, {} chunks buffered \
              (nearest {:?}, furthest {:?}); transport is healthy at dseq {} with {} out of order, \
-             so nothing will unstick this on its own",
+             so nothing will unstick this on its own -- giving it until {:?} before the \
+             transport is dropped and its channels go back over TCP",
             now.duration_since(since),
             awaited,
             self.v3_channel_buffer.len(),
             nearest,
             furthest,
             self.v3_expected_sequence,
-            self.v3_received_dseq.len()
+            self.v3_received_dseq.len(),
+            CHANNEL_STALL_FATAL
         );
     }
 

@@ -117,6 +117,10 @@ pub struct FindTextArgs {
     /// Drop lines the recogniser is less sure of than this, from 0 to 1. Defaults to 0.5.
     #[serde(default)]
     pub min_confidence: Option<f32>,
+    /// Report each detected line separately instead of joining the lines of a heading or a
+    /// paragraph into one. Off by default, since a headline set over three lines is one thing.
+    #[serde(default)]
+    pub lines: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -614,7 +618,12 @@ impl McpServer {
         let x = self.from_image(args.x, args.from_width, args.scale);
         let y = self.from_image(args.y, args.from_width, args.scale);
 
-        match self.session.click(button, x, y, count) {
+        let session = Arc::clone(&self.session);
+        let clicked = tokio::task::spawn_blocking(move || session.click(button, x, y, count))
+            .await
+            .unwrap_or_else(|error| Err(AgentError::Terminated(format!("the click stopped: {error}"))));
+
+        match clicked {
             Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "{button:?} click x{count} at ({x}, {y})"
             ))])),
@@ -750,6 +759,13 @@ impl McpServer {
             Ok(Ok(lines)) => lines,
             Ok(Err(error)) => return Ok(bad_request(format!("could not read the screen: {error}"))),
             Err(error) => return Ok(bad_request(format!("reading the screen stopped: {error}"))),
+        };
+
+        // A headline set over several lines is one thing to read, not three.
+        let lines = if args.lines.unwrap_or(false) {
+            lines
+        } else {
+            super::into_blocks(lines)
         };
 
         let needle = args.contains.as_deref().map(str::to_lowercase);

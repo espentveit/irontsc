@@ -25,7 +25,7 @@ pub use client::Client;
 pub use layout::KeyboardLayout;
 pub use registry::Descriptor;
 pub use screenshot::Screenshot;
-pub use sight::{Line, Models, Target};
+pub use sight::{Line, Models, Target, into_blocks};
 pub use server::{HttpServer, McpServer, serve_http, serve_stdio};
 pub use session::{AgentError, AgentSession, FrameSummary, SharedFrame};
 pub use vision::{Pixel, Region, RegionQuery};

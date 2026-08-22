@@ -32,6 +32,15 @@ const ACTION_LOG_LIMIT: usize = 32;
 /// coalesce or drop.
 const EVENTS_PER_BATCH: usize = 16;
 
+/// How long to leave between moving the pointer and pressing a button.
+///
+/// The move and the press used to go out in one batch, and a button that a pointer has never
+/// visibly moved to does not get pressed: the far end hit-tests the press against the position
+/// it has already processed, which is wherever the pointer was before. Chromium is strict
+/// about this -- an `Add extension` button ignored click after click, then worked the moment a
+/// separate `move_mouse` preceded it. This is the gap that makes them separate.
+const POINTER_SETTLE: Duration = Duration::from_millis(24);
+
 /// How long to wait between the characters of a `type_text`.
 ///
 /// Typing as fast as the transport allows does not work: a 13-character command arrives intact,
@@ -584,7 +593,11 @@ impl AgentSession {
             ));
         }
 
-        let mut operations = vec![Operation::MouseMove(MousePosition { x, y })];
+        // The move goes on its own, and is given a moment: see `POINTER_SETTLE`.
+        self.apply([Operation::MouseMove(MousePosition { x, y })])?;
+        std::thread::sleep(POINTER_SETTLE);
+
+        let mut operations = Vec::with_capacity(usize::from(count) * 2);
         for _ in 0..count {
             operations.push(Operation::MouseButtonPressed(button));
             operations.push(Operation::MouseButtonReleased(button));
@@ -598,10 +611,10 @@ impl AgentSession {
     /// Presses a button and leaves it down, for a drag.
     pub fn mouse_down(&self, button: MouseButton, x: u16, y: u16) -> AgentResult<()> {
         self.check_bounds(x, y)?;
-        self.apply([
-            Operation::MouseMove(MousePosition { x, y }),
-            Operation::MouseButtonPressed(button),
-        ])?;
+        // Separately, for the same reason a click's move is separate.
+        self.apply([Operation::MouseMove(MousePosition { x, y })])?;
+        std::thread::sleep(POINTER_SETTLE);
+        self.apply([Operation::MouseButtonPressed(button)])?;
         self.remember_pointer(x, y);
         self.record(format!("{button:?} down at ({x}, {y})"));
         Ok(())
