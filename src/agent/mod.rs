@@ -11,21 +11,21 @@
 //! Everything above the transport is shared: [`session::AgentSession`] is the desktop, and
 //! [`server::McpServer`] is the tool surface over it.
 
-pub mod ask;
 pub mod client;
 pub mod keys;
 pub mod layout;
 pub mod registry;
 pub mod screenshot;
+pub mod sight;
 pub mod server;
 pub mod session;
 pub mod vision;
 
-pub use ask::Vision;
 pub use client::Client;
 pub use layout::KeyboardLayout;
 pub use registry::Descriptor;
 pub use screenshot::Screenshot;
+pub use sight::{Line, Models, Target};
 pub use server::{HttpServer, McpServer, serve_http, serve_stdio};
 pub use session::{AgentError, AgentSession, FrameSummary, SharedFrame};
 pub use vision::{Pixel, Region, RegionQuery};

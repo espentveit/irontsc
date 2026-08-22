@@ -283,9 +283,9 @@ fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
             .unwrap_or(&settings.keyboard_layout),
     );
 
-    // Only offered when there is somewhere to ask; see `agent::ask`. Global, so `irontsc mcp`
+    // Only offered when the models are installed; see `agent::sight`. Global, so `irontsc mcp`
     // and the window agree without either `.rdp` mentioning it.
-    let vision = irontsc::preferences::Preferences::load().vision();
+    let sight = irontsc::preferences::Preferences::load().sight();
 
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| anyhow::anyhow!("failed to start the Tokio runtime: {error}"))?;
@@ -308,7 +308,7 @@ fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
 
     runtime.block_on(async move {
         let session = irontsc::agent::AgentSession::spawn_headless(config, layout);
-        irontsc::agent::serve_stdio(session, vision).await
+        irontsc::agent::serve_stdio(session, sight).await
     })
 }
 
