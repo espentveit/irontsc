@@ -1149,6 +1149,8 @@ impl SessionApp {
     /// reported to the server as a percentage so that the remote session uses matching DPI.
     fn maybe_send_resize(&mut self) {
         let ppp = f64::from(self.pixels_per_point());
+        // Read before the session is borrowed; zero means follow the display.
+        let dpi_override = self.preferences.dpi_scale;
         let window_size = self
             .gl_window
             .as_ref()
@@ -1193,7 +1195,10 @@ impl SessionApp {
         let max = f64::from(u16::MAX);
         let width = (f64::from(rect.width()) * ppp).round().clamp(200.0, max) as u16;
         let height = (f64::from(rect.height()) * ppp).round().clamp(200.0, max) as u16;
-        let scale_factor = ((ppp * 100.0).round() as u32).clamp(100, 500);
+        let scale_factor = match dpi_override {
+            0 => ((ppp * 100.0).round() as u32).clamp(100, 500),
+            forced => forced.clamp(100, 500),
+        };
 
         if session.last_resize_sent == Some((width, height, scale_factor)) {
             // Already asked. Ask again only if the desktop never became that size, and only a

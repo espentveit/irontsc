@@ -36,6 +36,15 @@ pub struct Preferences {
     /// this machine's.
     #[serde(default)]
     pub keyboard_layout: String,
+    /// The DPI to tell the server about, as a percentage, instead of this display's own.
+    ///
+    /// A HiDPI laptop reports 167%, and the remote desktop then renders everything at 167% --
+    /// correct for reading over someone's shoulder, and far too large for an agent working in a
+    /// 1024- or 1920-wide desktop, where it wastes most of the screen on a handful of controls.
+    /// `100` gives a desktop that fits what a 1920x1080 monitor would show. Zero follows the
+    /// display, which is what a person watching wants.
+    #[serde(default)]
+    pub dpi_scale: u32,
 }
 
 impl Preferences {
