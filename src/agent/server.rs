@@ -622,7 +622,15 @@ impl McpServer {
             return Ok(result);
         }
         let length = args.text.chars().count();
-        match self.session.type_text(&args.text) {
+        // Typing is paced, so it sleeps its way through a long string; that belongs on a
+        // blocking thread rather than on a runtime worker every other tool is waiting on.
+        let session = Arc::clone(&self.session);
+        let text = args.text.clone();
+        let typed = tokio::task::spawn_blocking(move || session.type_text(&text))
+            .await
+            .unwrap_or_else(|error| Err(AgentError::Terminated(format!("typing stopped: {error}"))));
+
+        match typed {
             Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "typed {length} characters"
             ))])),

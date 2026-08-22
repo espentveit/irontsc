@@ -734,6 +734,10 @@ struct SessionApp {
     window_focused: bool,
     /// Connect as soon as there is a window, skipping the dialog entirely.
     pending_autoconnect: bool,
+    /// Switch MCP mode on as soon as there is a session to switch it on for. Set by `--mcp`,
+    /// for a window started to be driven as well as watched: the gear does the same thing, but
+    /// something has to be there to click it.
+    pending_mcp: bool,
     exiting: bool,
 }
 
@@ -764,6 +768,7 @@ impl SessionApp {
             console: crate::console::ConsoleHost::default(),
             window_focused: true,
             pending_autoconnect: false,
+            pending_mcp: false,
             exiting: false,
         }
     }
@@ -2819,6 +2824,14 @@ impl ApplicationHandler<UserEvent> for SessionApp {
                 return;
             }
             WindowEvent::RedrawRequested => {
+                // `--mcp` waits here rather than at startup, so it covers a session the user
+                // logged on to themselves as well as one the command line connected.
+                if self.pending_mcp
+                    && self.session.as_ref().is_some_and(|session| session.mcp.is_none())
+                {
+                    self.pending_mcp = false;
+                    self.toggle_mcp();
+                }
                 self.drain_session_output(event_loop);
                 self.redraw(event_loop);
                 return;
@@ -3138,7 +3151,12 @@ pub fn build_config(form: &ConnectForm, settings: &RdpSettings) -> anyhow::Resul
 }
 
 /// Opens the window and runs it until the user quits.
-pub fn run(form: ConnectForm, settings: RdpSettings, autoconnect: bool) -> anyhow::Result<()> {
+pub fn run(
+    form: ConnectForm,
+    settings: RdpSettings,
+    autoconnect: bool,
+    mcp: bool,
+) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|error| anyhow::anyhow!("failed to create the event loop: {error}"))?;
@@ -3151,6 +3169,7 @@ pub fn run(form: ConnectForm, settings: RdpSettings, autoconnect: bool) -> anyho
     // Deferred until the window exists: connecting resizes it, so doing it any earlier would
     // flash the dialog first.
     app.pending_autoconnect = autoconnect;
+    app.pending_mcp = mcp;
 
     event_loop
         .run_app(&mut app)

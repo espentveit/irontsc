@@ -34,6 +34,12 @@ struct Args {
     /// Connect immediately instead of showing the dialog.
     #[arg(long)]
     autologon: bool,
+
+    /// Switch MCP mode on as soon as the session is up, rather than from the gear. The logon
+    /// dialog still appears if the credentials are not all there; MCP mode comes up once the
+    /// session does.
+    #[arg(long)]
+    mcp: bool,
 }
 
 /// The connection itself, shared by the window and by MCP mode.
@@ -209,12 +215,12 @@ fn main() -> anyhow::Result<()> {
             let (form, settings) = resolve(&args.connection)?;
 
             // Anything short of a full set of credentials still gets the dialog, pre-filled.
-            let autoconnect = (args.autologon || args.connection.computer.is_some())
+            let autoconnect = (args.autologon || args.mcp || args.connection.computer.is_some())
                 && !form.server.trim().is_empty()
                 && !form.username.trim().is_empty()
                 && !form.password.is_empty();
 
-            egui_app::run(form, settings, autoconnect)
+            egui_app::run(form, settings, autoconnect, args.mcp)
         }
     }
 }

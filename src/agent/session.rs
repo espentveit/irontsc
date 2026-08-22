@@ -32,6 +32,15 @@ const ACTION_LOG_LIMIT: usize = 32;
 /// coalesce or drop.
 const EVENTS_PER_BATCH: usize = 16;
 
+/// How long to wait between the characters of a `type_text`.
+///
+/// Typing as fast as the transport allows does not work: a 13-character command arrives intact,
+/// while 153 characters sent back to back reach the Windows console shuffled and duplicated --
+/// conhost, with PSReadLine redrawing and colouring every keystroke, cannot keep up and loses
+/// track. This is about as fast as a person can type, which is what everything on the other end
+/// is built to expect.
+const TYPING_INTERVAL: Duration = Duration::from_millis(8);
+
 /// The press-and-release sequence for one keystroke, or `None` if any of its keys has no
 /// scancode.
 ///
@@ -648,13 +657,20 @@ impl AgentSession {
     ///
     /// Newlines and tabs are sent as the keys of those names: a Unicode `\n` is not what an
     /// edit control is waiting for.
+    ///
+    /// Paced, so it blocks for roughly [`TYPING_INTERVAL`] per character; the tool that calls
+    /// it does so off the async runtime.
     pub fn type_text(&self, text: &str) -> AgentResult<()> {
         if text.is_empty() {
             return Err(AgentError::BadRequest("nothing to type".to_owned()));
         }
 
         let mut as_unicode = 0usize;
-        for character in text.chars() {
+        for (index, character) in text.chars().enumerate() {
+            // Between characters rather than after each one, so a single character is instant.
+            if index > 0 {
+                std::thread::sleep(TYPING_INTERVAL);
+            }
             let stroke = match character {
                 '\n' | '\r' => Some(Keystroke::plain(KeyCode::Enter)),
                 '\t' => Some(Keystroke::plain(KeyCode::Tab)),
