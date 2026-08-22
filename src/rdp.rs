@@ -176,7 +176,7 @@ fn frame_clipboard<F>(
 where
     F: FnOnce(&cliprdr::CliprdrClient) -> SessionResult<Vec<SvcMessage>>,
 {
-    type Bridge = crate::redirected_channel::RedirectedChannel<cliprdr::CliprdrClient>;
+    type Bridge = crate::dvc_bridge::RedirectedChannel<cliprdr::CliprdrClient>;
 
     let dynamic_channel = active_stage
         .get_dvc_mut::<Bridge>()
@@ -221,7 +221,7 @@ where
         warn!("Clipboard event received, but there is no channel to send it on");
         return Ok(None);
     };
-    let messages = crate::redirected_channel::wrap(messages)
+    let messages = crate::dvc_bridge::wrap(messages)
         .map_err(|e| session::custom_err!("CLIPRDR", e))?;
     let messages = ironrdp_dvc::encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
         .map_err(|e| session::custom_err!("DRDYNVC", e))?;
@@ -242,7 +242,7 @@ where
 
 /// Everything a redirected channel's processor has said, taken from it.
 fn take_redirected<P: SvcProcessor + 'static>(active_stage: &mut ActiveStage) -> Vec<SvcMessage> {
-    type Bridge<P> = crate::redirected_channel::RedirectedChannel<P>;
+    type Bridge<P> = crate::dvc_bridge::RedirectedChannel<P>;
 
     active_stage
         .get_dvc_mut::<Bridge<P>>()
@@ -556,8 +556,8 @@ async fn connect(
         // `cliprdr` and `rdpdr` are static virtual channels by their specifications, and both
         // are attached as such below. A server that has agreed Soft-Sync opens dynamic channels
         // of the same names to write on and stops writing on the static ids -- while going on
-        // reading the static ones. See `crate::redirected_channel`.
-        use crate::redirected_channel::RedirectedChannel;
+        // reading the static ones. See `crate::dvc_bridge`.
+        use crate::dvc_bridge::{HostedChannel, RedirectedChannel};
 
         if let Some(builder) = cliprdr_factory {
             drdynvc = drdynvc.with_dynamic_channel(RedirectedChannel::new(
@@ -575,6 +575,15 @@ async fn connect(
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
         drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("TextInput_ServerToClientDVC"));
+
+        // Audio output is specified over a static `rdpsnd` channel or a dynamic
+        // `AUDIO_PLAYBACK_DVC` one (MS-RDPEA), and this server opens the dynamic one and puts
+        // every sound on it. The lossy variant is deliberately left unanswered: a client that
+        // takes it gets audio over the unreliable tunnel, and this one has no use for that.
+        drdynvc = drdynvc.with_dynamic_channel(HostedChannel::new(
+            "AUDIO_PLAYBACK_DVC",
+            rdpsnd::client::Rdpsnd::new(Box::new(cpal::RdpsndBackend::new())),
+        ));
 
         // // Other protocol channels - stubs (would need full protocol implementations)
         // drdynvc =
