@@ -141,15 +141,51 @@ enum UserEvent {
 /// The payload travels through an unbounded channel and the proxy is used only to wake the
 /// loop up, with a flag so that a burst of damage rectangles cannot pile a thousand wakeups
 /// into the proxy queue.
+///
+/// The mirror is filled here, on the session's own thread, rather than where the window drains
+/// this channel. A window nobody is looking at is not asked to paint -- the compositor stops
+/// sending frame callbacks the moment it is covered -- and the drain used to be the only thing
+/// feeding the mirror, so an agent's view of the screen froze while the desktop it was driving
+/// carried on without it. Clicks still landed, which made it look like input had died.
 #[derive(Clone)]
 struct SessionEventSender {
     sender: mpsc::UnboundedSender<RdpOutputEvent>,
     proxy: Arc<Mutex<EventLoopProxy<UserEvent>>>,
     wakeup_pending: Arc<AtomicBool>,
+    /// Set while MCP mode is on, and only then: a session nobody is driving pays nothing.
+    mirror: Arc<Mutex<Option<Arc<crate::agent::SharedFrame>>>>,
+}
+
+impl SessionEventSender {
+    /// Starts mirroring frames for an agent, from this side of the channel.
+    fn mirror_into(&self, frame: Arc<crate::agent::SharedFrame>) {
+        if let Ok(mut mirror) = self.mirror.lock() {
+            *mirror = Some(frame);
+        }
+    }
+
+    /// Stops, when MCP mode is switched off.
+    fn stop_mirroring(&self) {
+        if let Ok(mut mirror) = self.mirror.lock() {
+            *mirror = None;
+        }
+    }
 }
 
 impl RdpEventSender for SessionEventSender {
     fn send_event(&self, event: RdpOutputEvent) -> Result<(), ()> {
+        if let RdpOutputEvent::Image {
+            buffer,
+            width,
+            height,
+            region,
+        } = &event
+            && let Ok(mirror) = self.mirror.lock()
+            && let Some(frame) = mirror.as_ref()
+        {
+            frame.apply_image(buffer, *width, *height, *region);
+        }
+
         self.sender.send(event).map_err(|_| ())?;
 
         if !self.wakeup_pending.swap(true, Ordering::AcqRel) {
@@ -1278,7 +1314,7 @@ impl SessionApp {
                     height,
                     region,
                 } => {
-                    session.frame.apply_image(&buffer, width, height, region);
+                    // Mirrored on the session thread already; this only paints.
                     self.update_surface(&buffer, width.get(), height.get(), region);
                     if let Some(session) = self.session.as_mut() {
                         session.stats.record_frame();
@@ -1611,11 +1647,16 @@ impl SessionApp {
         let (input_sender, input_receiver) = RdpInputEvent::create_channel();
         let (output_sender, output_receiver) = mpsc::unbounded_channel();
 
+        // The mirror belongs to the session and is filled by the thread that produces frames,
+        // not by the window's paint loop; see `SessionEventSender`.
+        let frame = Arc::new(crate::agent::SharedFrame::new());
         let event_sender = SessionEventSender {
             sender: output_sender,
             proxy: Arc::clone(&self.proxy),
             wakeup_pending: Arc::clone(&self.wakeup_pending),
+            mirror: Arc::default(),
         };
+        event_sender.mirror_into(Arc::clone(&frame));
 
         let session_size = winit::dpi::PhysicalSize::new(
             u32::from(config.connector.desktop_size.width),
@@ -1650,7 +1691,7 @@ impl SessionApp {
             input_sender,
             output_receiver,
             input_database: Database::new(),
-            frame: Arc::new(crate::agent::SharedFrame::new()),
+            frame,
             mcp: None,
             surface: None,
             surface_size: (0, 0),
