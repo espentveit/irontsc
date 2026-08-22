@@ -83,6 +83,12 @@ const DIALOG_SIZE: (f64, f64) = (420.0, 330.0);
 /// options inside the small one, and so does this.
 const DIALOG_SIZE_OPTIONS: (f64, f64) = (470.0, 620.0);
 
+/// Port the in-session MCP server prefers.
+///
+/// Fixed rather than ephemeral so that a client configured once keeps working; if it is busy,
+/// the server falls back to any free port and the gear menu shows the URL it actually got.
+const MCP_DEFAULT_PORT: u16 = 7444;
+
 /// The pointer has to settle inside this band at the top of the window before the island is
 /// revealed in fullscreen.
 const ISLAND_REVEAL_BAND: f32 = 50.0;
@@ -217,6 +223,16 @@ struct Session {
     /// Mirrors what the server believes is held down, so releases can be synthesised.
     input_database: Database,
 
+    /// A CPU-side copy of the desktop, for MCP mode to screenshot.
+    ///
+    /// Kept for the whole session rather than only while MCP mode is on. The GPU upload
+    /// beside it already copies the same damage rectangle, so this costs one more memcpy of
+    /// whatever changed -- and it means switching MCP mode on finds the desktop already
+    /// there, instead of waiting for a repaint that an idle desktop is never going to send.
+    frame: Arc<crate::agent::SharedFrame>,
+    /// The loopback MCP server, while MCP mode is switched on.
+    mcp: Option<McpBridge>,
+
     /// The remote desktop, living in one GPU texture that is updated in place.
     surface: Option<egui::TextureHandle>,
     /// Size of the remote surface in pixels, which is what pointer coordinates are scaled to.
@@ -310,8 +326,72 @@ impl Session {
             return;
         }
         self.shutting_down = true;
+        // Before the input channel closes, so a chord the agent was holding is let go of on
+        // the server rather than left down.
+        self.mcp = None;
         self.release_all_input("session is closing");
         let _ = self.input_sender.send(RdpInputEvent::Close);
+    }
+}
+
+/// MCP mode, running against the session this window owns.
+///
+/// Everything here is dropped together when MCP mode is switched off: the handle releases
+/// whatever the agent was holding down, and dropping the server cancels its accept loop
+/// before the runtime that carries it goes away.
+struct McpBridge {
+    session: Arc<crate::agent::AgentSession>,
+    server: crate::agent::HttpServer,
+    /// Carries the accept loop. Declared last so it is dropped last, and never read: it is
+    /// held only so that the runtime outlives the server running on it.
+    #[expect(dead_code, reason = "held for its lifetime, not its value")]
+    runtime: tokio::runtime::Runtime,
+}
+
+impl McpBridge {
+    /// Starts a loopback MCP server against an existing session.
+    fn start(
+        frame: Arc<crate::agent::SharedFrame>,
+        input_sender: mpsc::UnboundedSender<RdpInputEvent>,
+        port: u16,
+    ) -> anyhow::Result<Self> {
+        let session = crate::agent::AgentSession::attach(frame, input_sender);
+
+        // Its own runtime: the window is not async, and the session threads have runtimes of
+        // their own that belong to the protocol rather than to this.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("irontsc-mcp")
+            .build()
+            .map_err(|error| anyhow::anyhow!("failed to start the MCP runtime: {error}"))?;
+
+        // Bound before this returns, so the URL the menu shows is already live. A busy port
+        // falls back to an ephemeral one rather than refusing to start.
+        let server = runtime.block_on(async {
+            match crate::agent::serve_http(Arc::clone(&session), port).await {
+                Ok(server) => Ok(server),
+                Err(error) => {
+                    tracing::warn!(%error, port, "MCP port unavailable, taking any free port");
+                    crate::agent::serve_http(Arc::clone(&session), 0).await
+                }
+            }
+        })?;
+
+        Ok(Self {
+            session,
+            server,
+            runtime,
+        })
+    }
+}
+
+impl Drop for McpBridge {
+    fn drop(&mut self) {
+        // A half-finished chord must not outlive MCP mode: the user gets the session back
+        // with nothing stuck down.
+        self.session.release_all();
+        self.server.shutdown();
     }
 }
 
@@ -619,6 +699,8 @@ struct SessionApp {
     repaint_delay: Duration,
     /// A wake-up the island's reveal delay is waiting on.
     island_deadline: Option<Instant>,
+    /// Why MCP mode last refused to start, shown in the gear menu.
+    mcp_error: Option<String>,
     /// Connect as soon as there is a window, skipping the dialog entirely.
     pending_autoconnect: bool,
     exiting: bool,
@@ -647,6 +729,7 @@ impl SessionApp {
             wakeup_pending,
             repaint_delay: Duration::MAX,
             island_deadline: None,
+            mcp_error: None,
             pending_autoconnect: false,
             exiting: false,
         }
@@ -722,6 +805,23 @@ impl SessionApp {
                     }
                 },
             ),
+            mcp: match session.mcp.as_ref() {
+                Some(bridge) => McpView {
+                    enabled: true,
+                    url: Some(bridge.server.url()),
+                    command: Some(bridge.server.claude_code_command()),
+                    last_action: bridge
+                        .session
+                        .recent_actions()
+                        .last()
+                        .map(|action| action.summary.clone()),
+                    error: None,
+                },
+                None => McpView {
+                    error: self.mcp_error.clone(),
+                    ..McpView::default()
+                },
+            },
         })
     }
 
@@ -1066,6 +1166,7 @@ impl SessionApp {
                     height,
                     region,
                 } => {
+                    session.frame.apply_image(&buffer, width, height, region);
                     self.update_surface(&buffer, width.get(), height.get(), region);
                     if let Some(session) = self.session.as_mut() {
                         session.stats.record_frame();
@@ -1100,10 +1201,14 @@ impl SessionApp {
                 }
                 RdpOutputEvent::ConnectionFailure(error) => {
                     tracing::error!(?error, "RDP connection failed");
+                    session.frame.set_error(format!("{error}"));
                     disconnect = Some(Some(format!("{error}")));
                     break;
                 }
                 RdpOutputEvent::Terminated(result) => {
+                    session
+                        .frame
+                        .set_terminated("the session ended".to_owned());
                     let message = match result {
                         Ok(reason) => {
                             tracing::info!(?reason, "RDP session terminated");
@@ -1433,6 +1538,8 @@ impl SessionApp {
             input_sender,
             output_receiver,
             input_database: Database::new(),
+            frame: Arc::new(crate::agent::SharedFrame::new()),
+            mcp: None,
             surface: None,
             surface_size: (0, 0),
             desktop_rect: egui::Rect::ZERO,
@@ -1451,6 +1558,39 @@ impl SessionApp {
             pending_window_size: (!fullscreen).then_some((session_size, Instant::now())),
             shutting_down: false,
         });
+    }
+
+    /// Switches MCP mode on or off for the running session.
+    ///
+    /// Nothing here restarts anything: the agent joins the session already on screen, which is
+    /// the point of doing it from the island rather than from the command line.
+    fn toggle_mcp(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+
+        if session.mcp.take().is_some() {
+            // Dropped above, which releases the agent's keys and stops the listener.
+            self.mcp_error = None;
+            tracing::info!("MCP mode off");
+            return;
+        }
+
+        match McpBridge::start(
+            Arc::clone(&session.frame),
+            session.input_sender.clone(),
+            MCP_DEFAULT_PORT,
+        ) {
+            Ok(bridge) => {
+                tracing::info!(url = %bridge.server.url(), "MCP mode on");
+                session.mcp = Some(bridge);
+                self.mcp_error = None;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to start MCP mode");
+                self.mcp_error = Some(format!("{error}"));
+            }
+        }
     }
 
     /// Ends the session and returns to the connection dialog.
@@ -1661,6 +1801,10 @@ impl SessionApp {
             self.island.pinned = !self.island.pinned;
         }
 
+        if actions.toggle_mcp {
+            self.toggle_mcp();
+        }
+
         if actions.toggle_capture {
             if let Some(capture) = self.shortcut_capture.as_mut() {
                 let enabled = capture.is_enabled();
@@ -1750,6 +1894,7 @@ struct FrameActions {
     save_settings: bool,
     save_settings_as: bool,
     open_settings: bool,
+    toggle_mcp: bool,
 }
 
 /// Everything the island shows, owned, so the frame's UI closure borrows nothing else.
@@ -1766,6 +1911,21 @@ struct IslandView {
     capture_available: bool,
     capture_enabled: bool,
     capture_status: String,
+    mcp: McpView,
+}
+
+/// What the gear menu shows about MCP mode.
+#[derive(Default)]
+struct McpView {
+    enabled: bool,
+    /// The URL an MCP client connects to, once it is listening.
+    url: Option<String>,
+    /// The one-liner that wires Claude Code up to it.
+    command: Option<String>,
+    /// The last thing the agent did, so the menu shows signs of life.
+    last_action: Option<String>,
+    /// Why it would not start, if it would not.
+    error: Option<String>,
 }
 
 /// Draws the floating control island and reports its size for next frame's positioning.
@@ -1893,6 +2053,31 @@ fn show_island(
                             actions.toggle_pin = true;
                         }
 
+                        // Everything that is not a per-session control lives behind the gear,
+                        // so the island's face stays the short row of things reached often.
+                        // A dot marks MCP mode being on from the outside, since a menu that
+                        // has to be opened to be read is no indicator at all.
+                        // Plain text rather than a gear glyph: egui's bundled fonts do not
+                        // cover U+2699 any more than they cover the others avoided above, and
+                        // a button that draws as nothing is worse than a blunt one. When MCP
+                        // mode is on the button says so, which is the indicator.
+                        let gear_label = if view.mcp.enabled {
+                            egui::RichText::new("MCP")
+                                .strong()
+                                .color(egui::Color32::from_rgb(126, 208, 255))
+                        } else {
+                            egui::RichText::new("...").weak()
+                        };
+                        ui.menu_button(gear_label, |ui| {
+                            show_gear_menu(ui, view, actions);
+                        })
+                        .response
+                        .on_hover_text(if view.mcp.enabled {
+                            "Settings \u{2014} MCP mode is on"
+                        } else {
+                            "Settings"
+                        });
+
                         ui.separator();
 
                         // Window controls sit at the right-hand end, in the order mstsc uses:
@@ -1931,6 +2116,94 @@ fn show_island(
         });
 
     response.response.rect.size()
+}
+
+/// The gear menu.
+///
+/// MCP mode lives here rather than on the island's face: it is switched on once and then left
+/// alone, and it is not something to put a click away from Disconnect.
+fn show_gear_menu(ui: &mut egui::Ui, view: &IslandView, actions: &mut FrameActions) {
+    ui.set_min_width(320.0);
+
+    let mut enabled = view.mcp.enabled;
+    if ui
+        .checkbox(&mut enabled, "MCP mode")
+        .on_hover_text(
+            "Let an agent see and control this session. It serves MCP on this machine only, \n             and needs the token in the URL below.",
+        )
+        .clicked()
+    {
+        actions.toggle_mcp = true;
+    }
+
+    if let Some(error) = view.mcp.error.as_ref() {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+
+    if !view.mcp.enabled {
+        ui.label(
+            egui::RichText::new("Off. The agent sees exactly what you see.")
+                .small()
+                .weak(),
+        );
+        return;
+    }
+
+    ui.separator();
+
+    if let Some(url) = view.mcp.url.as_ref() {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("URL").small().weak());
+            if ui
+                .button("Copy")
+                .on_hover_text("Copy the URL, token included")
+                .clicked()
+            {
+                ui.ctx().copy_text(url.clone());
+            }
+        });
+        // Wrapped and selectable: it is long, and reading it off the screen is the fallback
+        // when the clipboard is going somewhere else.
+        ui.add(
+            egui::Label::new(egui::RichText::new(url).small().monospace())
+                .wrap()
+                .selectable(true),
+        );
+    }
+
+    if let Some(command) = view.mcp.command.as_ref() {
+        ui.add_space(4.0);
+        if ui
+            .button("Copy the `claude mcp add` command")
+            .on_hover_text(command.as_str())
+            .clicked()
+        {
+            ui.ctx().copy_text(command.clone());
+        }
+    }
+
+    ui.add_space(4.0);
+    match view.mcp.last_action.as_ref() {
+        Some(action) => {
+            ui.label(egui::RichText::new(format!("Last action: {action}")).small().weak());
+        }
+        None => {
+            ui.label(
+                egui::RichText::new("Listening. No agent has connected yet.")
+                    .small()
+                    .weak(),
+            );
+        }
+    }
+
+    ui.label(
+        egui::RichText::new(
+            "The token changes every time MCP mode is switched on, so re-copy the URL after \
+             switching it off and on again.",
+        )
+        .small()
+        .weak(),
+    );
 }
 
 /// The connection details, shown when the pointer rests on the island's name.
