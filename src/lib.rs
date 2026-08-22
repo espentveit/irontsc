@@ -19,6 +19,7 @@ pub mod config;
 pub mod console;
 pub mod core_input_channel;
 pub mod dtls_udp;
+pub mod dvc_bridge;
 pub mod dvc_compression;
 pub mod gfx;
 pub mod gfx_channel;
@@ -26,7 +27,7 @@ pub mod h264_codec_caps;
 pub mod mouse_cursor_channel;
 pub mod preferences;
 pub mod rdp;
-pub mod redirected_channel;
+
 pub mod stub_dvc;
 pub mod transport_rules;
 pub mod udp_gfx;

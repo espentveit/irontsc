@@ -175,13 +175,17 @@ impl SvcProcessor for Rdpsnd {
             .map_err(|e| decode_err!(e))?;
 
         debug!(?pdu, ?self.state);
-        let msg = match self.state {
-            RdpsndState::Start => {
-                let pdu::ServerAudioOutputPdu::AudioFormat(af) = pdu else {
-                    error!("Invalid pdu");
-                    self.state = RdpsndState::Stop;
-                    return Ok(vec![]);
-                };
+
+        // The server announces its formats to open the exchange, and Windows announces them
+        // again once a sound has finished playing. It is the same message and it means the same
+        // thing both times -- take the formats, offer ours, expect the training round -- so it
+        // is answered here rather than only in the opening state, where arriving later used to
+        // be read as a protocol error and stop the channel for the rest of the session.
+        let pdu = match (pdu, self.state) {
+            (
+                pdu::ServerAudioOutputPdu::AudioFormat(af),
+                RdpsndState::Start | RdpsndState::Ready,
+            ) => {
                 self.server_format = Some(af);
                 self.state = RdpsndState::WaitingForTraining;
                 let mut msgs: Vec<SvcMessage> = self.client_formats()?.into();
@@ -189,7 +193,16 @@ impl SvcProcessor for Rdpsnd {
                     let mut m = self.quality_mode()?.into();
                     msgs.append(&mut m);
                 }
-                msgs
+                return Ok(msgs);
+            }
+            (pdu, _) => pdu,
+        };
+
+        let msg = match self.state {
+            RdpsndState::Start => {
+                error!("Invalid pdu");
+                self.state = RdpsndState::Stop;
+                return Ok(vec![]);
             }
             RdpsndState::WaitingForTraining => {
                 let pdu::ServerAudioOutputPdu::Training(pdu) = pdu else {

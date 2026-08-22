@@ -1,4 +1,6 @@
-//! Static virtual channels that the server has moved onto dynamic ones, in one direction.
+//! Static virtual channel processors, on the dynamic channels a server puts their traffic on.
+//!
+//! Two different things bring one here, and they differ in where the replies go.
 //!
 //! A server that has agreed Soft-Sync ([MS-RDPEDYC] 3.1.5.3) rearranges the session's
 //! redirection channels, and does it asymmetrically. It stops writing on the static channel --
@@ -12,7 +14,14 @@
 //! listening. [`crate::rdp`] does the sending, because only it knows the static channels.
 //!
 //! Neither half of that is what MS-RDPECLIP or MS-RDPEFS describes, and neither is a choice this
-//! client is free to make differently: it is where a Windows server puts the traffic.
+//! client is free to make differently: it is where a Windows server puts the traffic. That is
+//! [`RedirectedChannel`].
+//!
+//! The other is a channel whose home is dynamic to begin with. Audio output is specified over
+//! either a static channel named `rdpsnd` or a dynamic one named `AUDIO_PLAYBACK_DVC`
+//! (MS-RDPEA), and this server uses the dynamic one -- it opens it, then says nothing until
+//! something makes a sound. Nothing is redirected there, so the conversation is ordinary: the
+//! replies go back on the channel they came from. That is [`HostedChannel`].
 
 use ironrdp::svc::{SvcMessage, SvcProcessor, TransportContext};
 use ironrdp_core::{Encode, EncodeResult, WriteCursor};
@@ -139,5 +148,71 @@ impl<P: SvcProcessor + 'static> DvcProcessor for RedirectedChannel<P> {
         // Nothing is ever sent on this dynamic channel, so there is no reason to ask for it to
         // be moved onto a tunnel.
         false
+    }
+}
+
+/// A processor on a dynamic channel that is where its protocol says it belongs.
+///
+/// Unlike [`RedirectedChannel`], nothing is split: the server both writes and reads here, so
+/// the processor's replies are framed as dynamic channel data and go back the way they came.
+pub struct HostedChannel<P> {
+    name: &'static str,
+    processor: P,
+    channel_id: Option<u32>,
+}
+
+impl<P: SvcProcessor> HostedChannel<P> {
+    pub fn new(name: &'static str, processor: P) -> Self {
+        Self {
+            name,
+            processor,
+            channel_id: None,
+        }
+    }
+
+    /// The channel the server opened, once it has opened one.
+    pub fn channel_id(&self) -> Option<u32> {
+        self.channel_id
+    }
+}
+
+impl<P: 'static> ironrdp_core::AsAny for HostedChannel<P> {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
+impl<P: SvcProcessor + 'static> DvcProcessor for HostedChannel<P> {
+    fn channel_name(&self) -> &str {
+        self.name
+    }
+
+    fn start(&mut self, channel_id: u32) -> PduResult<Vec<DvcMessage>> {
+        info!(channel = self.name, channel_id, "🔊 dynamic channel opened");
+        self.channel_id = Some(channel_id);
+        wrap(self.processor.start()?)
+    }
+
+    fn process(&mut self, _channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
+        // The transport a static channel processor is told to reply on. On a dynamic channel
+        // the reply goes back the way the request came, and the channel layer decides which
+        // tunnel that is, so the value here is not consulted.
+        let replies = self.processor.process(payload, TransportContext::Tcp)?;
+        debug!(
+            channel = self.name,
+            bytes = payload.len(),
+            replies = replies.len(),
+            "🔊 PDU over the dynamic channel"
+        );
+        wrap(replies)
+    }
+
+    fn close(&mut self, channel_id: u32) {
+        info!(channel = self.name, channel_id, "🔊 dynamic channel closed");
+        self.channel_id = None;
     }
 }

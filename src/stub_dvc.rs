@@ -4,6 +4,7 @@
 use ironrdp_core::impl_as_any;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
 use ironrdp_pdu::PduResult;
+use tracing::debug;
 
 #[derive(Debug)]
 pub struct StubDvcProcessor {
@@ -30,8 +31,15 @@ impl DvcProcessor for StubDvcProcessor {
         Ok(Vec::new())
     }
 
-    fn process(&mut self, _channel_id: u32, _payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
-        // Silently ignore all data - we're just a stub
+    fn process(&mut self, _channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
+        // Nothing is done with it, but a channel that turns out to carry traffic is worth
+        // knowing about: it is the difference between a stub that is right and one that is a
+        // hole in the session.
+        debug!(
+            channel = %self.channel_name,
+            bytes = payload.len(),
+            "🕳 data on a stubbed dynamic channel"
+        );
         Ok(Vec::new())
     }
 
