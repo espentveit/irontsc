@@ -2203,6 +2203,22 @@ async fn active_session<T: RdpEventSender + Clone>(
         }
     }
 
+    // The video redirection channels answer the server from the moment they are registered,
+    // but a decoded frame has nowhere to go until the window exists. See `crate::video_redirect`.
+    #[cfg(feature = "video-redirection")]
+    {
+        use crate::video_control_channel::VideoControlProcessor;
+        if let Some(dvc) = active_stage.get_dvc_mut::<VideoControlProcessor>()
+            && let Some(control) =
+                dvc.channel_processor_downcast_ref::<VideoControlProcessor>()
+            && let Ok(mut manager) = control.manager().lock()
+        {
+            info!("🔌 Connecting video redirection to the window");
+            manager.set_event_sender(Box::new(event_loop_proxy.clone()));
+            manager.set_surface_size(image.width(), image.height());
+        }
+    }
+
     // Initialize Desktop Composition handler with output dimensions
     let mut desktop_comp_handler =
         DesktopCompositionHandler::new(image.width() as u32, image.height() as u32);
@@ -2959,6 +2975,20 @@ async fn active_session<T: RdpEventSender + Clone>(
                     if dimensions != last_frame_dimensions {
                         frame_ready = false;
                         last_frame_dimensions = dimensions;
+
+                        // A video is painted at a place on the desktop, so a desktop that has
+                        // changed size has to be told about.
+                        #[cfg(feature = "video-redirection")]
+                        {
+                            use crate::video_control_channel::VideoControlProcessor;
+                            if let Some(dvc) = active_stage.get_dvc_mut::<VideoControlProcessor>()
+                                && let Some(control) =
+                                    dvc.channel_processor_downcast_ref::<VideoControlProcessor>()
+                                && let Ok(mut manager) = control.manager().lock()
+                            {
+                                manager.set_surface_size(dimensions.0, dimensions.1);
+                            }
+                        }
                     }
 
                     let is_full_frame = region.left == 0

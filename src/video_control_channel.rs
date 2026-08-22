@@ -3,6 +3,8 @@
 //! Handles the Microsoft::Windows::RDS::Video::Control::v08.01 channel
 //! for managing video presentations (start/stop).
 
+use std::sync::Arc;
+
 use ironrdp_core::AsAny;
 use ironrdp_dvc::{DvcMessage, DvcProcessor};
 use ironrdp_pdu::PduResult;
@@ -47,6 +49,11 @@ impl VideoControlProcessor {
             manager,
             channel_id: None,
         }
+    }
+
+    /// The manager the three video channels share, so the session can hand it the event loop.
+    pub fn manager(&self) -> SharedVideoRedirectionManager {
+        Arc::clone(&self.manager)
     }
 }
 

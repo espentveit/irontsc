@@ -15,7 +15,9 @@ use tracing::{debug, info, warn};
 #[cfg(feature = "video-redirection")]
 use ironrdp_h264::{AvcKind, FfmpegDecoder, H264Decoder};
 
-use crate::rdp::{RdpEventSender, RdpOutputEvent};
+use core::num::NonZeroU16;
+
+use crate::rdp::{ImageRegion, RdpEventSender, RdpOutputEvent};
 
 /// Presentation context for an active video stream
 #[derive(Debug)]
@@ -67,6 +69,11 @@ pub struct VideoRedirectionManager {
 
     /// Event sender for UI updates
     event_sender: Box<dyn RdpEventSender>,
+
+    /// How big the desktop is, which a decoded frame needs to know: a video is delivered as a
+    /// rectangle to paint somewhere on that desktop, and the size of the whole is part of
+    /// saying where.
+    surface: (u16, u16),
 }
 
 impl VideoRedirectionManager {
@@ -94,7 +101,21 @@ impl VideoRedirectionManager {
             #[cfg(feature = "video-redirection")]
             h264_decoder,
             event_sender,
+            surface: (0, 0),
         })
+    }
+
+    /// Points the manager at the real event loop, once there is one.
+    ///
+    /// Until then the channels are registered and answer the server, but a decoded frame has
+    /// nowhere to go.
+    pub fn set_event_sender(&mut self, sender: Box<dyn RdpEventSender>) {
+        self.event_sender = sender;
+    }
+
+    /// Tells the manager how big the desktop is, and again whenever it changes.
+    pub fn set_surface_size(&mut self, width: u16, height: u16) {
+        self.surface = (width, height);
     }
 
     /// Handle a presentation request from the control channel
@@ -392,18 +413,95 @@ impl VideoRedirectionManager {
             frame.width, frame.height, frame.format
         );
 
-        // TODO: Composite onto RDP bitmap using geometry bounds
-        // For now, we'll just log that we decoded successfully
         let bounds = geometry.bounds();
-        info!(
-            "🖼️ Video Redirection: Would render {}x{} frame to position ({},{}) size={}x{}",
-            frame.width,
-            frame.height,
-            bounds.left,
-            bounds.top,
-            bounds.width(),
-            bounds.height()
+        let (surface_width, surface_height) = self.surface;
+        if surface_width == 0 || surface_height == 0 {
+            warn!("⚠️ Video Redirection: desktop size not known yet, dropping a frame");
+            return Ok(());
+        }
+
+        // The video window can hang off the edge of the desktop, or be scrolled partly out of
+        // it. Only the part that is on the desktop can be painted.
+        let left = bounds.left.max(0);
+        let top = bounds.top.max(0);
+        let right = bounds.right.min(i32::from(surface_width));
+        let bottom = bounds.bottom.min(i32::from(surface_height));
+        if right <= left || bottom <= top {
+            debug!("🎬 Video Redirection: the video is entirely off the desktop");
+            return Ok(());
+        }
+
+        let region_width = (right - left) as usize;
+        let region_height = (bottom - top) as usize;
+
+        let stride = *frame
+            .line_sizes
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("decoded frame has no stride"))?;
+        let plane = frame
+            .planes
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("decoded frame has no data"))?;
+        if !matches!(frame.format, ironrdp_h264::PixelFormat::Bgra) {
+            anyhow::bail!("expected a BGRA frame, got {:?}", frame.format);
+        }
+
+        // The decoder gives the video at its own size; the geometry says how big it is on the
+        // desktop. Nearest neighbour is enough here -- the scale is usually 1:1, and when it is
+        // not, the alternative is carrying a resampler for a picture that is already lossy.
+        let mut region = vec![0u8; region_width * region_height * 4];
+        let frame_width = frame.width as usize;
+        let frame_height = frame.height as usize;
+        let scaled_width = bounds.width().max(1) as usize;
+        let scaled_height = bounds.height().max(1) as usize;
+        let skipped_x = (left - bounds.left) as usize;
+        let skipped_y = (top - bounds.top) as usize;
+
+        for y in 0..region_height {
+            let source_y = ((y + skipped_y) * frame_height / scaled_height).min(frame_height - 1);
+            for x in 0..region_width {
+                let source_x = ((x + skipped_x) * frame_width / scaled_width).min(frame_width - 1);
+                let from = source_y * stride + source_x * 4;
+                let to = (y * region_width + x) * 4;
+                if let (Some(pixel), Some(slot)) =
+                    (plane.get(from..from + 4), region.get_mut(to..to + 4))
+                {
+                    slot.copy_from_slice(pixel);
+                }
+            }
+        }
+
+        let (Some(width), Some(height)) = (
+            NonZeroU16::new(surface_width),
+            NonZeroU16::new(surface_height),
+        ) else {
+            return Ok(());
+        };
+        let (Some(region_w), Some(region_h)) = (
+            NonZeroU16::new(region_width as u16),
+            NonZeroU16::new(region_height as u16),
+        ) else {
+            return Ok(());
+        };
+
+        debug!(
+            "🖼️ Video Redirection: painting {}x{} at ({},{})",
+            region_width, region_height, left, top
         );
+
+        self.event_sender
+            .send_event(RdpOutputEvent::Image {
+                buffer: Arc::new(region),
+                width,
+                height,
+                region: Some(ImageRegion {
+                    x: left as u16,
+                    y: top as u16,
+                    width: region_w,
+                    height: region_h,
+                }),
+            })
+            .map_err(|_| anyhow::anyhow!("could not hand a video frame to the window"))?;
 
         Ok(())
     }
