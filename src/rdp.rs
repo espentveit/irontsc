@@ -148,6 +148,141 @@ impl DvcPipeProxyFactory {
 
 pub type WriteDvcMessageFn = Box<dyn Fn(u32, SvcMessage) -> PduResult<()> + Send + 'static>;
 
+/// Clipboard PDUs, framed for whichever channel this session's clipboard ended up on.
+enum ClipboardFraming {
+    /// Ready for the static `cliprdr` channel.
+    Static(Vec<SvcMessage>),
+    /// Wrapped as data on the dynamic channel the server moved the clipboard to, to go out
+    /// the way that channel's traffic is already flowing.
+    Dynamic {
+        messages: Vec<SvcMessage>,
+        transport: Option<TransportContext>,
+    },
+}
+
+/// Asks this session's clipboard for the PDUs an action turns into, framed for its channel.
+///
+/// A server that has agreed Soft-Sync is not symmetric about the clipboard. It stops writing on
+/// the static `cliprdr` channel and opens a dynamic channel of the same name to write on -- but
+/// it goes on *reading* the static channel, and never reads the dynamic one it opened. So the
+/// two halves are split here: the PDUs are built by the [`ironrdp::cliprdr::Cliprdr`] the server
+/// has actually been talking to, which is the bridge's in [`crate::cliprdr_channel`] and the
+/// only one that reached its ready state, and they are then sent back the way the server is
+/// still listening.
+fn frame_clipboard<F>(
+    active_stage: &mut ActiveStage,
+    build: F,
+) -> SessionResult<Option<ClipboardFraming>>
+where
+    F: FnOnce(&cliprdr::CliprdrClient) -> SessionResult<Vec<SvcMessage>>,
+{
+    use crate::cliprdr_channel::CliprdrDvcProcessor;
+
+    let dynamic_channel = active_stage
+        .get_dvc_mut::<CliprdrDvcProcessor>()
+        .and_then(|channel| channel.channel_id());
+
+    let messages = if dynamic_channel.is_some() {
+        let Some(bridge) = active_stage
+            .get_dvc_mut::<CliprdrDvcProcessor>()
+            .and_then(|channel| channel.channel_processor_downcast_ref::<CliprdrDvcProcessor>())
+        else {
+            warn!("Clipboard event received, but the dynamic channel went away");
+            return Ok(None);
+        };
+        build(bridge.clipboard())?
+    } else {
+        let Some(clipboard) = active_stage.get_svc_processor::<cliprdr::CliprdrClient>() else {
+            warn!("Clipboard event received, but Cliprdr is not available");
+            return Ok(None);
+        };
+        build(clipboard)?
+    };
+
+    if messages.is_empty() {
+        return Ok(None);
+    }
+
+    // The static channel is always joined -- this client asks for it in the conference create --
+    // and it is the one the server reads. The dynamic channel is only a fallback, for a server
+    // that turns out not to keep the static one.
+    if active_stage
+        .get_svc_processor::<cliprdr::CliprdrClient>()
+        .is_some()
+    {
+        debug!(
+            count = messages.len(),
+            "📋 clipboard: sending on the static channel"
+        );
+        return Ok(Some(ClipboardFraming::Static(messages)));
+    }
+
+    let Some(channel_id) = dynamic_channel else {
+        warn!("Clipboard event received, but there is no channel to send it on");
+        return Ok(None);
+    };
+    let messages =
+        CliprdrDvcProcessor::wrap(messages).map_err(|e| session::custom_err!("CLIPRDR", e))?;
+    let messages = ironrdp_dvc::encode_dvc_messages(channel_id, messages, ChannelFlags::empty())
+        .map_err(|e| session::custom_err!("DRDYNVC", e))?;
+    let transport = active_stage
+        .get_svc_processor::<ironrdp_dvc::DrdynvcClient>()
+        .and_then(|drdynvc| drdynvc.channel_transport(channel_id));
+    debug!(
+        channel_id,
+        count = messages.len(),
+        ?transport,
+        "📋 clipboard: sending on the dynamic channel"
+    );
+    Ok(Some(ClipboardFraming::Dynamic {
+        messages,
+        transport,
+    }))
+}
+
+/// Puts framed clipboard PDUs on the wire, by way of whichever channel they were framed for.
+///
+/// A dynamic channel the server has moved onto a tunnel is written to that tunnel, in the bare
+/// form [MS-RDPEMT] carries, rather than to the TCP connection the server has stopped reading
+/// it on.
+fn send_clipboard(
+    active_stage: &mut ActiveStage,
+    framed: Option<ClipboardFraming>,
+    udp_tunnels: &std::collections::HashMap<u32, ActiveUdpTunnel>,
+) -> SessionResult<Vec<ActiveStageOutput>> {
+    let frame = match framed {
+        Some(ClipboardFraming::Dynamic {
+            messages,
+            transport: Some(TransportContext::UdpTunnel(request_id)),
+        }) => {
+            let Some(tunnel) = udp_tunnels.get(&request_id) else {
+                warn!(request_id, "clipboard channel has no tunnel to speak on");
+                return Ok(Vec::new());
+            };
+            for message in messages {
+                let data = message
+                    .to_pdu_bytes()
+                    .map_err(|e| session::custom_err!("DRDYNVC", e))?;
+                if let Err(e) = tunnel
+                    .command_tx
+                    .send(UdpTransportCommand::SendDvcData { request_id, data })
+                {
+                    warn!("Failed to send a clipboard PDU over the tunnel: {:?}", e);
+                }
+            }
+            return Ok(Vec::new());
+        }
+        Some(ClipboardFraming::Dynamic { messages, .. }) => {
+            active_stage.encode_dvc_messages(messages)?
+        }
+        Some(ClipboardFraming::Static(messages)) => active_stage.process_svc_processor_messages(
+            ironrdp::svc::SvcProcessorMessages::<cliprdr::CliprdrClient>::new(messages),
+        )?,
+        None => return Ok(Vec::new()),
+    };
+    Ok(vec![ActiveStageOutput::ResponseFrame(frame)])
+}
+
 pub struct RdpClient<T: RdpEventSender + Clone> {
     pub config: Config,
     pub event_loop_proxy: T,
@@ -272,7 +407,8 @@ async fn connect(
     let mut framed = ironrdp_tokio::TokioFramed::new(stream);
 
     #[allow(unused_mut)]
-    let mut drdynvc = ironrdp::dvc::DrdynvcClient::new();
+    let mut drdynvc =
+        ironrdp::dvc::DrdynvcClient::new().with_compression(crate::dvc_compression::Zgfx);
 
     // NOTE: CoreInput and MouseCursor channels are intentionally NOT registered here.
     // The server will create these channels via DVC CREATE requests, and we respond with NO_LISTENER.
@@ -377,10 +513,16 @@ async fn connect(
         drdynvc = drdynvc.with_dynamic_channel(CoreInputProcessor::new());
         drdynvc = drdynvc.with_dynamic_channel(MouseCursorProcessor::new());
 
-        // Not `cliprdr`: the clipboard is a *static* virtual channel, and one is attached
-        // below with a real backend. Registering the name here as well advertised a dynamic
-        // channel the server was happy to use instead, where a stub swallowed every format
-        // list -- so a copy on the remote desktop never reached this machine.
+        // `cliprdr` is a static virtual channel by the specification, and one is attached below
+        // as well. A server that has agreed Soft-Sync moves it to a dynamic channel of the same
+        // name and abandons the static id, so the clipboard is taken on whichever of the two the
+        // server decides to use. See `crate::cliprdr_channel`.
+        if let Some(builder) = cliprdr_factory {
+            drdynvc = drdynvc.with_dynamic_channel(
+                crate::cliprdr_channel::CliprdrDvcProcessor::new(builder.build_cliprdr_backend()),
+            );
+        }
+
         drdynvc =
             drdynvc.with_dynamic_channel(StubDvcProcessor::new("Microsoft::Windows::RDS::Input"));
         drdynvc =
@@ -456,6 +598,16 @@ async fn connect(
 
     debug!(?connection_result);
 
+    // Which static channels the server actually joined, and under which ids. A channel with no
+    // id was requested and refused, and will never carry a byte no matter how it is wired up.
+    for (type_id, channel) in connection_result.static_channels.iter() {
+        info!(
+            channel = ?channel.channel_name(),
+            id = ?connection_result.static_channels.get_channel_id_by_type_id(type_id),
+            "🔌 static virtual channel"
+        );
+    }
+
     info!("✅ Multitransport capability advertised, waiting for server request...");
 
     // Extract correlation_id from connection_result for later use
@@ -514,7 +666,8 @@ async fn connect_ws(
 
     let mut framed = ironrdp_tokio::TokioFramed::new(ws);
 
-    let mut drdynvc = ironrdp::dvc::DrdynvcClient::new();
+    let mut drdynvc =
+        ironrdp::dvc::DrdynvcClient::new().with_compression(crate::dvc_compression::Zgfx);
 
     // Instantiate all DVC proxies
     for proxy in config.dvc_pipe_proxies.iter() {
@@ -2606,52 +2759,34 @@ async fn active_session<T: RdpEventSender + Clone>(
                         active_stage.graceful_shutdown()?
                     }
                     RdpInputEvent::Clipboard(event) => {
-                        if let Some(cliprdr) = active_stage.get_svc_processor::<cliprdr::CliprdrClient>() {
-                            if let Some(svc_messages) = match event {
+                        let framed = frame_clipboard(&mut active_stage, |clipboard| {
+                            let messages = match event {
                                 ClipboardMessage::SendInitiateCopy(formats) => {
-                                    Some(cliprdr.initiate_copy(&formats)
-                                        .map_err(|e| session::custom_err!("CLIPRDR", e))?)
+                                    clipboard.initiate_copy(&formats)
                                 }
                                 ClipboardMessage::SendFormatData(response) => {
-                                    Some(cliprdr.submit_format_data(response)
-                                    .map_err(|e| session::custom_err!("CLIPRDR", e))?)
+                                    clipboard.submit_format_data(response)
                                 }
                                 ClipboardMessage::SendInitiatePaste(format) => {
-                                    Some(cliprdr.initiate_paste(format)
-                                        .map_err(|e| session::custom_err!("CLIPRDR", e))?)
+                                    clipboard.initiate_paste(format)
                                 }
                                 ClipboardMessage::Error(e) => {
                                     error!("Clipboard backend error: {}", e);
-                                    None
+                                    return Ok(Vec::new());
                                 }
-                            } {
-                                let frame = active_stage.process_svc_processor_messages(svc_messages)?;
-                                // Send the messages to the server
-                                vec![ActiveStageOutput::ResponseFrame(frame)]
-                            } else {
-                                // No messages to send to the server
-                                Vec::new()
-                            }
-                        } else  {
-                            warn!("Clipboard event received, but Cliprdr is not available");
-                            Vec::new()
-                        }
+                            };
+                            Ok(messages.map_err(|e| session::custom_err!("CLIPRDR", e))?.into())
+                        })?;
+                        send_clipboard(&mut active_stage, framed, &udp_tunnels)?
                     }
                     RdpInputEvent::ClipboardFileContents(response) => {
-                        if let Some(cliprdr) =
-                            active_stage.get_svc_processor::<cliprdr::CliprdrClient>()
-                        {
-                            let svc_messages = cliprdr
+                        let framed = frame_clipboard(&mut active_stage, |clipboard| {
+                            Ok(clipboard
                                 .submit_file_contents(response)
-                                .map_err(|e| session::custom_err!("CLIPRDR", e))?;
-
-                            let frame = active_stage.process_svc_processor_messages(svc_messages)?;
-
-                            vec![ActiveStageOutput::ResponseFrame(frame)]
-                        } else {
-                            warn!("File contents response received, but Cliprdr is not available");
-                            Vec::new()
-                        }
+                                .map_err(|e| session::custom_err!("CLIPRDR", e))?
+                                .into())
+                        })?;
+                        send_clipboard(&mut active_stage, framed, &udp_tunnels)?
                     }
                     RdpInputEvent::SendDvcMessages { channel_id, messages } => {
                         trace!(channel_id, ?messages, "Send DVC messages");

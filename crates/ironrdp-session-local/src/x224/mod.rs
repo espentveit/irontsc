@@ -11,7 +11,7 @@ use ironrdp_pdu::x224::X224;
 use ironrdp_svc::{
     client_encode_svc_messages, StaticChannelSet, SvcMessage, SvcProcessor, SvcProcessorMessages,
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::{reason_err, SessionError, SessionErrorExt as _, SessionResult};
 
@@ -114,6 +114,15 @@ impl Processor {
             ironrdp_connector::legacy::decode_send_data_indication(frame)
                 .map_err(crate::legacy::map_error)?;
         let channel_id = data_ctx.channel_id;
+
+        // Every channel the server actually uses, as it uses it. A static virtual channel that
+        // was joined at GCC time but never carries a byte looks exactly like one that is working
+        // until you can see this line, or its absence.
+        trace!(
+            "🔎 X224 recv: channel {} ({} bytes)",
+            channel_id,
+            data_ctx.user_data.len()
+        );
 
         if channel_id == self.io_channel_id {
             self.process_io_channel(data_ctx)

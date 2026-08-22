@@ -528,13 +528,25 @@ impl Sequence for ClientConnector {
                     self.static_channels.attach_channel_id(channel, channel_id);
                 });
 
-                let skip_channel_join = server_gcc_blocks
+                // Both sides have to have asked for it. MS-RDPBCGR 3.2.5.3.8 makes the skip
+                // conditional on the client having set RNS_UD_CS_SUPPORT_SKIP_CHANNELJOIN *and*
+                // the server RNS_UD_SC_SKIP_CHANNELJOIN_SUPPORTED; a client that skips on the
+                // server's flag alone stops sending joins the server is still waiting for.
+                let client_asked_to_skip = client_gcc_blocks
                     .core
                     .optional_data
                     .early_capability_flags
                     .is_some_and(|c| {
-                        c.contains(gcc::ServerEarlyCapabilityFlags::SKIP_CHANNELJOIN_SUPPORTED)
+                        c.contains(gcc::ClientEarlyCapabilityFlags::SUPPORT_SKIP_CHANNELJOIN)
                     });
+                let skip_channel_join = client_asked_to_skip
+                    && server_gcc_blocks
+                        .core
+                        .optional_data
+                        .early_capability_flags
+                        .is_some_and(|c| {
+                            c.contains(gcc::ServerEarlyCapabilityFlags::SKIP_CHANNELJOIN_SUPPORTED)
+                        });
 
                 (
                     Written::Nothing,

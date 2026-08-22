@@ -15,10 +15,12 @@ pub use ironrdp;
 pub use smallvec;
 
 pub mod agent;
+pub mod cliprdr_channel;
 pub mod config;
 pub mod console;
 pub mod core_input_channel;
 pub mod dtls_udp;
+pub mod dvc_compression;
 pub mod gfx;
 pub mod gfx_channel;
 pub mod h264_codec_caps;

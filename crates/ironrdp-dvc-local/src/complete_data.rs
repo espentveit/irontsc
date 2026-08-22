@@ -24,6 +24,11 @@ impl CompleteData {
         match pdu {
             DrdynvcDataPdu::DataFirst(data_first) => self.process_data_first_pdu(data_first),
             DrdynvcDataPdu::Data(data) => self.process_data_pdu(data),
+            // The DVC manager decompresses before it reassembles, so a compressed block never
+            // reaches this far.
+            DrdynvcDataPdu::DataFirstCompressed(_) | DrdynvcDataPdu::DataCompressed(_) => Err(
+                invalid_field_err!("DrdynvcDataPdu", "still-compressed data reached reassembly"),
+            ),
         }
     }
 

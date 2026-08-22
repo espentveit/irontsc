@@ -17,14 +17,26 @@ use crate::utils::Bits;
 
 const HISTORY_SIZE: usize = 2_500_000;
 
+/// The history a dynamic virtual channel's compressor may refer back into
+/// ([MS-RDPEDYC] section 2.2.3.4), which is far smaller than the graphics pipeline's.
+pub const DVC_HISTORY_SIZE: usize = 8_192;
+
 pub struct Decompressor {
     history: FixedCircularBuffer,
 }
 
 impl Decompressor {
     pub fn new() -> Self {
+        Self::with_history_size(HISTORY_SIZE)
+    }
+
+    /// A decompressor whose history is only as large as the sender is allowed to reach back.
+    ///
+    /// The graphics pipeline uses the full 2,500,000 bytes; a dynamic virtual channel never
+    /// refers further back than 8,192, and there are as many contexts as there are channels.
+    pub fn with_history_size(history_size: usize) -> Self {
         Self {
-            history: FixedCircularBuffer::new(HISTORY_SIZE),
+            history: FixedCircularBuffer::new(history_size),
         }
     }
 
