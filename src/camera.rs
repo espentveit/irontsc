@@ -1,10 +1,15 @@
 //! A camera for the session (MS-RDPECAM).
 //!
-//! There is no webcam in this arrangement, and that is the point: what the session sees is a
-//! picture this client draws, frame by frame. It is the same shape as redirecting a real
-//! camera -- the same enumeration, the same formats, the same samples -- with the capture
-//! replaced by something synthetic, which is what makes it useful for testing a session that
-//! expects a camera and for standing in when there is nothing to point at a face.
+//! What the session sees is either a webcam on this machine or a picture this client draws.
+//! The protocol does not know the difference: the same enumeration, the same formats, the same
+//! samples, with only the last step -- where a frame comes from -- differing. A drawn one is
+//! what makes it possible to test a session that expects a camera, and to stand in when there
+//! is nothing to point at a face.
+//!
+//! A webcam of the usual kind already produces Motion JPEG, which is what this protocol asks
+//! for, so its frames are passed through exactly as the device gave them: nothing is decoded
+//! and nothing is re-encoded. A camera that only offers raw frames is converted, and the drawn
+//! one is drawn and encoded.
 //!
 //! Two channels. The server opens `RDCamera_Device_Enumerator` at connection time and waits;
 //! the client picks a version and then announces its devices, each with a channel name of its
@@ -13,10 +18,17 @@
 //! rate is the server's to choose, and nothing has to be paced here.
 //!
 //! Frames go as Motion JPEG. Uncompressed would be a megabyte a frame through a channel that
-//! fragments at 1,590 bytes; JPEG is what a real webcam of this kind sends anyway.
+//! fragments at 1,590 bytes.
 
 use ironrdp_core::{Encode, EncodeResult, WriteCursor};
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::{
+    ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
+    Resolution,
+};
 use ironrdp_dvc::{DvcEncode, DvcMessage, DvcProcessor};
+use std::sync::{Arc, Mutex};
+
 use ironrdp_pdu::PduResult;
 use tracing::{debug, info, warn};
 
@@ -52,6 +64,8 @@ const VERSION: u8 = 1;
 
 /// Motion JPEG.
 const FORMAT_MJPG: u8 = 0x02;
+/// How long to wait for a camera to produce its first frame before giving up on it.
+const FIRST_FRAME_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
 /// `E_FAIL`, for a sample that could not be produced.
 const ERROR_UNEXPECTED: u32 = 0x8000_FFFF;
 
@@ -223,9 +237,50 @@ impl DvcProcessor for CameraEnumerator {
     }
 }
 
+/// A camera running on its own thread, because the capture handle cannot leave it.
+struct Device {
+    /// The most recent frame, as the device gave it. Older ones are dropped: a session asking
+    /// for a sample wants what the camera sees now, not a queue of what it saw.
+    latest: Arc<Mutex<Option<Vec<u8>>>>,
+    orders: std::sync::mpsc::Sender<Order>,
+}
+
+/// What the thread holding the camera is told to do.
+enum Order {
+    Roll(MediaType),
+    Stop,
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        let _ = self.orders.send(Order::Stop);
+    }
+}
+
+/// Where the picture comes from.
+enum Lens {
+    /// A webcam on this machine.
+    Device(Device),
+    /// A picture this client draws, for a machine with no camera or a test that wants a known
+    /// one.
+    Drawn,
+}
+
+impl core::fmt::Debug for Lens {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Device(_) => f.write_str("a camera on this machine"),
+            Self::Drawn => f.write_str("a drawn picture"),
+        }
+    }
+}
+
 /// The camera itself, on the channel the server opened for it.
 pub struct Camera {
     channel_id: Option<u32>,
+    lens: Lens,
+    /// What the lens can produce, which is what the session gets to choose from.
+    offered: Vec<MediaType>,
     /// The format the server started the stream in, when it has started one.
     streaming: Option<MediaType>,
     frame: u64,
@@ -238,9 +293,14 @@ impl Default for Camera {
 }
 
 impl Camera {
+    /// Opens whichever camera the preferences ask for, or draws one when there is none.
     pub fn new() -> Self {
+        let (lens, offered) = open_lens();
+        info!(?lens, formats = offered.len(), "📷 camera ready for the session");
         Self {
             channel_id: None,
+            lens,
+            offered,
             streaming: None,
             frame: 0,
         }
@@ -278,7 +338,7 @@ impl DvcProcessor for Camera {
             MSG_ACTIVATE_DEVICE | MSG_DEACTIVATE_DEVICE => {
                 debug!(message, "📷 device activation");
                 if message == MSG_DEACTIVATE_DEVICE {
-                    self.streaming = None;
+                    self.stop();
                 }
                 Ok(vec![Pdu::empty(MSG_SUCCESS)])
             }
@@ -288,13 +348,22 @@ impl DvcProcessor for Camera {
                 Ok(vec![Pdu::new(MSG_STREAM_LIST_RESPONSE, body)])
             }
             MSG_MEDIA_TYPE_LIST_REQUEST => {
-                let mut out = Vec::with_capacity(MediaType::SIZE);
-                MediaType::offered().write(&mut out);
+                let mut out = Vec::with_capacity(self.offered.len() * MediaType::SIZE);
+                for media in &self.offered {
+                    debug!(
+                        width = media.width,
+                        height = media.height,
+                        fps = media.frame_rate_numerator,
+                        "📷 offering a format"
+                    );
+                    media.write(&mut out);
+                }
                 Ok(vec![Pdu::new(MSG_MEDIA_TYPE_LIST_RESPONSE, out)])
             }
             MSG_CURRENT_MEDIA_TYPE_REQUEST => {
                 let mut out = Vec::with_capacity(MediaType::SIZE);
                 self.streaming
+                    .or_else(|| self.offered.first().copied())
                     .unwrap_or_else(MediaType::offered)
                     .write(&mut out);
                 Ok(vec![Pdu::new(MSG_CURRENT_MEDIA_TYPE_RESPONSE, out)])
@@ -309,6 +378,13 @@ impl DvcProcessor for Camera {
                             format = media.format,
                             "📷 the session started the stream"
                         );
+                        if let Err(error) = self.start(&media) {
+                            warn!(%error, "📷 could not start the camera");
+                            return Ok(vec![Pdu::new(
+                                MSG_ERROR,
+                                ERROR_UNEXPECTED.to_le_bytes().to_vec(),
+                            )]);
+                        }
                         self.streaming = Some(media);
                         Ok(vec![Pdu::empty(MSG_SUCCESS)])
                     }
@@ -323,7 +399,7 @@ impl DvcProcessor for Camera {
             }
             MSG_STOP_STREAMS => {
                 info!("📷 the session stopped the stream");
-                self.streaming = None;
+                self.stop();
                 Ok(vec![Pdu::empty(MSG_SUCCESS)])
             }
             MSG_SAMPLE_REQUEST => {
@@ -336,7 +412,7 @@ impl DvcProcessor for Camera {
                 };
 
                 self.frame = self.frame.wrapping_add(1);
-                match draw(&media, self.frame) {
+                match self.capture(&media) {
                     Ok(jpeg) => {
                         // One line a second at thirty frames: enough to see the stream is
                         // alive and what it costs, without a line per frame.
@@ -370,14 +446,282 @@ impl DvcProcessor for Camera {
     fn close(&mut self, channel_id: u32) {
         info!(channel_id, "📷 the session closed the camera");
         self.channel_id = None;
-        self.streaming = None;
+        self.stop();
     }
+}
+
+impl Camera {
+    /// Starts the device rolling, in the format the session chose.
+    fn start(&mut self, media: &MediaType) -> Result<(), String> {
+        let Lens::Device(device) = &mut self.lens else {
+            return Ok(());
+        };
+        device
+            .orders
+            .send(Order::Roll(*media))
+            .map_err(|_| "the camera thread has gone".to_owned())?;
+
+        // The session starts asking for samples the moment this is answered, and a camera takes
+        // a moment to wake. Answering "no frame yet" to the first request is not a delay to the
+        // caller -- it is a failure, and a browser will drop the stream on it. So the success
+        // waits here for the first frame, which is the one place in the exchange where waiting
+        // is what the protocol expects.
+        let waited = std::time::Instant::now();
+        while waited.elapsed() < FIRST_FRAME_PATIENCE {
+            if device
+                .latest
+                .lock()
+                .is_ok_and(|latest| latest.is_some())
+            {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Err("the camera produced no picture".to_owned())
+    }
+
+    /// Stops it again, so the light goes out when nothing is watching.
+    fn stop(&mut self) {
+        self.streaming = None;
+        if let Lens::Device(device) = &mut self.lens {
+            let _ = device.orders.send(Order::Stop);
+        }
+    }
+
+    /// One frame, as Motion JPEG.
+    ///
+    /// A webcam that already speaks Motion JPEG is passed through untouched -- that is the
+    /// whole point of asking for it -- and anything else is decoded and encoded once.
+    fn capture(&mut self, media: &MediaType) -> Result<Vec<u8>, String> {
+        let frame = self.frame;
+        let Lens::Device(device) = &mut self.lens else {
+            return draw(media, frame);
+        };
+
+        // The newest frame, left in place. The session asks for samples on its own schedule,
+        // which is not the camera's, and a request that falls between two frames should get the
+        // picture as it was rather than an error.
+        device
+            .latest
+            .lock()
+            .ok()
+            .and_then(|latest| latest.clone())
+            .ok_or_else(|| "the camera has not produced a frame yet".to_owned())
+    }
+}
+
+/// Finds the camera to use, and what it can produce.
+///
+/// The `camera` preference names a device: any part of its name will do, and the word
+/// `pattern` asks for the drawn one however many cameras are attached. With nothing named, the
+/// first camera on the machine is used, and a machine with none gets the drawn picture rather
+/// than no camera at all -- a session that was promised one should find one.
+fn open_lens() -> (Lens, Vec<MediaType>) {
+    let wanted = crate::preferences::Preferences::load().camera;
+    let wanted = wanted.trim().to_lowercase();
+    if wanted == "pattern" {
+        return (Lens::Drawn, vec![MediaType::offered()]);
+    }
+
+    let cameras = nokhwa::query(ApiBackend::Auto).unwrap_or_default();
+    if cameras.is_empty() {
+        info!("📷 no camera on this machine, drawing one instead");
+        return (Lens::Drawn, vec![MediaType::offered()]);
+    }
+
+    // A machine lists more than one node per camera -- the capture one, and others that carry
+    // metadata or infrared and will not open or will offer nothing. So each is tried in turn
+    // rather than only the first, and only a failure of all of them means drawing instead.
+    let candidates = cameras
+        .iter()
+        .filter(|camera| wanted.is_empty() || camera.human_name().to_lowercase().contains(&wanted));
+
+    for camera in candidates {
+        let name = camera.human_name();
+        match open_device(camera.index().clone()) {
+            Ok((device, formats)) if !formats.is_empty() => {
+                info!(camera = %name, formats = formats.len(), "📷 using a camera on this machine");
+                return (Lens::Device(device), formats);
+            }
+            Ok(_) => debug!(camera = %name, "📷 that one offers nothing this can send"),
+            Err(error) => debug!(camera = %name, %error, "📷 that one would not open"),
+        }
+    }
+
+    warn!(
+        cameras = cameras.len(),
+        "📷 no camera on this machine could be used, drawing one instead"
+    );
+    (Lens::Drawn, vec![MediaType::offered()])
+}
+
+/// Opens one camera on a thread of its own, and asks it what it can do.
+///
+/// The capture handle is not `Send`, so it never leaves the thread that made it. What comes
+/// back is the list of formats it can produce and a way to tell it to start and stop.
+fn open_device(index: CameraIndex) -> Result<(Device, Vec<MediaType>), String> {
+    let latest: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+    let (orders, taking) = std::sync::mpsc::channel::<Order>();
+    let (opened, ready) = std::sync::mpsc::channel::<Result<Vec<MediaType>, String>>();
+
+    let held = Arc::clone(&latest);
+    std::thread::Builder::new()
+        .name("camera".to_owned())
+        .spawn(move || run_camera(index, held, &taking, &opened))
+        .map_err(|error| error.to_string())?;
+
+    let formats = ready
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "the camera did not answer".to_owned())??;
+
+    Ok((Device { latest, orders }, formats))
+}
+
+/// The thread that owns the camera: opens it, answers what it can do, then rolls when told.
+fn run_camera(
+    index: CameraIndex,
+    latest: Arc<Mutex<Option<Vec<u8>>>>,
+    orders: &std::sync::mpsc::Receiver<Order>,
+    opened: &std::sync::mpsc::Sender<Result<Vec<MediaType>, String>>,
+) {
+    // Nothing in particular is asked for here: this open is only to find out what the camera
+    // can do, and a camera that cannot satisfy a specific request would refuse to open at all.
+    let mut camera = match nokhwa::Camera::new(
+        index,
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::None),
+    ) {
+        Ok(camera) => camera,
+        Err(error) => {
+            let _ = opened.send(Err(error.to_string()));
+            return;
+        }
+    };
+
+    let formats = match camera.compatible_camera_formats() {
+        Ok(formats) => usable_formats(formats),
+        Err(error) => {
+            let _ = opened.send(Err(error.to_string()));
+            return;
+        }
+    };
+    if opened.send(Ok(formats)).is_err() {
+        return;
+    }
+
+    let mut rolling = false;
+    loop {
+        // While rolling, orders are picked up between frames; while idle, waiting on one is
+        // what keeps the thread from spinning.
+        let order = if rolling {
+            orders.try_recv().ok()
+        } else {
+            match orders.recv() {
+                Ok(order) => Some(order),
+                Err(_) => return,
+            }
+        };
+
+        match order {
+            Some(Order::Roll(media)) => {
+                let wanted = CameraFormat::new(
+                    Resolution::new(media.width, media.height),
+                    FrameFormat::MJPEG,
+                    media.frame_rate_numerator.max(1),
+                );
+                if let Err(error) = camera.set_camera_requset(RequestedFormat::new::<RgbFormat>(
+                    RequestedFormatType::Closest(wanted),
+                )) {
+                    warn!(%error, "📷 the camera would not take that format");
+                }
+                match camera.open_stream() {
+                    Ok(()) => {
+                        info!(
+                            width = media.width,
+                            height = media.height,
+                            "📷 the camera is rolling"
+                        );
+                        rolling = true;
+                    }
+                    Err(error) => warn!(%error, "📷 the camera would not start"),
+                }
+            }
+            Some(Order::Stop) => {
+                if rolling {
+                    let _ = camera.stop_stream();
+                    info!("📷 the camera has stopped");
+                }
+                rolling = false;
+                if let Ok(mut latest) = latest.lock() {
+                    *latest = None;
+                }
+            }
+            None => {}
+        }
+
+        if !rolling {
+            continue;
+        }
+
+        // A webcam of the usual kind already speaks Motion JPEG, which is what goes on the
+        // wire, so its bytes are kept exactly as they came. Anything else is converted.
+        match camera.frame() {
+            Ok(buffer) => {
+                let encoded = match jpeg_within(buffer.buffer()) {
+                    Some(jpeg) => Some(jpeg.to_vec()),
+                    None => buffer
+                        .decode_image::<RgbFormat>()
+                        .ok()
+                        .and_then(|image| encode(&image).ok()),
+                };
+                if let (Some(encoded), Ok(mut latest)) = (encoded, latest.lock()) {
+                    *latest = Some(encoded);
+                }
+            }
+            Err(error) => {
+                warn!(%error, "📷 the camera stopped giving frames");
+                let _ = camera.stop_stream();
+                rolling = false;
+            }
+        }
+    }
+}
+
+/// The formats worth offering the session, most useful first.
+///
+/// Motion JPEG only, one entry per size, and not the whole list a camera with dozens of modes
+/// would give -- the session picks one and the rest are noise.
+fn usable_formats(formats: Vec<CameraFormat>) -> Vec<MediaType> {
+    let mut usable: Vec<MediaType> = formats
+        .into_iter()
+        .filter(|format| format.format() == FrameFormat::MJPEG)
+        .map(|format| MediaType {
+            format: FORMAT_MJPG,
+            width: format.width(),
+            height: format.height(),
+            frame_rate_numerator: format.frame_rate(),
+            frame_rate_denominator: 1,
+            aspect_numerator: 1,
+            aspect_denominator: 1,
+            flags: 0,
+        })
+        .collect();
+
+    usable.sort_by_key(|media| {
+        core::cmp::Reverse((
+            u64::from(media.height) * u64::from(media.width),
+            u64::from(media.frame_rate_numerator),
+        ))
+    });
+    usable.dedup_by_key(|media| (media.width, media.height));
+    usable.truncate(8);
+    usable
 }
 
 /// Draws one frame: colour bars, a bar sweeping across them, and a counter block that moves on
 /// every frame, so a still picture and a stalled stream cannot be mistaken for each other.
 fn draw(media: &MediaType, frame: u64) -> Result<Vec<u8>, String> {
     use image::{Rgb, RgbImage};
+
 
     let width = media.width.clamp(16, 1920);
     let height = media.height.clamp(16, 1080);
@@ -416,9 +760,36 @@ fn draw(media: &MediaType, frame: u64) -> Result<Vec<u8>, String> {
         *pixel = Rgb(colour);
     }
 
+    encode(&image)
+}
+
+/// The JPEG inside a camera buffer, if that is what it holds.
+///
+/// A camera that speaks Motion JPEG hands back a buffer of the size the driver allocated rather
+/// than the size of the picture in it, so a 640x480 frame arrives as 614,400 bytes with a
+/// 30,000 byte JPEG at the front and nothing after. Sending the whole buffer works -- a decoder
+/// stops at the end marker -- and wastes twenty times the bandwidth on a channel that fragments
+/// every 1,590 bytes. The end marker cannot occur inside the compressed data, which is what
+/// makes finding it safe.
+fn jpeg_within(buffer: &[u8]) -> Option<&[u8]> {
+    const START_OF_IMAGE: [u8; 2] = [0xFF, 0xD8];
+    const END_OF_IMAGE: [u8; 2] = [0xFF, 0xD9];
+
+    if !buffer.starts_with(&START_OF_IMAGE) {
+        return None;
+    }
+    let end = buffer
+        .windows(2)
+        .rposition(|pair| pair == END_OF_IMAGE)?
+        .checked_add(2)?;
+    buffer.get(..end)
+}
+
+/// Turns a picture into the Motion JPEG frame the session expects.
+fn encode(image: &image::RgbImage) -> Result<Vec<u8>, String> {
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
-        .encode_image(&image)
-        .map_err(|e| e.to_string())?;
+        .encode_image(image)
+        .map_err(|error| error.to_string())?;
     Ok(jpeg)
 }

@@ -291,6 +291,7 @@ serde_json = "1"
 # hundred crates and a document-understanding stack that is no use to a desktop.
 ort = "=2.0.0-rc.13"
 image = "0.25"
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
 imageproc = "0.27"
 
 

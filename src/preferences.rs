@@ -48,6 +48,13 @@ pub struct Preferences {
     /// connected to, which is why it lives here rather than in a `.rdp` file.
     #[serde(default)]
     pub microphone: String,
+    /// Which camera the session sees, when a connection asks for one.
+    ///
+    /// Empty means the first camera on this machine. Otherwise any part of a camera's name
+    /// will do, and the word `pattern` asks for the drawn picture however many cameras are
+    /// attached, which is what a test wants. A machine with no camera at all draws one.
+    #[serde(default)]
+    pub camera: String,
     /// The DPI to tell the server about, as a percentage, instead of this display's own.
     ///
     /// A HiDPI laptop reports 167%, and the remote desktop then renders everything at 167% --
