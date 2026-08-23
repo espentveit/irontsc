@@ -1075,6 +1075,14 @@ struct ArboardClipboardBackend {
     running: Arc<AtomicBool>,
     watcher: Option<thread::JoinHandle<()>>,
     temp_dir: String,
+    /// What was last asked of the remote desktop.
+    ///
+    /// The reply carries no word about which format it is, so the question has to be
+    /// remembered: the same bytes are text or a picture depending only on what was requested.
+    /// It is kept rather than consumed, because a server that announces its formats twice --
+    /// which this one does for every copy -- gets asked twice and answers twice, and the second
+    /// answer read as text would write nonsense over the picture the first one just delivered.
+    pending_paste: Arc<Mutex<Option<ClipboardFormatId>>>,
     /// One clipboard for the life of the session, and the reason the remote's copies used to
     /// vanish. Both X11 and Wayland hand the *owner* the job of serving what was copied, so a
     /// `Clipboard` created for one `set_text` and dropped at the end of the call gives the
@@ -1105,20 +1113,66 @@ fn is_file_descriptor_format(format: ClipboardFormatId) -> bool {
 struct ClipboardState {
     text: Option<String>,
     files: Option<FileClipboard>,
+    /// What picture is on the clipboard, described rather than held.
+    ///
+    /// Nothing here compares or stores the pixels: a screenshot is megabytes, and this is
+    /// looked at twice a second. The size and a digest are enough to notice a different
+    /// picture, and the picture itself is fetched when the session actually asks for it.
+    image: Option<ImageMark>,
+}
+
+/// Enough of a picture to tell it from another one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageMark {
+    width: usize,
+    height: usize,
+    digest: u64,
+}
+
+impl ImageMark {
+    fn of(image: &arboard::ImageData<'_>) -> Self {
+        // Not a hash anyone should rely on for anything else: it exists to answer "is this the
+        // same picture as a moment ago", and it walks the bytes in strides so that a large
+        // screenshot does not cost a full pass twice a second.
+        let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+        let stride = (image.bytes.len() / 4096).max(1);
+        for byte in image.bytes.iter().step_by(stride) {
+            digest ^= u64::from(*byte);
+            digest = digest.wrapping_mul(0x1000_0000_01b3);
+        }
+        Self {
+            width: image.width,
+            height: image.height,
+            digest: digest ^ image.bytes.len() as u64,
+        }
+    }
 }
 
 impl ClipboardState {
     fn from_clipboard(clipboard: &mut Clipboard) -> Self {
+        Self::from_clipboard_with_image(clipboard, true)
+    }
+
+    /// Reads the clipboard, optionally without asking for a picture.
+    ///
+    /// Asking costs the whole picture: there is no way to find out whether one is there without
+    /// fetching it. That is nothing when the clipboard holds text -- the request fails at once
+    /// -- and megabytes when it holds a screenshot, which is why the watcher does not ask every
+    /// time round.
+    fn from_clipboard_with_image(clipboard: &mut Clipboard, with_image: bool) -> Self {
         let text = clipboard.get_text().ok();
         let files = clipboard
             .get()
             .file_list()
             .ok()
             .and_then(FileClipboard::from_paths);
+        let image = with_image
+            .then(|| clipboard.get_image().ok().map(|image| ImageMark::of(&image)))
+            .flatten();
 
         let text = Self::sanitize_text(text, files.is_some());
 
-        Self { text, files }
+        Self { text, files, image }
     }
 
     fn formats(&self) -> Vec<ClipboardFormat> {
@@ -1126,6 +1180,13 @@ impl ClipboardState {
 
         if self.text.is_some() {
             formats.push(ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT));
+        }
+
+        if self.image.is_some() {
+            // Only the older header is offered. Windows makes the newer one out of it for any
+            // program that wants that instead, and offering both would only mean writing the
+            // same picture twice.
+            formats.push(ClipboardFormat::new(ClipboardFormatId::CF_DIB));
         }
 
         if self.files.is_some() {
@@ -1140,7 +1201,7 @@ impl ClipboardState {
     }
 
     fn has_any(&self) -> bool {
-        self.text.is_some() || self.files.is_some()
+        self.text.is_some() || self.files.is_some() || self.image.is_some()
     }
 
     fn sanitize_text(text: Option<String>, has_files: bool) -> Option<String> {
@@ -1404,6 +1465,7 @@ impl ArboardClipboardBackend {
             running: Arc::new(AtomicBool::new(false)),
             watcher: None,
             temp_dir: std::env::temp_dir().display().to_string(),
+            pending_paste: Arc::new(Mutex::new(None)),
             // Opened on first use and then held: see the field's own note.
             clipboard: Mutex::new(None),
         }
@@ -1421,6 +1483,7 @@ impl ArboardClipboardBackend {
 
         self.watcher = Some(thread::spawn(move || {
             let mut clipboard = Clipboard::new().ok();
+            let mut round = 0u32;
 
             while running.load(Ordering::Relaxed) {
                 if clipboard.is_none() {
@@ -1428,10 +1491,20 @@ impl ArboardClipboardBackend {
                 }
 
                 if let Some(cb) = clipboard.as_mut() {
-                    let state = ClipboardState::from_clipboard(cb);
+                    // Text and files are cheap to look at twice a second. A picture is not, and
+                    // costs its whole size every time it is asked for, so it is asked for every
+                    // fourth round -- a copied screenshot reaches the session about two seconds
+                    // later, and a clipboard holding one is not read over and over in between.
+                    round = round.wrapping_add(1);
+                    let mut state = ClipboardState::from_clipboard_with_image(cb, round % 4 == 1);
 
                     let should_advertise = {
                         let mut guard = clipboard_state.lock().unwrap();
+                        // A round that did not ask about the picture knows nothing about it,
+                        // and must not report it as gone.
+                        if round % 4 != 1 {
+                            state.image = guard.image;
+                        }
                         if *guard != state {
                             *guard = state.clone();
                             state.has_any()
@@ -1498,6 +1571,43 @@ impl ArboardClipboardBackend {
         self.with_clipboard(|clipboard| ClipboardState::from_clipboard(clipboard).text)?
     }
 
+    /// The picture on this machine's clipboard, if there is one.
+    fn read_clipboard_image(&self) -> Option<crate::clipboard_image::Picture> {
+        let image = self.with_clipboard(|clipboard| clipboard.get_image().ok())??;
+        Some(crate::clipboard_image::Picture {
+            width: u32::try_from(image.width).ok()?,
+            height: u32::try_from(image.height).ok()?,
+            rgba: image.bytes.into_owned(),
+        })
+    }
+
+    /// Puts a picture from the remote desktop on this machine's clipboard.
+    fn set_clipboard_image(&self, picture: &crate::clipboard_image::Picture) {
+        let image = arboard::ImageData {
+            width: picture.width as usize,
+            height: picture.height as usize,
+            bytes: std::borrow::Cow::Borrowed(&picture.rgba),
+        };
+        let mark = ImageMark::of(&image);
+
+        let set = self.with_clipboard(|clipboard| clipboard.set_image(image));
+        match set {
+            Some(Err(err)) => warn!("Failed to set clipboard picture: {err}"),
+            Some(Ok(())) => info!(
+                width = picture.width,
+                height = picture.height,
+                "📋 picture from the remote desktop"
+            ),
+            None => return,
+        }
+
+        // The watcher is about to see this and would otherwise offer it straight back.
+        let mut state = self.clipboard_state.lock().unwrap();
+        state.image = Some(mark);
+        state.text = None;
+        state.files = None;
+    }
+
     fn set_clipboard_text(&self, text: &str) {
         let set = self.with_clipboard(|clipboard| clipboard.set_text(text.to_owned()));
         match set {
@@ -1509,6 +1619,7 @@ impl ArboardClipboardBackend {
         let mut state = self.clipboard_state.lock().unwrap();
         state.text = Some(text.to_owned());
         state.files = None;
+        state.image = None;
     }
 }
 
@@ -1556,12 +1667,20 @@ impl CliprdrBackend for ArboardClipboardBackend {
             "📋 cliprdr: the remote desktop copied something, {} formats offered",
             available_formats.len()
         );
-        if let Some(format) = available_formats
-            .iter()
-            .find(|fmt| fmt.id == ClipboardFormatId::CF_UNICODETEXT)
-        {
+        // Text first when there is any: a program that copies both is offering the picture as a
+        // convenience, and the words are what was meant.
+        let wanted = [
+            ClipboardFormatId::CF_UNICODETEXT,
+            ClipboardFormatId::CF_DIB,
+            ClipboardFormatId::CF_DIBV5,
+        ]
+        .into_iter()
+        .find(|wanted| available_formats.iter().any(|format| format.id == *wanted));
+
+        if let Some(format) = wanted {
+            *self.pending_paste.lock().unwrap() = Some(format);
             let _ = self.sender.send(RdpInputEvent::Clipboard(
-                ClipboardMessage::SendInitiatePaste(format.id),
+                ClipboardMessage::SendInitiatePaste(format),
             ));
         }
     }
@@ -1578,6 +1697,19 @@ impl CliprdrBackend for ArboardClipboardBackend {
                         guard.text = Some(text.clone());
                     }
                     FormatDataResponse::new_unicode_string(&text).into_owned()
+                }
+                None => FormatDataResponse::new_error().into_owned(),
+            }
+        } else if request.format == ClipboardFormatId::CF_DIB {
+            match self.read_clipboard_image() {
+                Some(picture) => {
+                    debug!(
+                        width = picture.width,
+                        height = picture.height,
+                        "📋 handing a picture to the remote desktop"
+                    );
+                    FormatDataResponse::new_data(crate::clipboard_image::to_dib(&picture))
+                        .into_owned()
                 }
                 None => FormatDataResponse::new_error().into_owned(),
             }
@@ -1603,11 +1735,22 @@ impl CliprdrBackend for ArboardClipboardBackend {
     }
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
-        match response.to_unicode_string() {
-            Ok(text) => {
-                self.set_clipboard_text(&text);
+        let asked = *self.pending_paste.lock().unwrap();
+
+        match asked {
+            Some(ClipboardFormatId::CF_DIB | ClipboardFormatId::CF_DIBV5) => {
+                match crate::clipboard_image::from_dib(response.data()) {
+                    Some(picture) => self.set_clipboard_image(&picture),
+                    None => warn!(
+                        bytes = response.data().len(),
+                        "📋 the remote desktop sent a picture in a form this cannot read"
+                    ),
+                }
             }
-            Err(err) => warn!("Failed to decode clipboard data: {err}"),
+            _ => match response.to_unicode_string() {
+                Ok(text) => self.set_clipboard_text(&text),
+                Err(err) => warn!("Failed to decode clipboard data: {err}"),
+            },
         }
     }
 
