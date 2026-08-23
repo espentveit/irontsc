@@ -16,6 +16,7 @@ pub use smallvec;
 
 pub mod agent;
 pub mod camera;
+pub mod clipboard_files;
 pub mod clipboard_image;
 pub mod config;
 pub mod console;
