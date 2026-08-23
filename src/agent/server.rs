@@ -277,6 +277,15 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(session: Arc<AgentSession>, sight: Option<Arc<super::Models>>) -> Self {
         let mut router = Self::tool_router();
+
+        // Sharing a folder while the session runs is written and answered -- the server takes
+        // the device and says STATUS_SUCCESS -- and then Windows never issues a single I/O
+        // against it and `\\tsclient\<name>` does not resolve. Until that is understood, an
+        // agent should not be offered a tool that reports success and does nothing. Folders
+        // shared at connection time work, and are configured rather than asked for.
+        router.remove_route("share_folder");
+        router.remove_route("unshare_folder");
+
         if sight.is_none() {
             // No models, no tools. An agent should not be shown something that can only fail,
             // and a tool it cannot see costs it no tokens to ignore.
