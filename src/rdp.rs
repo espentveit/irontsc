@@ -125,6 +125,12 @@ pub enum RdpInputEvent {
         channel_id: u32,
         messages: Vec<SvcMessage>,
     },
+    /// Offer a folder to the session while it is running, or take one back.
+    ///
+    /// The device list may be announced at any point after the initial handshake, which is what
+    /// makes a share that was not known at connection time possible at all.
+    ShareFolder(crate::drive::Share),
+    UnshareFolder(String),
 }
 
 impl RdpInputEvent {
@@ -147,6 +153,27 @@ impl DvcPipeProxyFactory {
 }
 
 pub type WriteDvcMessageFn = Box<dyn Fn(u32, SvcMessage) -> PduResult<()> + Send + 'static>;
+
+
+/// Builds the `rdpdr` processor, with whatever folders this connection shares.
+///
+/// The shares are announced with the initial device list; more may be added while the session
+/// runs. See `crate::drive`.
+fn build_rdpdr(shares: &[crate::drive::Share]) -> rdpdr::Rdpdr {
+    let drives = crate::drive::SharedDrives::new();
+    let mut initial = Vec::new();
+
+    for (offset, share) in shares.iter().enumerate() {
+        // Zero is the smartcard's, so the drives start after it.
+        let device_id = offset as u32 + 1;
+        drives.with(|drives| drives.insert(device_id, share.clone()));
+        initial.push((device_id, share.name.clone()));
+    }
+
+    rdpdr::Rdpdr::new(Box::new(drives), "IronTSC".to_owned())
+        .with_smartcard(0)
+        .with_drives(Some(initial))
+}
 
 /// Clipboard PDUs, framed for whichever channel this session's clipboard ended up on.
 enum ClipboardFraming {
@@ -627,7 +654,7 @@ async fn connect(
 
         drdynvc = drdynvc.with_dynamic_channel(RedirectedChannel::new(
             "rdpdr",
-            rdpdr::Rdpdr::new(Box::new(NoopRdpdrBackend {}), "IronRDP".to_owned()).with_smartcard(0),
+            build_rdpdr(&config.shares),
         ));
 
         drdynvc =
@@ -687,8 +714,7 @@ async fn connect(
             cpal::RdpsndBackend::new(),
         )))
         .with_static_channel(
-            rdpdr::Rdpdr::new(Box::new(NoopRdpdrBackend {}), "IronRDP".to_owned())
-                .with_smartcard(0),
+            build_rdpdr(&config.shares),
         );
 
     if let Some(builder) = cliprdr_factory {
@@ -814,7 +840,7 @@ async fn connect_ws(
     let mut connector = connector::ClientConnector::new(config.connector.clone(), client_addr)
         .with_static_channel(drdynvc)
         .with_static_channel(rdpsnd::client::Rdpsnd::new(Box::new(cpal::RdpsndBackend::new())))
-        .with_static_channel(rdpdr::Rdpdr::new(Box::new(NoopRdpdrBackend {}), "IronRDP".to_owned()).with_smartcard(0));
+        .with_static_channel(build_rdpdr(&[]));
 
     if let Some(builder) = cliprdr_factory {
         let backend = builder.build_cliprdr_backend();
@@ -2935,6 +2961,86 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 .into())
                         })?;
                         send_clipboard(&mut active_stage, framed, &udp_tunnels)?
+                    }
+                    RdpInputEvent::ShareFolder(share) => {
+                        let announced = {
+                            let Some(rdpdr) =
+                                active_stage.get_svc_processor_mut::<rdpdr::Rdpdr>()
+                            else {
+                                warn!("🗂 asked to share a folder, but there is no rdpdr channel");
+                                continue;
+                            };
+                            let Some(drives) =
+                                rdpdr.downcast_backend_mut::<crate::drive::SharedDrives>()
+                            else {
+                                warn!("🗂 asked to share a folder, but the shares are missing");
+                                continue;
+                            };
+                            let device_id = drives
+                                .with(|drives| {
+                                    let device_id = drives.next_device_id();
+                                    drives.insert(device_id, share.clone());
+                                    device_id
+                                })
+                                .unwrap_or_default();
+                            let announce = rdpdr.add_drive(device_id, share.name.clone());
+                            ironrdp::svc::SvcMessage::from(
+                                ironrdp::rdpdr::pdu::RdpdrPdu::ClientDeviceListAnnounce(announce),
+                            )
+                        };
+
+                        let frame = active_stage.process_svc_processor_messages(
+                            ironrdp::svc::SvcProcessorMessages::<rdpdr::Rdpdr>::new(vec![
+                                announced,
+                            ]),
+                        )?;
+                        vec![ActiveStageOutput::ResponseFrame(frame)]
+                    }
+                    RdpInputEvent::UnshareFolder(name) => {
+                        let removed = {
+                            let Some(rdpdr) =
+                                active_stage.get_svc_processor_mut::<rdpdr::Rdpdr>()
+                            else {
+                                continue;
+                            };
+                            let device_id = rdpdr
+                                .downcast_backend_mut::<crate::drive::SharedDrives>()
+                                .and_then(|drives| {
+                                    drives.with(|drives| {
+                                        drives
+                                            .shares()
+                                            .find(|(_, share)| share.name == name)
+                                            .map(|(id, _)| id)
+                                    })
+                                })
+                                .flatten();
+                            let Some(device_id) = device_id else {
+                                warn!(name, "🗂 asked to stop sharing a folder that is not shared");
+                                continue;
+                            };
+                            if let Some(drives) =
+                                rdpdr.downcast_backend_mut::<crate::drive::SharedDrives>()
+                            {
+                                drives.with(|drives| drives.remove(device_id));
+                            }
+                            rdpdr.remove_device(device_id).map(|remove| {
+                                ironrdp::svc::SvcMessage::from(
+                                    ironrdp::rdpdr::pdu::RdpdrPdu::ClientDeviceListRemove(remove),
+                                )
+                            })
+                        };
+
+                        match removed {
+                            Some(message) => {
+                                let frame = active_stage.process_svc_processor_messages(
+                                    ironrdp::svc::SvcProcessorMessages::<rdpdr::Rdpdr>::new(vec![
+                                        message,
+                                    ]),
+                                )?;
+                                vec![ActiveStageOutput::ResponseFrame(frame)]
+                            }
+                            None => Vec::new(),
+                        }
                     }
                     RdpInputEvent::SendDvcMessages { channel_id, messages } => {
                         trace!(channel_id, ?messages, "Send DVC messages");

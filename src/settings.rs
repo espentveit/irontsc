@@ -226,6 +226,13 @@ pub struct RdpSettings {
     /// either way, and only where the frames come from would differ.
     #[serde(default)]
     pub camera: bool,
+    /// Folders from this machine the session can open, as `name=/path` separated by semicolons.
+    ///
+    /// `:ro` on the end of an entry keeps it read-only. Written as `irontsc:shares` in the
+    /// file, because mstsc's own `drivestoredirect` names Windows drive letters, which is not
+    /// what is being offered here.
+    #[serde(default)]
+    pub shares: String,
 }
 
 fn default_width() -> u16 {
@@ -259,6 +266,7 @@ impl Default for RdpSettings {
             disable_udp: false,
             audio_capture: false,
             camera: false,
+            shares: String::new(),
             // Empty: take this machine's layout, which is what the window already types with.
             keyboard_layout: String::new(),
             show_codec_grid: false,
@@ -383,6 +391,7 @@ impl RdpSettings {
                 // A layout belongs to the server being connected to, so it stays here rather
                 // than in the preferences; the vision endpoint is IronTSC's own and lives
                 // there, away from a file mstsc might also read.
+                "irontsc:shares" => settings.shares = value.to_owned(),
                 "irontsc:keyboard_layout" => settings.keyboard_layout = value.to_owned(),
                 _ => {}
             }

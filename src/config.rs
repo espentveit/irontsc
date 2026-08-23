@@ -39,6 +39,9 @@ pub struct Config {
     /// Give the session a camera, whose picture this client draws.
     pub camera: bool,
 
+    /// Folders from this machine that the session can open.
+    pub shares: Vec<crate::drive::Share>,
+
     /// Disable H.264 AVC420 codec
     pub disable_avc420: bool,
 
@@ -306,6 +309,11 @@ struct Args {
     #[clap(long)]
     camera: bool,
 
+    /// Share a folder with the session: `--share name=/path`, or `name=/path:ro` to keep it
+    /// read-only. May be given more than once.
+    #[clap(long)]
+    share: Vec<String>,
+
     /// The clipboard type
     #[clap(long, value_enum, default_value_t = ClipboardType::Default)]
     clipboard_type: ClipboardType,
@@ -514,6 +522,7 @@ impl Config {
             dvc_pipe_proxies: args.dvc_proxy,
             h264_hw_accel: false, // Set via UI, default to false for CLI mode
             camera: args.camera,
+            shares: crate::drive::parse_shares(&args.share.join(";")),
             disable_avc420: false,
             disable_avc444: false,
             disable_udp: false,
