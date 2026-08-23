@@ -20,6 +20,7 @@ pub mod config;
 pub mod console;
 pub mod core_input_channel;
 pub mod audio_input;
+pub mod drive;
 pub mod dtls_udp;
 pub mod dvc_bridge;
 pub mod dvc_compression;

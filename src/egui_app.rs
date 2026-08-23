@@ -3327,6 +3327,7 @@ pub fn build_config(form: &ConnectForm, settings: &RdpSettings) -> anyhow::Resul
         dvc_pipe_proxies: Vec::new(),
         h264_hw_accel: settings.get_h264_hw_accel(),
         camera: settings.camera,
+        shares: crate::drive::parse_shares(&settings.shares),
         disable_avc420: settings.get_disable_avc420(),
         disable_avc444: settings.get_disable_avc444(),
         disable_udp: settings.get_disable_udp(),

@@ -240,6 +240,24 @@ pub struct KeyArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ShareArgs {
+    /// The folder on the client machine to offer, as an absolute path.
+    pub path: String,
+    /// What the session should call it. Defaults to the folder's own name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Offer it without letting the session change anything.
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UnshareArgs {
+    /// The name the folder was shared under.
+    pub name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct WaitArgs {
     /// Milliseconds to wait, capped at 30000.
     pub ms: u64,
@@ -861,6 +879,41 @@ impl McpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "waited {capped} ms"
         ))]))
+    }
+
+    /// Offer a folder from this machine to the session, which can then open it in File
+    /// Explorer or read and write it from a command prompt.
+    #[rmcp::tool]
+    async fn share_folder(
+        &self,
+        Parameters(args): Parameters<ShareArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self
+            .session
+            .share_folder(&args.path, args.name.as_deref(), !args.read_only)
+        {
+            Ok(name) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "{} is now shared with the session as \\\\tsclient\\{name}{}",
+                args.path,
+                if args.read_only { ", read-only" } else { "" }
+            ))])),
+            Err(error) => Ok(error.into()),
+        }
+    }
+
+    /// Stop offering a folder that was shared.
+    #[rmcp::tool]
+    async fn unshare_folder(
+        &self,
+        Parameters(args): Parameters<UnshareArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self.session.unshare_folder(&args.name) {
+            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "{} is no longer shared",
+                args.name
+            ))])),
+            Err(error) => Ok(error.into()),
+        }
     }
 
     /// Close the session. Only available when this server opened it.

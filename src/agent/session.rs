@@ -769,6 +769,49 @@ impl AgentSession {
     }
 
     /// Closes the session, if it is ours to close.
+    /// Offers a folder from this machine to the session, while it is running.
+    ///
+    /// The share appears in the session's File Explorer under `name`, next to whatever the
+    /// connection was already sharing.
+    pub fn share_folder(&self, path: &str, name: Option<&str>, writable: bool) -> AgentResult<String> {
+        let root = std::path::PathBuf::from(path);
+        if !root.is_dir() {
+            return Err(AgentError::BadRequest(format!(
+                "{path} is not a folder on this machine"
+            )));
+        }
+        let root = root
+            .canonicalize()
+            .map_err(|error| AgentError::BadRequest(format!("cannot reach {path}: {error}")))?;
+
+        let name = match name {
+            Some(name) if !name.trim().is_empty() => name.trim().to_owned(),
+            _ => root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "share".to_owned()),
+        };
+
+        self.input
+            .send(RdpInputEvent::ShareFolder(crate::drive::Share {
+                name: name.clone(),
+                root,
+                writable,
+            }))
+            .map_err(|_| AgentError::NotConnected("the session has ended".to_owned()))?;
+        self.record("share_folder");
+        Ok(name)
+    }
+
+    /// Takes a shared folder back.
+    pub fn unshare_folder(&self, name: &str) -> AgentResult<()> {
+        self.input
+            .send(RdpInputEvent::UnshareFolder(name.to_owned()))
+            .map_err(|_| AgentError::NotConnected("the session has ended".to_owned()))?;
+        self.record("unshare_folder");
+        Ok(())
+    }
+
     pub fn disconnect(&self) -> AgentResult<()> {
         if !self.owns_session {
             return Err(AgentError::BadRequest(

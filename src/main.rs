@@ -65,6 +65,11 @@ struct ConnectionArgs {
     #[arg(long)]
     no_nla: bool,
 
+    /// Share a folder with the session: `--share name=/path`, or append `:ro` to keep it
+    /// read-only. May be given more than once, and the same as `irontsc:shares` in a `.rdp`.
+    #[arg(long)]
+    share: Vec<String>,
+
     /// Give the session a camera.
     ///
     /// The same as `camerastoredirect:s:*` in a `.rdp` file. What the session sees is a picture
@@ -209,6 +214,15 @@ fn resolve(connection: &ConnectionArgs) -> anyhow::Result<(ConnectForm, RdpSetti
 
     if connection.camera {
         settings.camera = true;
+    }
+
+    if !connection.share.is_empty() {
+        let named = connection.share.join(";");
+        settings.shares = if settings.shares.trim().is_empty() {
+            named
+        } else {
+            format!("{};{named}", settings.shares)
+        };
     }
 
     let form = ConnectForm {
