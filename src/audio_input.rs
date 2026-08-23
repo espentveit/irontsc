@@ -412,21 +412,78 @@ fn decode_formats(body: &[u8]) -> Result<Vec<AudioFormat>, String> {
     Ok(formats)
 }
 
-/// Opens the default microphone at one exact format, writing what it hears into `recorded`.
+/// Finds the microphone to record from: the one the preferences name, or this machine's default.
+///
+/// A name usually matches more than one device -- ALSA offers the same card raw, through its
+/// converting plug layer, and through whatever sound server is running -- and the raw one often
+/// records at one rate only. So a match that can record at the rate agreed with the server is
+/// preferred over a match that merely comes first. The channel count is not part of the
+/// question: that is mixed to suit.
+fn choose_microphone(sample_rate: u32) -> Result<cpal::Device, String> {
+    let host = cpal::default_host();
+    let wanted = crate::preferences::Preferences::load().microphone;
+    let wanted = wanted.trim().to_lowercase();
+
+    if !wanted.is_empty() {
+        let mut names = Vec::new();
+        let mut exact = None;
+        let mut fallback = None;
+        if let Ok(devices) = host.input_devices() {
+            for device in devices {
+                let name = device.name().unwrap_or_default();
+                let lowered = name.to_lowercase();
+                if !lowered.contains(&wanted) {
+                    names.push(name);
+                    continue;
+                }
+                // A name written out in full means that device and no other. ALSA lists the
+                // same card several ways and only some of them convert, so a person who has
+                // worked out which one they want must be able to say so exactly.
+                if lowered == wanted {
+                    info!(device = %name, "🎤 using the microphone the preferences name");
+                    return Ok(device);
+                }
+                if records_at(&device, sample_rate) {
+                    exact.get_or_insert(device);
+                } else {
+                    fallback.get_or_insert(device);
+                }
+                names.push(name);
+            }
+        }
+        if let Some(device) = exact {
+            info!(device = %device.name().unwrap_or_default(), "🎤 using the microphone the preferences name");
+            return Ok(device);
+        }
+        if let Some(device) = fallback {
+            info!(
+                device = %device.name().unwrap_or_default(),
+                sample_rate,
+                "🎤 the named microphone may not manage this rate, trying it anyway"
+            );
+            return Ok(device);
+        }
+        warn!(
+            wanted,
+            available = ?names,
+            "🎤 no microphone matches, falling back to the default"
+        );
+    }
+
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| "this machine has no microphone".to_owned())?;
+    debug!(device = %device.name().unwrap_or_default(), "🎤 using the default microphone");
+    Ok(device)
+}
+
+/// Opens the microphone at one exact format, writing what it hears into `recorded`.
 fn open_microphone(
     channels: u16,
     sample_rate: u32,
     recorded: &Arc<Mutex<Vec<u8>>>,
 ) -> Result<cpal::Stream, String> {
-    let device = cpal::default_host()
-        .default_input_device()
-        .ok_or_else(|| "this machine has no microphone".to_owned())?;
-
-    let config = cpal::StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
+    let device = choose_microphone(sample_rate)?;
 
     // A device advertises the same rate in several sample formats, and the order it lists them
     // in means nothing. Signed 16-bit is what the session is promised, so take that when it is
@@ -438,23 +495,78 @@ fn open_microphone(
         cpal::SampleFormat::U16,
         cpal::SampleFormat::U8,
     ];
-    let available: Vec<cpal::SampleFormat> = device
+
+    // The channel count is the device's to decide. A headset records one channel and the
+    // session may have asked for two; that is a question of mixing, not a reason to refuse.
+    // The sample rate is not negotiable in the same way -- resampling is a different job -- so
+    // only formats at exactly the rate agreed are considered.
+    let at_rate: Vec<_> = device
         .supported_input_configs()
         .map_err(|e| e.to_string())?
         .filter(|range| {
-            range.channels() == channels
-                && range.min_sample_rate().0 <= sample_rate
-                && sample_rate <= range.max_sample_rate().0
+            range.min_sample_rate().0 <= sample_rate && sample_rate <= range.max_sample_rate().0
         })
-        .map(|range| range.sample_format())
         .collect();
+    // What a device advertises and what it will do are not always the same -- ALSA's
+    // converting plug layer is exactly the case where they differ -- so an empty list is a
+    // reason to try rather than to refuse.
+    if at_rate.is_empty() {
+        debug!(sample_rate, "🎤 the microphone advertises no such rate; trying anyway");
+        return build_stream(
+            &device,
+            &cpal::StreamConfig {
+                channels,
+                sample_rate: cpal::SampleRate(sample_rate),
+                buffer_size: cpal::BufferSize::Default,
+            },
+            cpal::SampleFormat::I16,
+            (channels, channels),
+            recorded,
+        );
+    }
+
+    let device_channels = if at_rate.iter().any(|range| range.channels() == channels) {
+        channels
+    } else {
+        let closest = at_rate
+            .iter()
+            .map(|range| range.channels())
+            .min_by_key(|have| have.abs_diff(channels))
+            .unwrap_or(channels);
+        info!(
+            wanted = channels,
+            recording = closest,
+            "🎤 the microphone has a different number of channels, mixing to suit"
+        );
+        closest
+    };
+
     let sample_format = preference
         .into_iter()
-        .find(|wanted| available.contains(wanted))
-        .ok_or_else(|| {
-            format!("the microphone cannot record {channels}ch at {sample_rate}Hz: {available:?}")
-        })?;
+        .find(|wanted| {
+            at_rate
+                .iter()
+                .any(|range| range.channels() == device_channels && range.sample_format() == *wanted)
+        })
+        .ok_or_else(|| "the microphone offers no sample format this can read".to_owned())?;
 
+    let config = cpal::StreamConfig {
+        channels: device_channels,
+        sample_rate: cpal::SampleRate(sample_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let mix = (device_channels, channels);
+
+    build_stream(&device, &config, sample_format, mix, recorded)
+}
+
+fn build_stream(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    sample_format: cpal::SampleFormat,
+    mix: (u16, u16),
+    recorded: &Arc<Mutex<Vec<u8>>>,
+) -> Result<cpal::Stream, String> {
     let on_error = |error| warn!(%error, "🎤 microphone stream error");
 
     // Whatever the device gives, the session is promised signed 16-bit samples.
@@ -462,8 +574,8 @@ fn open_microphone(
         cpal::SampleFormat::I16 => {
             let recorded = Arc::clone(recorded);
             device.build_input_stream(
-                &config,
-                move |samples: &[i16], _| append(&recorded, samples.iter().copied()),
+                config,
+                move |samples: &[i16], _| append(&recorded, samples.iter().copied(), mix),
                 on_error,
                 None,
             )
@@ -471,9 +583,9 @@ fn open_microphone(
         cpal::SampleFormat::I32 => {
             let recorded = Arc::clone(recorded);
             device.build_input_stream(
-                &config,
+                config,
                 move |samples: &[i32], _| {
-                    append(&recorded, samples.iter().map(|s| (*s >> 16) as i16))
+                    append(&recorded, samples.iter().map(|s| (*s >> 16) as i16), mix)
                 },
                 on_error,
                 None,
@@ -482,11 +594,12 @@ fn open_microphone(
         cpal::SampleFormat::U16 => {
             let recorded = Arc::clone(recorded);
             device.build_input_stream(
-                &config,
+                config,
                 move |samples: &[u16], _| {
                     append(
                         &recorded,
                         samples.iter().map(|s| (*s as i32 - 32768) as i16),
+                        mix,
                     )
                 },
                 on_error,
@@ -496,11 +609,12 @@ fn open_microphone(
         cpal::SampleFormat::U8 => {
             let recorded = Arc::clone(recorded);
             device.build_input_stream(
-                &config,
+                config,
                 move |samples: &[u8], _| {
                     append(
                         &recorded,
                         samples.iter().map(|s| ((*s as i16 - 128) << 8)),
+                        mix,
                     )
                 },
                 on_error,
@@ -510,13 +624,14 @@ fn open_microphone(
         cpal::SampleFormat::F32 => {
             let recorded = Arc::clone(recorded);
             device.build_input_stream(
-                &config,
+                config,
                 move |samples: &[f32], _| {
                     append(
                         &recorded,
                         samples
                             .iter()
                             .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16),
+                        mix,
                     )
                 },
                 on_error,
@@ -531,16 +646,50 @@ fn open_microphone(
     Ok(stream)
 }
 
+/// Whether a device can record at exactly this rate.
+fn records_at(device: &cpal::Device, sample_rate: u32) -> bool {
+    device.supported_input_configs().is_ok_and(|mut configs| {
+        configs.any(|range| {
+            range.min_sample_rate().0 <= sample_rate && sample_rate <= range.max_sample_rate().0
+        })
+    })
+}
+
 /// How much recorded audio may wait before the oldest is dropped: about two seconds at the
 /// highest format offered. A session that stops reading is not a reason to grow without bound.
 const RECORDED_LIMIT: usize = 44_100 * 2 * BYTES_PER_SAMPLE * 2;
 
-fn append(recorded: &Arc<Mutex<Vec<u8>>>, samples: impl Iterator<Item = i16>) {
+/// Appends what was heard, in the channel count that was promised.
+///
+/// `mix` is what the device gives and what the session expects. When they differ the frame is
+/// averaged to one value and written out as many times as the session wants -- a headset's one
+/// channel arriving as two identical ones, or a stereo pair arriving as their average.
+fn append(recorded: &Arc<Mutex<Vec<u8>>>, samples: impl Iterator<Item = i16>, mix: (u16, u16)) {
     let Ok(mut recorded) = recorded.lock() else {
         return;
     };
-    for sample in samples {
-        recorded.extend_from_slice(&sample.to_le_bytes());
+
+    let (from, to) = mix;
+    if from == to {
+        for sample in samples {
+            recorded.extend_from_slice(&sample.to_le_bytes());
+        }
+    } else {
+        let from = usize::from(from.max(1));
+        let mut frame = 0i32;
+        let mut seen = 0usize;
+        for sample in samples {
+            frame += i32::from(sample);
+            seen += 1;
+            if seen == from {
+                let averaged = (frame / from as i32) as i16;
+                for _ in 0..to {
+                    recorded.extend_from_slice(&averaged.to_le_bytes());
+                }
+                frame = 0;
+                seen = 0;
+            }
+        }
     }
     if recorded.len() > RECORDED_LIMIT {
         let excess = recorded.len() - RECORDED_LIMIT;

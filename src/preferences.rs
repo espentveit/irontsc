@@ -37,6 +37,17 @@ pub struct Preferences {
     /// this machine's.
     #[serde(default)]
     pub keyboard_layout: String,
+    /// Which microphone the session hears, when a connection is allowed to record.
+    ///
+    /// Empty means this machine's default input, which is right until there is more than one
+    /// and the default is the wrong one. Otherwise any part of a device's name will do, matched
+    /// without regard to case: `HyperX`, `ALC257`. The names available are listed in the log
+    /// when the one asked for cannot be found.
+    ///
+    /// Which microphone this machine uses is a property of the machine, not of the server being
+    /// connected to, which is why it lives here rather than in a `.rdp` file.
+    #[serde(default)]
+    pub microphone: String,
     /// The DPI to tell the server about, as a percentage, instead of this display's own.
     ///
     /// A HiDPI laptop reports 167%, and the remote desktop then renders everything at 167% --
