@@ -21,8 +21,8 @@ use ironrdp_svc::{
 };
 use pdu::{
     Capabilities, ClientTemporaryDirectory, ClipboardFormat, ClipboardFormatId,
-    ClipboardGeneralCapabilityFlags, ClipboardPdu, ClipboardProtocolVersion, FileContentsResponse,
-    FormatDataRequest, FormatListResponse, OwnedFormatDataResponse,
+    ClipboardGeneralCapabilityFlags, ClipboardPdu, ClipboardProtocolVersion, FileContentsRequest,
+    FileContentsResponse, FormatDataRequest, FormatListResponse, OwnedFormatDataResponse,
 };
 use tracing::{error, info};
 
@@ -287,6 +287,22 @@ impl<R: Role> Cliprdr<R> {
             .map(into_cliprdr_message)
             .collect::<Vec<_>>()
             .into())
+    }
+
+    /// Asks the other end for the contents of one file it has offered.
+    ///
+    /// A file list arrives as descriptions only -- names, sizes, times -- and the bytes are
+    /// fetched afterwards, a range at a time, with the answers coming back through
+    /// [`CliprdrBackend::on_file_contents_response`].
+    pub fn request_file_contents(
+        &self,
+        request: FileContentsRequest,
+    ) -> PduResult<CliprdrSvcMessages<R>> {
+        ready_guard!(self, request_file_contents);
+
+        let pdu = ClipboardPdu::FileContentsRequest(request);
+
+        Ok(vec![into_cliprdr_message(pdu)].into())
     }
 
     /// Starts processing of `CLIPRDR` paste command. Should be called by the clipboard

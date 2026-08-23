@@ -125,6 +125,8 @@ pub enum RdpInputEvent {
         channel_id: u32,
         messages: Vec<SvcMessage>,
     },
+    /// Ask the session for a piece of a file it has copied.
+    ClipboardFileRequest(ironrdp::cliprdr::pdu::FileContentsRequest),
     /// Offer a folder to the session while it is running, or take one back.
     ///
     /// The device list may be announced at any point after the initial handshake, which is what
@@ -1083,6 +1085,8 @@ struct ArboardClipboardBackend {
     /// which this one does for every copy -- gets asked twice and answers twice, and the second
     /// answer read as text would write nonsense over the picture the first one just delivered.
     pending_paste: Arc<Mutex<Option<ClipboardFormatId>>>,
+    /// The files being fetched from the session, while they are being fetched.
+    incoming_files: Arc<Mutex<Option<crate::clipboard_files::Incoming>>>,
     /// One clipboard for the life of the session, and the reason the remote's copies used to
     /// vanish. Both X11 and Wayland hand the *owner* the job of serving what was copied, so a
     /// `Clipboard` created for one `set_text` and dropped at the end of the call gives the
@@ -1466,6 +1470,7 @@ impl ArboardClipboardBackend {
             watcher: None,
             temp_dir: std::env::temp_dir().display().to_string(),
             pending_paste: Arc::new(Mutex::new(None)),
+            incoming_files: Arc::new(Mutex::new(None)),
             // Opened on first use and then held: see the field's own note.
             clipboard: Mutex::new(None),
         }
@@ -1571,6 +1576,59 @@ impl ArboardClipboardBackend {
         self.with_clipboard(|clipboard| ClipboardState::from_clipboard(clipboard).text)?
     }
 
+    /// Turns a file list the session sent into a fetch, and starts it.
+    fn begin_file_fetch(&self, response: &FormatDataResponse<'_>) {
+        if response.is_error() {
+            warn!("📋 the session refused to hand over its file list");
+            return;
+        }
+
+        let files = match response.to_file_list() {
+            Ok(list) => list.files,
+            Err(error) => {
+                warn!(%error, "📋 the session sent a file list this cannot read");
+                return;
+            }
+        };
+
+        // A batch already running is dropped: what the session has on its clipboard now is what
+        // a paste here should produce.
+        if let Some(previous) = self.incoming_files.lock().unwrap().as_mut() {
+            previous.abandon();
+        }
+
+        match crate::clipboard_files::Incoming::start(files) {
+            Some((batch, request)) => {
+                *self.incoming_files.lock().unwrap() = Some(batch);
+                let _ = self
+                    .sender
+                    .send(RdpInputEvent::ClipboardFileRequest(request));
+            }
+            None => *self.incoming_files.lock().unwrap() = None,
+        }
+    }
+
+    /// Puts the fetched files on this machine's clipboard, where a file manager can paste them.
+    fn set_clipboard_files(&self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+
+        let count = paths.len();
+        let set = self.with_clipboard(|clipboard| clipboard.set().file_list(&paths));
+        match set {
+            Some(Err(err)) => warn!("Failed to set clipboard files: {err}"),
+            Some(Ok(())) => info!(count, "📋 files from the remote desktop"),
+            None => return,
+        }
+
+        // The watcher is about to see these and would otherwise offer them straight back.
+        let mut state = self.clipboard_state.lock().unwrap();
+        state.text = None;
+        state.image = None;
+        state.files = None;
+    }
+
     /// The picture on this machine's clipboard, if there is one.
     fn read_clipboard_image(&self) -> Option<crate::clipboard_image::Picture> {
         let image = self.with_clipboard(|clipboard| clipboard.get_image().ok())??;
@@ -1667,18 +1725,39 @@ impl CliprdrBackend for ArboardClipboardBackend {
             "📋 cliprdr: the remote desktop copied something, {} formats offered",
             available_formats.len()
         );
-        // Text first when there is any: a program that copies both is offering the picture as a
-        // convenience, and the words are what was meant.
-        let wanted = [
-            ClipboardFormatId::CF_UNICODETEXT,
-            ClipboardFormatId::CF_DIB,
-            ClipboardFormatId::CF_DIBV5,
-        ]
-        .into_iter()
-        .find(|wanted| available_formats.iter().any(|format| format.id == *wanted));
+        for format in available_formats {
+            debug!(
+                id = format.id().value(),
+                name = format.name().map(|name| name.value()),
+                "📋 on offer"
+            );
+        }
+        // A list of files is what was meant whenever it is offered: a program that copies files
+        // also puts their names on as text, and the names are not the point. Otherwise text
+        // before pictures, since a program that copies both is offering the picture as a
+        // convenience.
+        let file_list = available_formats
+            .iter()
+            .find(|format| {
+                format
+                    .name()
+                    .is_some_and(|name| name.value() == ClipboardFormatName::FILE_LIST.value())
+            })
+            .map(|format| format.id);
+
+        let wanted = file_list.or_else(|| {
+            [
+                ClipboardFormatId::CF_UNICODETEXT,
+                ClipboardFormatId::CF_DIB,
+                ClipboardFormatId::CF_DIBV5,
+            ]
+            .into_iter()
+            .find(|wanted| available_formats.iter().any(|format| format.id == *wanted))
+        });
 
         if let Some(format) = wanted {
             *self.pending_paste.lock().unwrap() = Some(format);
+
             let _ = self.sender.send(RdpInputEvent::Clipboard(
                 ClipboardMessage::SendInitiatePaste(format),
             ));
@@ -1737,6 +1816,22 @@ impl CliprdrBackend for ArboardClipboardBackend {
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         let asked = *self.pending_paste.lock().unwrap();
 
+        // A file list comes back under whatever id the session registered it as, so it is
+        // recognised by not being one of the fixed ones this asks for.
+        let is_file_list = asked.is_some_and(|format| {
+            !matches!(
+                format,
+                ClipboardFormatId::CF_UNICODETEXT
+                    | ClipboardFormatId::CF_DIB
+                    | ClipboardFormatId::CF_DIBV5
+            )
+        });
+
+        if is_file_list {
+            self.begin_file_fetch(&response);
+            return;
+        }
+
         match asked {
             Some(ClipboardFormatId::CF_DIB | ClipboardFormatId::CF_DIBV5) => {
                 match crate::clipboard_image::from_dib(response.data()) {
@@ -1766,8 +1861,32 @@ impl CliprdrBackend for ArboardClipboardBackend {
             .send(RdpInputEvent::ClipboardFileContents(response));
     }
 
-    fn on_file_contents_response(&mut self, _response: FileContentsResponse<'_>) {
-        warn!("Receiving file clipboard data is not supported");
+    fn on_file_contents_response(&mut self, response: FileContentsResponse<'_>) {
+        debug!(
+            stream_id = response.stream_id(),
+            bytes = response.data().len(),
+            "📋 a piece of a file from the session"
+        );
+        let next = {
+            let mut incoming = self.incoming_files.lock().unwrap();
+            match incoming.as_mut() {
+                Some(batch) => batch.receive(response.stream_id(), response.data()),
+                None => return,
+            }
+        };
+
+        match next {
+            crate::clipboard_files::Next::Ask(request) => {
+                let _ = self
+                    .sender
+                    .send(RdpInputEvent::ClipboardFileRequest(request));
+            }
+            crate::clipboard_files::Next::Done(paths) => {
+                *self.incoming_files.lock().unwrap() = None;
+                self.set_clipboard_files(paths);
+            }
+            crate::clipboard_files::Next::Waiting => {}
+        }
     }
 
     fn on_lock(&mut self, _data_id: LockDataId) {}
@@ -3100,6 +3219,15 @@ async fn active_session<T: RdpEventSender + Clone>(
                         let framed = frame_clipboard(&mut active_stage, |clipboard| {
                             Ok(clipboard
                                 .submit_file_contents(response)
+                                .map_err(|e| session::custom_err!("CLIPRDR", e))?
+                                .into())
+                        })?;
+                        send_clipboard(&mut active_stage, framed, &udp_tunnels)?
+                    }
+                    RdpInputEvent::ClipboardFileRequest(request) => {
+                        let framed = frame_clipboard(&mut active_stage, |clipboard| {
+                            Ok(clipboard
+                                .request_file_contents(request)
                                 .map_err(|e| session::custom_err!("CLIPRDR", e))?
                                 .into())
                         })?;
