@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use log::{debug, warn};
+use tracing::{debug, warn};
 
 use crate::error::{Result, UdpError};
 use crate::rdpudp_v1_packet;
