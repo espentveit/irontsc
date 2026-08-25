@@ -12,4 +12,4 @@ authors.workspace = true
 [dependencies]
 bitflags = "2.6"
 thiserror = "1.0"
-log = "0.4"
+tracing = "0.1"

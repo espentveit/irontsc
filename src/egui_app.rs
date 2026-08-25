@@ -91,6 +91,20 @@ const RESIZE_ATTEMPTS: u8 = 3;
 /// Servers align the width they hand back, so an exact match is the wrong test.
 const RESIZE_TOLERANCE: u16 = 8;
 
+/// Chooses the DPI reported to the server. A saved connection is most specific; the MCP
+/// preference only applies while an agent is attached; otherwise the window's display wins.
+fn effective_dpi_scale(
+    pixels_per_point: f64,
+    connection_override: Option<u32>,
+    agent_mode: bool,
+    agent_override: u32,
+) -> u32 {
+    connection_override
+        .or_else(|| agent_mode.then_some(agent_override).filter(|scale| *scale != 0))
+        .unwrap_or_else(|| (pixels_per_point * 100.0).round() as u32)
+        .clamp(100, 500)
+}
+
 /// RDP counts a wheel notch as 120 units.
 const WHEEL_UNITS_PER_NOTCH: f32 = 120.0;
 
@@ -229,15 +243,17 @@ enum OptionsTab {
     Display,
     Codecs,
     Network,
+    Agent,
     Debug,
 }
 
 impl OptionsTab {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
         Self::Display,
         Self::Codecs,
         Self::Network,
+        Self::Agent,
         Self::Debug,
     ];
 
@@ -247,6 +263,7 @@ impl OptionsTab {
             Self::Display => "Display",
             Self::Codecs => "Codecs",
             Self::Network => "Network",
+            Self::Agent => "MCP",
             Self::Debug => "Debug",
         }
     }
@@ -1185,8 +1202,15 @@ impl SessionApp {
     /// reported to the server as a percentage so that the remote session uses matching DPI.
     fn maybe_send_resize(&mut self) {
         let ppp = f64::from(self.pixels_per_point());
-        // Read before the session is borrowed; zero means follow the display.
-        let dpi_override = self.preferences.dpi_scale;
+        // Read before the session is borrowed. The agent override must not leak into an
+        // ordinary watched session, while a connection's explicit choice applies to both.
+        let connection_dpi = self.settings.get_dpi_scaling();
+        let agent_dpi = self.preferences.dpi_scale;
+        let agent_mode = self.pending_mcp
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.mcp.is_some());
         let window_size = self
             .gl_window
             .as_ref()
@@ -1231,10 +1255,7 @@ impl SessionApp {
         let max = f64::from(u16::MAX);
         let width = (f64::from(rect.width()) * ppp).round().clamp(200.0, max) as u16;
         let height = (f64::from(rect.height()) * ppp).round().clamp(200.0, max) as u16;
-        let scale_factor = match dpi_override {
-            0 => ((ppp * 100.0).round() as u32).clamp(100, 500),
-            forced => forced.clamp(100, 500),
-        };
+        let scale_factor = effective_dpi_scale(ppp, connection_dpi, agent_mode, agent_dpi);
 
         if session.last_resize_sent == Some((width, height, scale_factor)) {
             // Already asked. Ask again only if the desktop never became that size, and only a
@@ -1625,13 +1646,23 @@ impl SessionApp {
     fn connect(&mut self) {
         self.connect_error = None;
 
-        let config = match build_config(&self.form, &self.settings) {
+        let mut config = match build_config(&self.form, &self.settings) {
             Ok(config) => config,
             Err(error) => {
                 self.connect_error = Some(format!("{error:#}"));
                 return;
             }
         };
+
+        // The window already exists here, so the initial GCC data can carry the real display
+        // DPI instead of waiting for the first DisplayControl resize to correct a hard-coded
+        // 100% session.
+        config.connector.desktop_scale_factor = effective_dpi_scale(
+            f64::from(self.pixels_per_point()),
+            self.settings.get_dpi_scaling(),
+            self.pending_mcp,
+            self.preferences.dpi_scale,
+        );
 
         if self.form.save {
             self.store_form_in_settings();
@@ -1725,6 +1756,7 @@ impl SessionApp {
 
         if session.mcp.take().is_some() {
             // Dropped above, which releases the agent's keys and stops the listener.
+            session.resize_deadline = Some(Instant::now() + RESIZE_DEBOUNCE);
             self.mcp_error = None;
             tracing::info!("MCP mode off");
             return;
@@ -1743,6 +1775,7 @@ impl SessionApp {
             Ok(bridge) => {
                 tracing::info!(url = %bridge.server.url(), "MCP mode on");
                 session.mcp = Some(bridge);
+                session.resize_deadline = Some(Instant::now() + RESIZE_DEBOUNCE);
                 self.mcp_error = None;
             }
             Err(error) => {
@@ -1834,7 +1867,10 @@ impl SessionApp {
             capture.release();
         }
 
-        if let Some(session) = self.session.as_mut() {
+        // Drop the MCP runtime, ONNX sessions and desktop texture while their supporting
+        // runtimes and graphics context are still alive, rather than as a side effect of the
+        // application's field-by-field destruction after the event loop has gone away.
+        if let Some(mut session) = self.session.take() {
             session.shutdown();
         }
     }
@@ -2361,8 +2397,18 @@ fn show_island(
 /// MCP mode lives here rather than on the island's face: it is switched on once and then left
 /// alone, and it is not something to put a click away from Disconnect.
 fn show_gear_menu(ui: &mut egui::Ui, view: &IslandView, actions: &mut FrameActions) {
-    ui.set_min_width(320.0);
+    ui.set_width(320.0);
+    egui::ScrollArea::vertical()
+        .max_height(420.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| show_gear_menu_contents(ui, view, actions));
+}
 
+fn show_gear_menu_contents(
+    ui: &mut egui::Ui,
+    view: &IslandView,
+    actions: &mut FrameActions,
+) {
     let mut console_open = view.console.open;
     if ui
         .checkbox(&mut console_open, "Console")
@@ -2613,7 +2659,7 @@ fn show_connect_dialog(
 
                 match page {
                     OptionsTab::General => {
-                        submit = show_logon_settings(ui, form, settings, preferences);
+                        submit = show_logon_settings(ui, form, settings);
                         if dialog.options_open {
                             show_connection_settings(ui, dialog, actions);
                         }
@@ -2621,6 +2667,7 @@ fn show_connect_dialog(
                     OptionsTab::Display => show_display_settings(ui, settings),
                     OptionsTab::Codecs => show_codec_settings(ui, settings),
                     OptionsTab::Network => show_network_settings(ui, settings),
+                    OptionsTab::Agent => show_agent_settings(ui, preferences),
                     OptionsTab::Debug => show_debug_settings(ui, settings),
                 }
             });
@@ -2659,7 +2706,6 @@ fn show_logon_settings(
     ui: &mut egui::Ui,
     form: &mut ConnectForm,
     settings: &mut RdpSettings,
-    preferences: &mut crate::preferences::Preferences,
 ) -> bool {
     let mut submit = false;
 
@@ -2707,13 +2753,20 @@ fn show_logon_settings(
             .on_hover_text("Stores the password in the .rdp file in plaintext");
     });
 
-    settings_group(ui, "Agent settings", |ui| {
+    submit
+}
+
+fn show_agent_settings(
+    ui: &mut egui::Ui,
+    preferences: &mut crate::preferences::Preferences,
+) {
+    settings_group(ui, "MCP settings", |ui| {
         ui.label("Models that let an agent read the screen here, rather than sending pictures of it.");
         ui.add_space(6.0);
 
         let installed = preferences
             .models_directory()
-            .is_some_and(|directory| crate::agent::Models::load(&directory).is_some());
+            .is_some_and(|directory| crate::agent::Models::available(&directory));
         ui.horizontal(|ui| {
             ui.label("Models:");
             ui.label(if installed {
@@ -2769,8 +2822,6 @@ fn show_logon_settings(
             tracing::warn!(%error, "could not write the preferences");
         }
     });
-
-    submit
 }
 
 /// mstsc's Connection settings group: save this connection to a file, or open a saved one.
@@ -3360,4 +3411,49 @@ pub fn run(
         .map_err(|error| anyhow::anyhow!("event loop failed: {error}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watched_sessions_follow_the_display_dpi() {
+        assert_eq!(effective_dpi_scale(1.67, None, false, 100), 167);
+    }
+
+    #[test]
+    fn agent_dpi_only_applies_in_agent_mode() {
+        assert_eq!(effective_dpi_scale(1.67, None, true, 100), 100);
+        assert_eq!(effective_dpi_scale(1.67, None, false, 100), 167);
+    }
+
+    #[test]
+    fn connection_dpi_wins_over_display_and_agent_preferences() {
+        assert_eq!(effective_dpi_scale(2.0, Some(150), true, 100), 150);
+    }
+
+    #[test]
+    fn connector_advertises_the_configured_dpi() {
+        let form = ConnectForm {
+            server: "server".to_owned(),
+            username: "user".to_owned(),
+            password: String::new(),
+            domain: String::new(),
+            save: false,
+        };
+        let mut settings = RdpSettings::default();
+        settings.set_dpi_scaling(Some(175));
+        let config = build_config(&form, &settings).expect("a config");
+        let client_data = ironrdp::connector::create_client_data(
+            &config.connector,
+            0,
+            Vec::new(),
+            ironrdp::pdu::nego::SecurityProtocol::HYBRID,
+        );
+        assert_eq!(
+            client_data.core.optional_data.desktop_scale_factor,
+            Some(175)
+        );
+    }
 }

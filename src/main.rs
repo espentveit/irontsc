@@ -257,7 +257,7 @@ fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort=warn")),
         )
         .with_target(true)
         .with_line_number(true);
@@ -298,6 +298,15 @@ fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
 
     let mut config = egui_app::build_config(&form, &settings)?;
 
+    // There is no display to sample in headless mode. A connection-specific value wins;
+    // otherwise use the agent preference, with 100% as the neutral fallback.
+    let preferences = irontsc::preferences::Preferences::load();
+    config.connector.desktop_scale_factor = settings
+        .get_dpi_scaling()
+        .or_else(|| (preferences.dpi_scale != 0).then_some(preferences.dpi_scale))
+        .unwrap_or(100)
+        .clamp(100, 500);
+
     // An agent works in screenshots and clicks; a few milliseconds either way buy it nothing,
     // and the multitransport is one more moving part between it and the desktop.
     config.disable_udp = !command.udp;
@@ -321,7 +330,7 @@ fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
 
     // Only offered when the models are installed; see `agent::sight`. Global, so `irontsc mcp`
     // and the window agree without either `.rdp` mentioning it.
-    let sight = irontsc::preferences::Preferences::load().sight();
+    let sight = preferences.sight();
 
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| anyhow::anyhow!("failed to start the Tokio runtime: {error}"))?;

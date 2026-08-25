@@ -525,7 +525,7 @@ pub fn create_client_data(
                 desktop_physical_width: Some(1000),
                 desktop_physical_height: Some(1000),
                 desktop_orientation: Some(MonitorOrientation::Landscape as u16),
-                desktop_scale_factor: Some(100),
+                desktop_scale_factor: Some(config.desktop_scale_factor.clamp(100, 500)),
                 device_scale_factor: Some(100),
             }
         },

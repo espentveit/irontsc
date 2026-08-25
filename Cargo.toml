@@ -201,7 +201,7 @@ tap = "1.0"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 tokio-util = "0.7"
-tracing = "0.1.41"
+tracing = { version = "0.1.41", features = ["release_max_level_info"] }
 url = "2.5"
 whoami = "1.5"
 x509-cert = "0.2"

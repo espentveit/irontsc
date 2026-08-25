@@ -105,13 +105,19 @@ impl Models {
         dirs::data_dir().map(|dir| dir.join("irontsc/models"))
     }
 
+    /// Whether all model files are present, without starting ONNX Runtime or loading them.
+    pub fn available(directory: &Path) -> bool {
+        [TEXT_DETECTOR, TEXT_RECOGNISER, CHARSET, WIDGET_DETECTOR]
+            .iter()
+            .all(|name| directory.join(name).is_file())
+    }
+
     /// Loads what is there, or `None` when the directory has no models in it.
     ///
     /// Missing models are not an error: they are the ordinary case for someone who only wants a
     /// remote desktop, and the tools that need them simply are not offered.
     pub fn load(directory: &Path) -> Option<Self> {
-        let files = [TEXT_DETECTOR, TEXT_RECOGNISER, CHARSET, WIDGET_DETECTOR];
-        if !files.iter().all(|name| directory.join(name).is_file()) {
+        if !Self::available(directory) {
             return None;
         }
 
@@ -494,8 +500,21 @@ mod tests {
     fn a_directory_without_models_loads_nothing() {
         let empty = std::env::temp_dir().join(format!("irontsc-sight-{}", std::process::id()));
         std::fs::create_dir_all(&empty).expect("a directory");
+        assert!(!Models::available(&empty));
         assert!(Models::load(&empty).is_none());
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn availability_only_checks_the_four_files() {
+        let directory =
+            std::env::temp_dir().join(format!("irontsc-sight-files-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a directory");
+        for name in [TEXT_DETECTOR, TEXT_RECOGNISER, CHARSET, WIDGET_DETECTOR] {
+            std::fs::File::create(directory.join(name)).expect("a model placeholder");
+        }
+        assert!(Models::available(&directory));
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
