@@ -241,6 +241,7 @@ impl ConnectForm {
 enum OptionsTab {
     General,
     Display,
+    Resources,
     Codecs,
     Network,
     Agent,
@@ -248,9 +249,10 @@ enum OptionsTab {
 }
 
 impl OptionsTab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Display,
+        Self::Resources,
         Self::Codecs,
         Self::Network,
         Self::Agent,
@@ -261,6 +263,7 @@ impl OptionsTab {
         match self {
             Self::General => "General",
             Self::Display => "Display",
+            Self::Resources => "Resources",
             Self::Codecs => "Codecs",
             Self::Network => "Network",
             Self::Agent => "MCP",
@@ -2665,6 +2668,7 @@ fn show_connect_dialog(
                         }
                     }
                     OptionsTab::Display => show_display_settings(ui, settings),
+                    OptionsTab::Resources => show_resource_settings(ui, settings),
                     OptionsTab::Codecs => show_codec_settings(ui, settings),
                     OptionsTab::Network => show_network_settings(ui, settings),
                     OptionsTab::Agent => show_agent_settings(ui, preferences),
@@ -2921,6 +2925,32 @@ fn show_display_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
                 }
             });
         settings.set_dpi_scaling(dpi_value_from_index(selected));
+    });
+}
+
+fn show_resource_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
+    settings_group(ui, "Remote audio", |ui| {
+        switch_row(
+            ui,
+            &mut settings.audio_playback,
+            "Enable audio output",
+            "Play sound from the remote session on this computer",
+        );
+        switch_row(
+            ui,
+            &mut settings.audio_capture,
+            "Enable microphone",
+            "Let the remote session record from this computer's microphone",
+        );
+    });
+
+    settings_group(ui, "Video capture", |ui| {
+        switch_row(
+            ui,
+            &mut settings.camera,
+            "Enable webcam",
+            "Make this computer's camera available to the remote session",
+        );
     });
 }
 
@@ -3358,7 +3388,7 @@ pub fn build_config(form: &ConnectForm, settings: &RdpSettings) -> anyhow::Resul
             }
         },
         request_data: None,
-        enable_audio_playback: true,
+        enable_audio_playback: settings.audio_playback,
         performance_flags: PerformanceFlags::DISABLE_WALLPAPER
             | PerformanceFlags::DISABLE_FULLWINDOWDRAG
             | PerformanceFlags::DISABLE_MENUANIMATIONS
@@ -3455,5 +3485,46 @@ mod tests {
             client_data.core.optional_data.desktop_scale_factor,
             Some(175)
         );
+    }
+
+    #[test]
+    fn connector_uses_the_connection_device_choices() {
+        let form = ConnectForm {
+            server: "server".to_owned(),
+            username: "user".to_owned(),
+            ..ConnectForm::default()
+        };
+        let settings = RdpSettings {
+            audio_playback: false,
+            audio_capture: true,
+            camera: true,
+            ..RdpSettings::default()
+        };
+
+        let config = build_config(&form, &settings).expect("a config");
+        assert!(!config.connector.enable_audio_playback);
+        assert!(config.connector.audio_capture);
+        assert!(config.camera);
+    }
+
+    #[test]
+    #[ignore = "requires the locally installed screen models"]
+    fn mcp_bridge_with_screen_models_shuts_down_cleanly() {
+        let frame = Arc::new(crate::agent::SharedFrame::new());
+        let (sender, _receiver) = RdpInputEvent::create_channel();
+        let sight = crate::preferences::Preferences::default().sight();
+        assert!(sight.is_some(), "installed models");
+
+        let bridge = McpBridge::start(
+            frame,
+            sender,
+            0,
+            crate::agent::KeyboardLayout::resolve(""),
+            "test-server".to_owned(),
+            "test-user".to_owned(),
+            sight,
+        )
+        .expect("an MCP bridge");
+        drop(bridge);
     }
 }

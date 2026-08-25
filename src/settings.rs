@@ -212,6 +212,13 @@ pub struct RdpSettings {
     /// verifying credentials itself has to be spoken to under plain TLS.
     #[serde(default)]
     pub disable_nla: bool,
+    /// Play sound from the session on this machine.
+    ///
+    /// `audiomode` in an `.rdp` file is zero for local playback and two for silence. Keep the
+    /// ordinary desktop-client behaviour as the default when an older saved connection does
+    /// not contain the field.
+    #[serde(default = "default_audio_playback")]
+    pub audio_playback: bool,
     /// Let the session record from this machine's microphone.
     ///
     /// `audiocapturemode` in the file, which is what mstsc calls it, so a connection saved here
@@ -244,6 +251,9 @@ fn default_height() -> u16 {
 fn default_session_bpp() -> u16 {
     32
 }
+fn default_audio_playback() -> bool {
+    true
+}
 
 impl Default for RdpSettings {
     fn default() -> Self {
@@ -264,6 +274,7 @@ impl Default for RdpSettings {
             disable_avc420: false,
             disable_avc444: false,
             disable_udp: false,
+            audio_playback: true,
             audio_capture: false,
             camera: false,
             shares: String::new(),
@@ -383,6 +394,14 @@ impl RdpSettings {
                         settings.audio_capture = val != 0;
                     }
                 }
+                // mstsc uses zero for "play on this computer", one for "leave at remote
+                // computer", and two for "do not play". IronTSC has no remote-playback mode,
+                // so only zero enables its local audio channel.
+                "audiomode" => {
+                    if let Ok(val) = value.parse::<u8>() {
+                        settings.audio_playback = val == 0;
+                    }
+                }
                 "irontsc:show_codec_grid" => {
                     if let Ok(val) = value.parse::<u8>() {
                         settings.show_codec_grid = val != 0;
@@ -438,7 +457,10 @@ impl RdpSettings {
             "disable cursor setting:i:0".to_string(),
             "bitmapcachepersistenable:i:1".to_string(),
             format!("full address:s:{}", self.server),
-            "audiomode:i:0".to_string(),
+            format!(
+                "audiomode:i:{}",
+                if self.audio_playback { 0 } else { 2 }
+            ),
             "redirectprinters:i:1".to_string(),
             "redirectcomports:i:0".to_string(),
             "redirectsmartcards:i:1".to_string(),
@@ -595,5 +617,50 @@ impl RdpSettings {
 
     pub fn set_show_codec_grid(&mut self, enabled: bool) {
         self.show_codec_grid = enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RdpSettings;
+
+    #[test]
+    fn local_devices_follow_standard_rdp_fields() {
+        let disabled = RdpSettings::parse_rdp(
+            "audiomode:i:2\naudiocapturemode:i:0\ncamerastoredirect:s:\n",
+        )
+        .expect("RDP settings");
+        assert!(!disabled.audio_playback);
+        assert!(!disabled.audio_capture);
+        assert!(!disabled.camera);
+
+        let enabled = RdpSettings::parse_rdp(
+            "audiomode:i:0\naudiocapturemode:i:1\ncamerastoredirect:s:*\n",
+        )
+        .expect("RDP settings");
+        assert!(enabled.audio_playback);
+        assert!(enabled.audio_capture);
+        assert!(enabled.camera);
+    }
+
+    #[test]
+    fn local_device_choices_are_written_to_rdp_files() {
+        let settings = RdpSettings {
+            audio_playback: false,
+            audio_capture: true,
+            camera: true,
+            ..RdpSettings::default()
+        };
+        let saved = settings.to_rdp_format();
+
+        assert!(saved.contains("audiomode:i:2\n"));
+        assert!(saved.contains("audiocapturemode:i:1\n"));
+        assert!(saved.contains("camerastoredirect:s:*\n"));
+    }
+
+    #[test]
+    fn missing_audio_output_setting_keeps_playback_enabled() {
+        let settings: RdpSettings = serde_json::from_str("{}").expect("JSON settings");
+        assert!(settings.audio_playback);
     }
 }

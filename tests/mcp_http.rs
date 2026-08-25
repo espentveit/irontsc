@@ -37,9 +37,13 @@ impl Harness {
     async fn start() -> Self {
         let frame = fake_desktop();
         let (sender, receiver) = RdpInputEvent::create_channel();
-        let session = AgentSession::attach(frame, sender);
+        let session = AgentSession::attach(
+            frame,
+            sender,
+            irontsc::agent::KeyboardLayout::resolve(""),
+        );
 
-        let server = irontsc::agent::serve_http(session, 0)
+        let server = irontsc::agent::serve_http(session, 0, None)
             .await
             .expect("the MCP server binds");
 
