@@ -1,0 +1,166 @@
+name: Build and release
+
+# Tags named vMAJOR.MINOR.PATCH publish the packages as a GitHub Release.
+# Main, pull requests, and manual runs retain them as workflow artifacts.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux x86-64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libclang-dev \
+            libasound2-dev \
+            libgl1-mesa-dev \
+            libssl-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            cmake \
+            pkg-config
+
+      - name: Choose package version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+~-][0-9A-Za-z.+~-]+)?$ ]]; then
+            echo "Tag must look like vMAJOR.MINOR.PATCH (optional prerelease suffix)" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --locked --release --no-default-features --features gfx --bin irontsc
+
+      - name: Build archive
+        shell: bash
+        run: |
+          bundle="IronTSC-${{ steps.version.outputs.value }}-linux-x64"
+          mkdir -p "dist/$bundle"
+          install -m755 target/release/irontsc "dist/$bundle/irontsc"
+          install -m644 README.md "dist/$bundle/README.md"
+          tar -C dist -czf "dist/$bundle.tar.gz" "$bundle"
+
+      - name: Inspect Linux package
+        shell: bash
+        run: tar -tzf dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irontsc-linux-x64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install native build dependencies
+        shell: pwsh
+        # Static OpenSSL keeps the ZIP and MSI self-contained. This is the
+        # triplet openssl-sys selects for the default MSVC runtime.
+        run: vcpkg install openssl:x64-windows-static-md
+
+      - name: Choose package version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $version = "0.0.$env:GITHUB_RUN_NUMBER"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+([+~-][0-9A-Za-z.+~-]+)?$') {
+            throw 'Tag must look like vMAJOR.MINOR.PATCH (optional prerelease suffix)'
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --locked --release --no-default-features --features gfx --bin irontsc
+
+      - name: Build ZIP and MSI
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Version '${{ steps.version.outputs.value }}'
+
+      - name: Inspect Windows packages
+        shell: pwsh
+        run: |
+          Get-Item dist\*.zip, dist\*.msi | Format-Table Name, Length
+          $expanded = Join-Path $env:RUNNER_TEMP 'irontsc-zip'
+          Expand-Archive dist\*.zip -DestinationPath $expanded
+          Get-ChildItem $expanded -Recurse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irontsc-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.msi
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: irontsc-*-x64
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: release-artifacts
+        run: sha256sum * > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          fail_on_unmatched_files: true
