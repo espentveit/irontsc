@@ -20,6 +20,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The repository's local builds target the host CPU. Release artifacts and
+  # cached proc macros must use a portable baseline across hosted runners.
+  RUSTFLAGS: -C target-cpu=x86-64
 
 jobs:
   linux:
