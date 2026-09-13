@@ -252,16 +252,6 @@ egui_term = "0.1.0"
 alacritty_terminal = "0.25"
 ab_glyph = "0.2"
 
-# System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
-# winit has no API for this, so it is done against the display server directly: the Wayland
-# keyboard-shortcuts-inhibit protocol, or XGrabKeyboard on X11. Both are reached through the
-# raw handles winit already hands out, and both are optional at runtime.
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
-wayland-client = "0.31"
-wayland-backend = { version = "0.3", features = ["client_system"] }
-wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
-x11-dl = "2.21"
-
 # RDPEGFX + H.264 support
 clearcodec = { path = "crates/clearcodec" }
 zgfx = { path = "crates/zgfx" }
@@ -293,6 +283,16 @@ ort = "=2.0.0-rc.13"
 image = "0.25"
 nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
 imageproc = "0.27"
+
+# System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
+# winit has no API for this, so it is done against the display server directly: the Wayland
+# keyboard-shortcuts-inhibit protocol, or XGrabKeyboard on X11. Both are reached through the
+# raw handles winit already hands out, and both are optional at runtime.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+x11-dl = "2.21"
 
 
 [dev-dependencies]
