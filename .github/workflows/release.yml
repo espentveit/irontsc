@@ -24,7 +24,9 @@ env:
 jobs:
   linux:
     name: Linux x86-64
-    runs-on: ubuntu-22.04
+    # ONNX Runtime's current prebuilt archive requires the newer glibc and
+    # libstdc++ ABI provided by Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -101,7 +103,10 @@ jobs:
         shell: pwsh
         # Static OpenSSL keeps the ZIP and MSI self-contained. This is the
         # triplet openssl-sys selects for the default MSVC runtime.
-        run: vcpkg install openssl:x64-windows-static-md
+        run: |
+          $vcpkg = (Get-Command vcpkg).Source
+          & $vcpkg install openssl:x64-windows-static-md
+          "VCPKG_ROOT=$(Split-Path -Parent $vcpkg)" >> $env:GITHUB_ENV
 
       - name: Choose package version
         id: version
