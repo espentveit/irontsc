@@ -1,201 +1,109 @@
-# IronTSC - Modern Remote Desktop Client
+# IronTSC
 
-A Remote Desktop Protocol (RDP) client built on **[IronRDP](https://github.com/Devolutions/IronRDP)**, with a shell drawn in **[egui](https://github.com/emilk/egui)** on winit and glutin. Inspired by the classic Windows `mstsc` (Microsoft Terminal Services Client).
+IronTSC is an experimental native Remote Desktop Protocol client built in Rust
+on [IronRDP](https://github.com/Devolutions/IronRDP). Its desktop UI uses egui,
+winit, and glutin and is inspired by the Windows Remote Desktop client
+(`mstsc`).
 
-The GUI drives winit and glutin directly rather than going through `eframe`, because RDP needs the *physical* position of every key: eframe only exposes egui's logical `Key`, which has no CapsLock, cannot tell the numpad from the number row, and folds AltGr into Alt. Keys are read from winit's `physical_key` and translated to Windows Set 1 scancodes.
+IronTSC supports saved `.rdp` connections, clipboard and audio redirection,
+dynamic desktop resizing, RDP graphics codecs, TCP and UDP transports, a docked
+terminal, and an MCP interface for agent-driven sessions.
 
-## Building from Source
+## Download
 
-See **[BUILD.md](BUILD.md)** for the full dependency list per distribution. In short you need a Rust toolchain, a C toolchain with `cmake` and `clang`, the usual X11/Wayland/GL and ALSA development packages, OpenSSL, and **FFmpeg 8.0+** for the H.264 decoder.
+GitHub Actions creates downloadable builds for pushes to `main`, pull requests,
+manual runs, and version tags:
 
-```bash
-git clone https://github.com/espentveit/irontsc.git
-cd irontsc
-cargo build --release
-./target/release/irontsc
+| Platform | Packages |
+| --- | --- |
+| Linux x86-64 | `.tar.gz` archive |
+| Windows x64 | Portable ZIP and MSI installer |
+
+Tagged commits such as `v0.1.0` are published as GitHub Releases with a
+`SHA256SUMS` file. Builds from branches and pull requests are available in the
+workflow run's **Artifacts** section.
+
+The CI packages use the portable `gfx` feature set and omit H.264 and video
+redirection, which require FFmpeg 8 development libraries. Build from source
+with the default features to enable them.
+
+## Build from source
+
+Install a stable Rust toolchain with [rustup](https://rustup.rs/), then install
+the platform's native development dependencies. See [BUILD.md](BUILD.md) for
+the Debian/Ubuntu, Fedora, and Arch package lists.
+
+Build the full client:
+
+```sh
+cargo build --locked --release
 ```
 
-Release builds are 3-10x faster than debug builds; use them for anything but debugging.
+If FFmpeg 8 is unavailable, use the same feature set as the downloadable CI
+builds:
 
-If FFmpeg 8 is not available on your distribution, build without H.264 and video redirection:
-
-```bash
-cargo build --release --no-default-features --features gfx
+```sh
+cargo build --locked --release --no-default-features --features gfx
 ```
+
+The executable is `target/release/irontsc` on Linux and
+`target\release\irontsc.exe` on Windows.
 
 ## Usage
 
-### Quick Start
+Open the connection dialog:
 
-Launch the application and fill in the connection dialog:
-
-- **Server**: Hostname or IP address, optionally with `:port` (e.g. `server.example.com:3389`)
-- **Username**: Your remote desktop username
-- **Domain**: (Optional) Windows domain name
-- **Password**: Your remote desktop password
-
-Click **Connect**. The window opens at dialog size and grows to the session once connected.
-
-### Options
-
-**Show Options** grows the dialog into tabs, as `mstsc` does:
-
-- **General** - the logon fields, and a **Connection settings** group: **Save**, **Save As...** and **Open...** for `.rdp` files.
-- **Display** - remote desktop size (a Small-to-Large slider over 640x480, 800x600, 1024x768, 1920x1080 and full screen), colour depth, and DPI scaling.
-- **Codecs** - H.264 hardware acceleration, and switches to disable AVC420 or AVC444.
-- **Network** - force TCP by disabling UDP multitransport.
-- **Debug** - outline each decoded region in the colour of the codec that produced it, the same overlay `RDP_DEBUG_CODEC_OUTLINES=1` turns on.
-
-Every option is written to the `.rdp` file, so a saved connection carries its codec and transport choices with it.
-
-### Session controls
-
-The session controls float over the desktop as an island at the top of the window, in place of `mstsc`'s connection bar:
-
-- **server name** - hover it for the connection details: user, resolution, DPI scale, transport, bandwidth, response time and frame rate. Drag it, or the `::` grip, to slide the island along the top edge.
-- **Keys** - send Alt+Tab, Super and other system shortcuts to the remote desktop instead of the local one. Off by default. Uses the Wayland keyboard-shortcuts-inhibit protocol, or `XGrabKeyboard` on X11, and is always released on focus loss, disconnect and exit.
-- **Pin** - keep the island visible in fullscreen. Unpinned, it hides in fullscreen and reappears once the pointer has rested at the top edge for a moment; in a window it stays put.
-- **- / Full / X** - minimise, toggle fullscreen, disconnect.
-
-### Command Line Options
-
-```bash
-irontsc [OPTIONS]
-
-Options:
-      --computer <COMPUTER>  Computer name or IP address, optionally with `:port`
-  -u, --username <USERNAME>  User name to authenticate as
-  -p, --password <PASSWORD>  Password to authenticate with
-  -d, --domain <DOMAIN>      Domain to authenticate against
-      --autologon            Connect immediately instead of showing the dialog
-  -h, --help                 Print help
-  -V, --version              Print version
-
-Arguments:
-  [FILE]  A .rdp file to load the settings from, the way `mstsc file.rdp` does
+```sh
+irontsc
 ```
 
-Anything short of a full set of credentials still opens the dialog, pre-filled.
+Connect directly:
 
-Logging is controlled by `RUST_LOG`, e.g. `RUST_LOG=debug ./target/release/irontsc`.
-
-## Configuration
-
-Settings live in `~/.config/irontsc/default.rdp`, in the same `.rdp` format `mstsc` writes, so the file can be shared with it. The dialog is pre-filled from it, and its **Remember these settings** checkbox writes the server, user name and domain back.
-
-The password is only saved when **Save password** is ticked, and it is stored in plaintext - leave it off unless you know what the file is for.
-
-**Save As...** and **Open...** work on `.rdp` files anywhere, and `irontsc file.rdp` opens one straight from the command line. The file picker is the desktop's own, reached through `xdg-desktop-portal`; without a portal running, the buttons do nothing and the default file is still there.
-
-## Debug Features
-
-### Codec Visualization
-
-Enable visual debugging of codec blocks with color-coded outlines:
-
-```bash
-RDP_DEBUG_CODEC_OUTLINES=1 ./target/release/irontsc
+```sh
+irontsc --computer server.example.com --username user --password secret --autologon
 ```
 
-This will draw colored rectangles around decoded regions to identify which codec is being used:
+Open a saved connection:
 
-- **Pink**: ClearCodec compressed tiles
-- **Blue**: RFX Progressive codec tiles  
-- **Green**: H.264/AVC420 frames
-- **Yellow**: H.264/AVC444/AVC444v2 frames
-- **Orange**: Uncompressed (raw BGRA) data
+```sh
+irontsc connection.rdp
+```
 
-This feature is useful for:
-- Understanding codec usage patterns
-- Debugging graphics corruption issues
-- Analyzing performance characteristics
-- Verifying codec negotiation
-
-## Technology Stack
-
-- **[IronRDP](https://github.com/Devolutions/IronRDP)**: Pure Rust RDP protocol implementation by Devolutions
-- **[egui](https://github.com/emilk/egui)** on **winit** and **glutin**: the window, the GL context and the event loop
-- **FFmpeg**: H.264 (AVC420/AVC444) decoding for RDPEGFX
+Run `irontsc --help` for all connection, folder sharing, camera, audio capture,
+configuration, and MCP options. Only warnings and errors are logged by default.
+Set `RUST_LOG` to opt into more detail, for example `RUST_LOG=debug irontsc`.
 
 ## MCP mode
 
-IronTSC can hand a remote desktop to an AI agent over the [Model Context Protocol](https://modelcontextprotocol.io). The agent takes screenshots and sends clicks and keystrokes; there is one tool set, reachable two ways depending on who owns the session.
+IronTSC can expose a remote desktop through the Model Context Protocol. Enable
+MCP from the session toolbar to let an agent join the visible session, or start
+a headless stdio session:
 
-### In a session you are watching
-
-Open the gear (`...`) in the session island and tick **MCP mode**. The agent joins the desktop already on screen, so you see everything it does as it happens, and you can take the mouse back at any moment. Nothing restarts.
-
-The menu shows a URL to hand to a client:
-
-```bash
-claude mcp add --transport http irontsc 'http://127.0.0.1:7444/mcp?t=<token>'
+```sh
+irontsc mcp --computer server.example.com --username user --password secret
 ```
 
-The server binds to loopback only and requires the token in that URL, as a bearer header or the `t` parameter — anything running as your user could otherwise drive your desktop. A fresh token is generated each time MCP mode is switched on, so re-copy the URL after switching it off and on. The button reads **MCP** in blue while it is listening; switching it off releases anything the agent was holding down.
+The MCP surface provides screenshots, pixel and region queries, mouse and
+keyboard input, status, waiting, and disconnect controls.
 
-### Headless, with no window
+## Development
 
-For an agent that should open its own session, `irontsc mcp` speaks MCP over stdio — the form an MCP client starts for itself:
+Build the release client with:
 
-```bash
-claude mcp add irontsc -- irontsc mcp --computer server.example.com -u user -p secret
+```sh
+cargo build --locked --release
 ```
 
-It takes the same connection flags as the client, or a `.rdp` file. `--width` and `--height` set the desktop size. UDP multitransport is off unless you pass `--udp`: an agent works in clicks and screenshots, where a few milliseconds buy nothing and the extra transport is one more thing to go wrong. Logging goes to stderr here, because stdout is the protocol.
+Run the workspace tests with:
 
-### Tools
+```sh
+cargo test --workspace
+```
 
-| Tool | What it does |
-| --- | --- |
-| `screenshot` | The desktop as a PNG. Waits for the screen to stop changing first. `x`/`y`/`width`/`height` grab one region at full detail; `max_width` scales the result down to save tokens. |
-| `pixel` | The exact colour at a point, or under the pointer if none is given. |
-| `find_regions` | Flat rectangles on screen, largest first, as candidate controls. |
-| `click`, `move_mouse`, `drag`, `scroll` | Mouse input, in desktop pixels. |
-| `type_text` | Types as Unicode, so the server's keyboard layout need not match yours. |
-| `key` | A chord: `enter`, `F5`, `ctrl+c`, `alt+tab`, `win+r`, `ctrl+alt+delete`. |
-| `status` | Connection state, desktop size, and what the agent did recently. |
-| `wait`, `disconnect` | Pause; close a session this server opened. |
-
-Coordinates are always in the desktop's own pixels, never the screenshot's, and every reply that could be ambiguous says so.
-
-`find_regions` deserves a caveat: it finds axis-aligned blocks of near-uniform colour, which Windows chrome is largely made of, so buttons and fields do turn up in it — but so does anything else that happens to be a flat rectangle. It is a hint to check against the image, not a widget tree. A model reading the screenshot remains the better way to find a control.
-
-## Console
-
-A terminal docks beside the desktop, so an agent can be driven without leaving the window. Open it from the gear (`...`) in the session island, under **Console**.
-
-It runs your `$SHELL`, and the header has a **Start Claude** button that types `claude` at the prompt. Dock it to the bottom, right or left from the header, and drag the splitter to resize — the remote desktop takes whatever space is left and renegotiates its size to match, so Windows reflows rather than being letterboxed.
-
-**Keys follow the click.** Click the console to type into it, click the desktop to type there; the header says which has them. No shortcut is reserved, so the remote desktop keeps every key. While the console is typing, the keyboard grab that **Keys** mode holds is released, so Alt+Tab and friends reach this machine — and it is taken back when focus returns to the desktop.
-
-The console outlives a disconnect: it is not drawn on the connection dialog, but whatever is running in it keeps running and is still there when you reconnect.
-
-Emulation is `egui_term` over `alacritty_terminal`, so a full-screen TUI works properly — alternate screen, colours, cursor addressing, bracketed paste. It sits behind a `Terminal` trait, so the renderer can be replaced without touching the docking, focus or header code above it.
-
-Glyph coverage is a fallback **chain**, not a single font: egui's monospace family is an ordered list, and IronTSC appends to it. Hack stays first and keeps setting the metrics that hold the grid square — it already covers box drawing and blocks in full — and the fonts behind it are consulted only for what it lacks (Claude Code's spinner and bullet marks among them). The chain is per-platform: DejaVu Sans Mono, Noto Sans Symbols 2 and Symbola on Linux; Cascadia Mono, Consolas and Segoe UI Symbol on Windows; Menlo, SF Mono and Apple Symbols on macOS. Set `IRONTSC_CONSOLE_FONTS` to a path list to put your own fonts ahead of all of them.
-
-Every candidate is parsed before it is installed, because egui panics on font bytes it cannot read — a missing or unreadable font is skipped, and the console just looks plainer.
-
-## Project Status
-
-IronTSC is under active development. Still very experimental and not using all features from IronRDP.
+Protocol captures and keys used for regression investigation live in
+[`samples/`](samples/). Microsoft protocol documents used as implementation
+references live in [`vendor/rdp-specs-md/`](vendor/rdp-specs-md/).
 
 ## License
 
-This project is licensed under the MIT License
-
-## Acknowledgments
-
-- **[IronRDP](https://github.com/Devolutions/IronRDP)** by Devolutions for the excellent Rust RDP library
-- **Microsoft** for the `mstsc` client that inspired this project's design
-- **[egui](https://github.com/emilk/egui)** and the winit and glutin projects for a GUI stack that ports without a desktop toolkit behind it
-
-## Related Projects
-
-- [IronRDP](https://github.com/Devolutions/IronRDP) - The RDP library powering this client
-- [Remmina](https://remmina.org/) - Feature-rich remote desktop client with multi-protocol support
-- [FreeRDP](https://www.freerdp.com/) - Open-source RDP client implementation
-
-## Support
-
-For issues, questions, or feature requests, please open an issue on the [GitHub repository](https://github.com/espentveit/irontsc/issues).
+MIT
