@@ -1,3 +1,12 @@
+//! NSCodec decoder for ClearCodec subcodec tiles.
+//!
+//! Rust port of FreeRDP libfreerdp/codec/nsc.c:
+//! - Copyright 2011 Samsung, Author Jiten Pathy
+//! - Copyright 2012 Vic Lee
+//! - Copyright 2016 Armin Novak <armin.novak@thincast.com>
+//! - Copyright 2016 Thincast Technologies GmbH
+//! - Licensed under the Apache License, Version 2.0
+
 use anyhow::{ensure, Result};
 
 /// Rust implementation of the NSCodec decoder as used by ClearCodec subcodec tiles.

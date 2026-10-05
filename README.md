@@ -106,4 +106,9 @@ references live in [`vendor/rdp-specs-md/`](vendor/rdp-specs-md/).
 
 ## License
 
-MIT
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
+at your option.
+
+The Microsoft protocol documents in `vendor/rdp-specs-md/` are not covered by
+this license; they are Microsoft Open Specifications documentation reproduced
+under Microsoft's terms. See [NOTICE](NOTICE).

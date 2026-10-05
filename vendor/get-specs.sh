@@ -7,16 +7,16 @@ mkdir -p "$ROOT_DIR"
 
 # Spec name => verified DOCX URL (Published Version)
 # Sources:
-# RDPEUDP (Published 2024-04-23) :contentReference[oaicite:0]{index=0}
-# RDPEUDP2 (Published 2024-04-23) :contentReference[oaicite:1]{index=1}
-# RDPEGFX (Published 2025-08-11) :contentReference[oaicite:2]{index=2}
-# RDPBCGR (Published 2025-04-07) :contentReference[oaicite:3]{index=3}
-# RDPEUSB (Published 2024-04-23) :contentReference[oaicite:4]{index=4}
-# RDPELE  (Published 2024-04-23) :contentReference[oaicite:5]{index=5}
-# RDPEPNP (Published 2024-04-23) :contentReference[oaicite:6]{index=6}
-# RDPECLIP(Published 2024-04-23) :contentReference[oaicite:7]{index=7}
-# RDPESP  (2024 content page)      :contentReference[oaicite:8]{index=8}
-# RDPEDC  (Latest is 2017-06-01)   :contentReference[oaicite:9]{index=9}
+# RDPEUDP (Published 2024-04-23)
+# RDPEUDP2 (Published 2024-04-23)
+# RDPEGFX (Published 2025-08-11)
+# RDPBCGR (Published 2025-04-07)
+# RDPEUSB (Published 2024-04-23)
+# RDPELE  (Published 2024-04-23)
+# RDPEPNP (Published 2024-04-23)
+# RDPECLIP(Published 2024-04-23)
+# RDPESP  (2024 content page)
+# RDPEDC  (Latest is 2017-06-01)
 declare -A URLS=(
   ["MS-RDPEUDP"]="https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-RDPEUDP/%5BMS-RDPEUDP%5D-240423.docx"
   ["MS-RDPEUDP2"]="https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-RDPEUDP2/%5BMS-RDPEUDP2%5D-240423.docx"
