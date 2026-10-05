@@ -21,3 +21,7 @@ samples/*.log
 *.pcap
 *.pcapng
 *.keys
+
+# Intermediate spec downloads and unpacked DOCX; regenerate with vendor/get-specs.sh.
+/vendor/rdp-specs/
+/vendor/rdp-specs-source/

@@ -1,0 +1,20 @@
+irontsc
+Copyright (c) 2025 Espen Tveit
+
+Licensed under either of the MIT license (LICENSE-MIT) or the Apache License,
+Version 2.0 (LICENSE-APACHE), at your option.
+
+Exception: vendor/rdp-specs-md/ contains Microsoft Open Specifications
+documentation, © Microsoft Corporation, reproduced under the terms of the
+Intellectual Property Rights Notice at the top of each document. Those files
+are not licensed under the project license. See vendor/rdp-specs-md/README.md.
+
+Exception: crates/clearcodec/ is a Rust port of FreeRDP's ClearCodec and
+NSCodec decoders (libfreerdp/codec/clear.c, libfreerdp/codec/nsc.c) and is
+licensed under the Apache License, Version 2.0 only, not MIT.
+  Copyright 2011 Samsung, Author Jiten Pathy
+  Copyright 2012 Vic Lee
+  Copyright 2014 Marc-Andre Moreau <marcandre.moreau@gmail.com>
+  Copyright 2016 Armin Novak <armin.novak@thincast.com>
+  Copyright 2016 Thincast Technologies GmbH
+FreeRDP: https://github.com/FreeRDP/FreeRDP
