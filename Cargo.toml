@@ -240,14 +240,15 @@ glutin-winit = "0.5"
 # in; the blocking API is fine because the picker only ever opens from the connection dialog,
 # where no session is running to keep alive.
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
-rmcp = { version = "3.1.4", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
-schemars = "1.2.2"
-png = "0.18.1"
-base64 = "0.23.1"
-hyper = { version = "1.11.0", features = ["http1", "server", "client"] }
-hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "service"] }
-tower-service = "0.3.3"
-http-body-util = "0.1.5"
+# MCP mode (opt-in `mcp` feature): the server, its HTTP transport and the CLI client for it.
+rmcp = { version = "3.1.4", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"], optional = true }
+schemars = { version = "1.2.2", optional = true }
+png = { version = "0.18.1", optional = true }
+base64 = { version = "0.23.1", optional = true }
+hyper = { version = "1.11.0", features = ["http1", "server", "client"], optional = true }
+hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "service"], optional = true }
+tower-service = { version = "0.3.3", optional = true }
+http-body-util = { version = "0.1.5", optional = true }
 
 # RDPEGFX + H.264 support
 clearcodec = { path = "crates/clearcodec" }
@@ -265,7 +266,6 @@ tokio-openssl = "0.6"
 openssl-sys = "0.9"
 foreign-types = "0.3"
 libc = "0.2"
-# The MCP session register describes each running session as one small JSON message.
 serde_json = "1"
 
 # Seeing the screen without sending it anywhere: PP-OCRv6 for text and a small YOLO for the
@@ -276,10 +276,10 @@ serde_json = "1"
 # involved -- a threshold and connected components over DBNet's probability map, and a greedy
 # CTC decode -- are a page of code between them, and the toolkits that wrap them bring several
 # hundred crates and a document-understanding stack that is no use to a desktop.
-ort = "=2.0.0-rc.13"
+ort = { version = "=2.0.0-rc.13", optional = true }
 image = "0.25"
 nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
-imageproc = "0.27"
+imageproc = { version = "0.27", optional = true }
 
 # System shortcut capture for the egui frontend (Alt+Tab, Super, ... to the remote desktop).
 # winit has no API for this, so it is done against the display server directly: the Wayland
@@ -300,6 +300,11 @@ x11-dl = "2.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 
+# Drives the MCP server, so it only exists when that is built.
+[[test]]
+name = "mcp_http"
+required-features = ["mcp"]
+
 [features]
 # h264 is back on by default: ffmpeg-sys-next 9 builds against FFmpeg 8, and without it every
 # frame of full-motion video is forced through the progressive codec on the CPU.
@@ -307,6 +312,11 @@ default = ["gfx", "h264", "video-redirection"]
 gfx = []
 h264 = ["ironrdp-h264", "ironrdp-gfx/h264"]
 video-redirection = ["ironrdp-video", "ironrdp-geometry", "ironrdp-h264", "ironrdp-gfx/h264"]
+
+# Lets an agent see and drive a session over MCP: the `irontsc mcp`, `sessions` and `session`
+# subcommands, `--mcp`, and the MCP mode toggle in the window. Off by default, and left off in
+# release builds.
+mcp = ["dep:rmcp", "dep:schemars", "dep:png", "dep:base64", "dep:hyper", "dep:hyper-util", "dep:tower-service", "dep:http-body-util", "dep:ort", "dep:imageproc"]
 
 [patch."https://github.com/Devolutions/IronRDP"]
 ironrdp = { path = "crates/ironrdp-local" }

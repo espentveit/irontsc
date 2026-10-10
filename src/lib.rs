@@ -14,6 +14,7 @@
 pub use ironrdp;
 pub use smallvec;
 
+#[cfg(feature = "mcp")]
 pub mod agent;
 pub mod camera;
 pub mod clipboard_files;

@@ -61,6 +61,12 @@ To build without H.264 / video redirection (no FFmpeg required):
 cargo build --release --no-default-features --features gfx
 ```
 
+MCP mode (`irontsc mcp`, the gear toggle) is opt-in and left out of the default build:
+
+```bash
+cargo build --release --features mcp
+```
+
 ## Run
 
 ```bash

@@ -31,6 +31,7 @@ pub struct Preferences {
     /// Four files are looked for there: `text-det.onnx` and `text-rec.onnx` (PP-OCRv6 tiny),
     /// `charset.txt`, and `widgets.onnx` (a small YOLO over interface elements). Without them
     /// MCP mode simply does not offer `find_text` and `find_targets`; nothing is downloaded.
+    /// Only builds with the `mcp` feature read it.
     #[serde(default)]
     pub models_dir: String,
     /// The keyboard layout the servers you connect to have active: `us`, `no`. Empty means take
@@ -116,6 +117,7 @@ impl Preferences {
     }
 
     /// The directory to look in for the screen models.
+    #[cfg(feature = "mcp")]
     pub fn models_directory(&self) -> Option<std::path::PathBuf> {
         match self.models_dir.trim() {
             "" => crate::agent::Models::default_directory(),
@@ -124,6 +126,7 @@ impl Preferences {
     }
 
     /// The models themselves, or `None` when they are not installed.
+    #[cfg(feature = "mcp")]
     pub fn sight(&self) -> Option<std::sync::Arc<crate::agent::Models>> {
         let directory = self.models_directory()?;
         crate::agent::Models::load(&directory).map(std::sync::Arc::new)
@@ -160,6 +163,7 @@ mod tests {
         assert_eq!(settings.keyboard_layout, "us");
     }
 
+    #[cfg(feature = "mcp")]
     #[test]
     fn the_models_directory_defaults_and_can_be_moved() {
         assert_eq!(

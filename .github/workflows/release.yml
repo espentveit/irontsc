@@ -69,6 +69,7 @@ jobs:
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
+      # Release builds leave the opt-in `mcp` feature off.
       - name: Build release binary
         run: cargo build --locked --release --no-default-features --features gfx --bin irontsc
 
@@ -125,6 +126,7 @@ jobs:
           }
           "value=$version" >> $env:GITHUB_OUTPUT
 
+      # Release builds leave the opt-in `mcp` feature off.
       - name: Build release binary
         shell: pwsh
         run: cargo build --locked --release --no-default-features --features gfx --bin irontsc
