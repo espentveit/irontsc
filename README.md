@@ -1,101 +1,63 @@
-# IronTSC
+<p align="center">
+  <img src="packaging/assets/irontsc.png" width="128" alt="IronTSC icon">
+</p>
 
-IronTSC is an experimental native Remote Desktop Protocol client built in Rust
-on [IronRDP](https://github.com/Devolutions/IronRDP). Its desktop UI uses egui,
-winit, and glutin and is inspired by the Windows Remote Desktop client
-(`mstsc`).
+<h1 align="center">IronTSC</h1>
 
-IronTSC supports saved `.rdp` connections, clipboard and audio redirection,
-dynamic desktop resizing, RDP graphics codecs, TCP and UDP transports, and a
-docked terminal.
+<p align="center">
+  A fast, native Remote Desktop client written in Rust, for Linux and Windows.
+</p>
+
+IronTSC connects to Windows machines over the Remote Desktop Protocol, with the
+same simple dialog and floating connection bar you know from Microsoft's
+Remote Desktop Connection (`mstsc`).
+
+<p align="center">
+  <img src="docs/screenshots/connect.png" height="360" alt="The connection dialog">
+  &nbsp;
+  <img src="docs/screenshots/session.png" height="360" alt="A remote Windows 11 desktop">
+</p>
+
+## Graphics over UDP
+
+IronTSC speaks RDP's UDP transport (MS-RDPEUDP and MS-RDPEUDP2), the same
+multitransport path Microsoft's own client uses: when the server offers it, the
+desktop's graphics move to UDP, so a lost packet does not stall the whole
+stream and the session stays responsive over Wi-Fi and long links. If UDP
+cannot get through, the session carries on over TCP without you noticing.
+
+## Features
+
+- Saved `.rdp` connections, opened and saved the way `mstsc` does
+- Modern RDP graphics (RDPEGFX) with dynamic resizing and fullscreen
+- Clipboard for text, images and files, in both directions
+- Sound from the remote machine, and optionally your microphone and camera
+- Local folders shared into the session
+- Follows the system's light and dark mode
 
 ## Download
 
-GitHub Actions creates downloadable builds for pushes to `main`, pull requests,
-manual runs, and version tags:
+Builds for **Windows** (MSI installer or portable ZIP) and **Linux** (`.tar.gz`)
+are on the [Releases](https://github.com/espentveit/irontsc/releases) page.
 
-| Platform | Packages |
-| --- | --- |
-| Linux x86-64 | `.tar.gz` archive |
-| Windows x64 | Portable ZIP and MSI installer |
+To build it yourself, see [BUILD.md](BUILD.md).
 
-Tagged commits such as `v0.1.0` are published as GitHub Releases with a
-`SHA256SUMS` file. Builds from branches and pull requests are available in the
-workflow run's **Artifacts** section.
+## Kudos
 
-The CI packages use the portable `gfx` feature set and omit H.264 and video
-redirection, which require FFmpeg 8 development libraries. Build from source
-with the default features to enable them.
+IronTSC stands on the shoulders of others:
 
-## Build from source
-
-Install a stable Rust toolchain with [rustup](https://rustup.rs/), then install
-the platform's native development dependencies. See [BUILD.md](BUILD.md) for
-the Debian/Ubuntu, Fedora, and Arch package lists.
-
-Build the full client:
-
-```sh
-cargo build --locked --release
-```
-
-If FFmpeg 8 is unavailable, use the same feature set as the downloadable CI
-builds:
-
-```sh
-cargo build --locked --release --no-default-features --features gfx
-```
-
-The executable is `target/release/irontsc` on Linux and
-`target\release\irontsc.exe` on Windows.
-
-## Usage
-
-Open the connection dialog:
-
-```sh
-irontsc
-```
-
-Connect directly:
-
-```sh
-irontsc --computer server.example.com --username user --password secret --autologon
-```
-
-Open a saved connection:
-
-```sh
-irontsc connection.rdp
-```
-
-Run `irontsc --help` for all connection, folder sharing, camera, audio capture
-and configuration options. Nothing is logged by default; set `RUST_LOG` to opt
-in, for example `RUST_LOG=debug irontsc`.
-
-## Development
-
-Build the release client with:
-
-```sh
-cargo build --locked --release
-```
-
-Run the workspace tests with:
-
-```sh
-cargo test --workspace
-```
-
-Protocol captures and keys used for regression investigation live in
-[`samples/`](samples/). Microsoft protocol documents used as implementation
-references live in [`vendor/rdp-specs-md/`](vendor/rdp-specs-md/).
+- **[IronRDP](https://github.com/Devolutions/IronRDP)** by Devolutions -- the
+  Rust implementation of the protocol that IronTSC is built on.
+- **[FreeRDP](https://github.com/FreeRDP/FreeRDP)** -- its ClearCodec and
+  NSCodec decoders are ported here.
+- **Microsoft's [Open Specifications](https://learn.microsoft.com/en-us/openspecs/windows_protocols/)**
+  -- the protocol documents that make an independent client possible.
+- **[egui](https://github.com/emilk/egui)**, **[winit](https://github.com/rust-windowing/winit)**
+  and the wider Rust ecosystem for the window and everything in it.
 
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
-at your option.
-
-The Microsoft protocol documents in `vendor/rdp-specs-md/` are not covered by
-this license; they are Microsoft Open Specifications documentation reproduced
-under Microsoft's terms. See [NOTICE](NOTICE).
+at your option. The ported FreeRDP codecs are Apache-2.0 only, and the
+Microsoft protocol documents in `vendor/` are under Microsoft's own terms; see
+[NOTICE](NOTICE).
