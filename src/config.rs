@@ -345,10 +345,7 @@ impl Config {
 
             if let Err(errors) = ironrdp_rdpfile::load(&mut properties, &input) {
                 for e in errors {
-                    #[expect(clippy::print_stderr)]
-                    {
-                        eprintln!("Error when reading {}: {e}", rdp_file.display())
-                    }
+                    tracing::warn!("Error when reading {}: {e}", rdp_file.display());
                 }
             }
         }

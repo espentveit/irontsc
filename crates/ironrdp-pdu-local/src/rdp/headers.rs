@@ -115,27 +115,6 @@ impl Encode for ShareControlHeader {
 
 impl<'de> Decode<'de> for ShareControlHeader {
     fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
-        // Debug: show first 32 bytes of raw data before parsing
-        let remaining_bytes = src.remaining();
-        eprintln!("🔍 ShareControlHeader decode - RAW DATA:");
-        eprintln!("   Remaining bytes: {}", remaining_bytes.len());
-        if remaining_bytes.len() >= 32 {
-            let preview = &remaining_bytes[..32];
-            let hex: String = preview
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            eprintln!("   First 32 bytes: {}", hex);
-        } else if !remaining_bytes.is_empty() {
-            let hex: String = remaining_bytes
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            eprintln!("   All {} bytes: {}", remaining_bytes.len(), hex);
-        }
-
         ensure_fixed_part_size!(in: src);
 
         let total_length = usize::from(src.read_u16());
@@ -144,24 +123,9 @@ impl<'de> Decode<'de> for ShareControlHeader {
         let share_id = src.read_u32();
 
         let pdu_type_value = pdu_type_with_version & SHARE_CONTROL_HEADER_MASK;
-        eprintln!("   total_length: {}", total_length);
-        eprintln!("   pdu_type_with_version: 0x{:04x}", pdu_type_with_version);
-        eprintln!(
-            "   pdu_type_value (masked): 0x{:04x} ({})",
-            pdu_type_value, pdu_type_value
-        );
-        eprintln!("   pdu_source: 0x{:04x}", pdu_source);
-        eprintln!("   share_id: 0x{:08x}", share_id);
 
         let pdu_type = ShareControlPduType::from_u16(pdu_type_value)
-            .ok_or_else(|| {
-                eprintln!("❌ Invalid PDU type: 0x{:04x} ({})", pdu_type_value, pdu_type_value);
-                eprintln!("   Known types: DemandActivePdu=0x1, ConfirmActivePdu=0x3, DeactivateAllPdu=0x6, DataPdu=0x7, ServerRedirect=0xa");
-                eprintln!("   Full header so far: totalLength={}, pdu_type_with_version=0x{:04x}, pduSource=0x{:04x}, shareId=0x{:08x}", 
-                         total_length, pdu_type_with_version, pdu_source, share_id);
-                eprintln!("   This usually means frame misalignment or protocol version mismatch!");
-                invalid_field_err!("pdu_type", "invalid pdu type")
-            })?;
+            .ok_or_else(|| invalid_field_err!("pdu_type", "invalid pdu type"))?;
         let pdu_version = pdu_type_with_version & !SHARE_CONTROL_HEADER_MASK;
         if pdu_version != PROTOCOL_VERSION {
             return Err(invalid_field_err!("pdu_version", "invalid PDU version"));

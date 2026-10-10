@@ -105,33 +105,12 @@ pub struct ShareControlCtx {
 }
 
 pub fn decode_share_control(ctx: SendDataIndicationCtx<'_>) -> ConnectorResult<ShareControlCtx> {
-    // Debug: log the raw user_data
-    eprintln!("🔍 decode_share_control - Raw user_data:");
-    eprintln!("   Length: {} bytes", ctx.user_data.len());
-    if ctx.user_data.len() <= 64 {
-        let hex: String = ctx
-            .user_data
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-        eprintln!("   All bytes: {}", hex);
-    } else {
-        let preview = &ctx.user_data[..64];
-        let hex: String = preview
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-        eprintln!("   First 64 bytes: {}", hex);
-    }
+    tracing::trace!(len = ctx.user_data.len(), "decode_share_control");
 
-    // Check if this might be an Initiate Multitransport Request (28 bytes: 4+2+2+16)
-    // The server sends this during capabilities exchange if we advertised multitransport support
+    // A 28-byte PDU may be an Initiate Multitransport Request (4+2+2+16), which should be
+    // handled at a higher level in the state machine.
     if ctx.user_data.len() == 28 {
-        eprintln!("⚠️  Detected 28-byte PDU - might be Initiate Multitransport Request!");
-        eprintln!("   This should be handled at a higher level in the state machine");
-        eprintln!("   Falling through to ShareControlHeader decode (will fail)...");
+        tracing::debug!("28-byte PDU might be an Initiate Multitransport Request; decoding as ShareControlHeader");
     }
 
     let user_msg = ctx.decode_user_data::<rdp::headers::ShareControlHeader>()?;
@@ -165,12 +144,12 @@ pub fn detect_multitransport_request(
     let pdu_data = match ctx.user_data.len() {
         MULTITRANSPORT_PDU_SIZE => {
             // Case 1: Raw PDU without security header (during capabilities exchange)
-            eprintln!("🔍 Attempting to decode 24-byte PDU as raw InitiateMultitransportRequest");
+            tracing::trace!("decoding 24-byte PDU as raw InitiateMultitransportRequest");
             ctx.user_data
         }
         size if size == MULTITRANSPORT_PDU_SIZE + SECURITY_HEADER_SIZE => {
             // Case 2: PDU with 4-byte security header prefix
-            eprintln!("🔍 Attempting to decode 28-byte PDU as InitiateMultitransportRequest with security header");
+            tracing::trace!("decoding 28-byte PDU as InitiateMultitransportRequest with security header");
             &ctx.user_data[SECURITY_HEADER_SIZE..]
         }
         _ => {
@@ -182,17 +161,15 @@ pub fn detect_multitransport_request(
     // Try to decode as InitiateMultitransportRequest
     match decode::<rdp::multitransport::InitiateMultitransportRequest>(pdu_data) {
         Ok(request) => {
-            eprintln!("✅ Successfully decoded InitiateMultitransportRequest");
-            eprintln!("   Request ID: {}", request.request_id);
-            eprintln!("   Protocol: {:?}", request.requested_protocol);
-            eprintln!("   Security Cookie: {:02x?}", &request.security_cookie[..]);
+            tracing::debug!(
+                request_id = request.request_id,
+                protocol = ?request.requested_protocol,
+                "decoded InitiateMultitransportRequest"
+            );
             Some(request)
         }
         Err(e) => {
-            eprintln!(
-                "❌ Failed to decode as InitiateMultitransportRequest: {:?}",
-                e
-            );
+            tracing::debug!(error = ?e, "failed to decode as InitiateMultitransportRequest");
             None
         }
     }
@@ -211,10 +188,12 @@ pub fn encode_multitransport_response(
 ) -> ConnectorResult<usize> {
     let response = rdp::multitransport::InitiateMultitransportResponse::success(request_id);
 
-    eprintln!("📨 Encoding InitiateMultitransportResponse:");
-    eprintln!("   Request ID: {}", request_id);
-    eprintln!("   User Channel: 0x{:04x}", user_channel_id);
-    eprintln!("   Message Channel: 0x{:04x}", message_channel_id);
+    tracing::debug!(
+        request_id,
+        user_channel_id,
+        message_channel_id,
+        "encoding InitiateMultitransportResponse"
+    );
 
     encode_send_data_request(user_channel_id, message_channel_id, &response, buf)
 }
