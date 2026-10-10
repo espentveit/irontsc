@@ -25,9 +25,15 @@ use crate::v2::{
 /// Sequence number both Windows endpoints use to start the RDP-UDP2 data sequence space.
 const V3_INITIAL_SEQUENCE: u16 = 100;
 
-/// Number of sequence numbers we are willing to hold while waiting for a gap to be filled.
-/// Anything further ahead than this is treated as bogus rather than buffered.
-const V3_RECEIVE_WINDOW: u16 = 4096;
+/// How far ahead of the next expected sequence number a packet or chunk may be and still be
+/// kept. Serial arithmetic on 16-bit numbers tells at most 32767 ahead from behind, and the peer
+/// may get that far: Windows ignores the receive window for RDP-UDP2, and had 5751 chunks
+/// outstanding after a 2 second outage. A smaller reach stalls the stream under loss.
+const V3_RECEIVE_REACH: u16 = 0x7fff;
+
+/// How long the stream waits for channel sequence 0 after 65535 before moving on to 1, when it
+/// cannot tell from the data sequence numbers whether a 0 was ever sent.
+const CHANNEL_ZERO_GRACE: Duration = Duration::from_millis(1000);
 
 /// How long chunks may pile up behind a missing channel sequence before it is reported. The
 /// transport keeps acknowledging normally while this happens, so without a warning the stream
@@ -52,9 +58,8 @@ const V3_MAX_ACKVEC_BYTES: usize = 0x7f;
 /// advertising a small window here throttles the server's sender window for no benefit.
 const V3_LOG_WINDOW_SIZE: u8 = 15;
 
-/// Advances a channel sequence number. These are 1-based: the peer wraps 65535 -> 1 and never
-/// sends 0, so a plain wrapping add leaves the receiver waiting for a chunk that will never
-/// arrive, stalling the stream permanently.
+/// Advances our own channel sequence number the way Windows does: 65535 wraps to 1, skipping 0.
+/// Receiving must not rely on that, a peer may send 0; see `skip_channel_zero`.
 #[inline]
 fn next_channel_sequence(sequence: u16) -> u16 {
     match sequence.checked_add(1) {
@@ -168,6 +173,9 @@ struct PendingPacket {
     data: Vec<u8>,
     last_sent: Instant,
     retransmit_count: u8,
+    /// Channel sequence and payload of a v3 DATA packet. A v3 retransmission is encoded again
+    /// under a new data sequence number, so the original bytes cannot simply be resent.
+    v3_chunk: Option<(u16, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -218,8 +226,15 @@ pub struct UdpConnection {
     /// carrying the original channel sequence, so it arrives after the chunks that follow it and
     /// has to be put back in its place before being handed up.
     v3_channel_buffer: HashMap<u16, Vec<u8>>,
-    /// Next channel sequence number to hand upwards.
-    v3_next_channel_delivery: Option<u16>,
+    /// Next channel sequence number to hand upwards. The stream starts at 1, so a first chunk
+    /// overtaken by the second is still waited for rather than skipped.
+    v3_next_channel_delivery: u16,
+    /// Data sequence numbers that carried channel sequence 65535 and 1, which tell whether a 0
+    /// could have been sent in between when the channel sequence wraps.
+    v3_wrap_dseq: Option<u16>,
+    v3_one_dseq: Option<u16>,
+    /// Since when the stream has been waiting at channel sequence 0 with 1 already here.
+    v3_zero_wait_since: Option<Instant>,
     /// When chunks first started piling up behind a channel sequence that has not arrived.
     v3_channel_stalled_since: Option<Instant>,
     /// Whether the current stall has already been reported, so it is logged once and not once
@@ -229,8 +244,6 @@ pub struct UdpConnection {
     v3_base_established: bool,
     /// Highest v3 sequence number seen so far, used to size the ACK vector.
     v3_highest_received: u16,
-    /// Lowest v3 sequence number of ours that the peer has not acknowledged yet.
-    v3_sender_base: u16,
     /// Last AckOfAcks value we put on the wire, so we only repeat it when it changes.
     v3_announced_aoa: Option<u16>,
     /// Highest cumulative acknowledgement received from the peer for our own v3 data.
@@ -270,12 +283,14 @@ impl UdpConnection {
             receive_buffer: HashMap::new(),
             v3_received_dseq: HashSet::new(),
             v3_channel_buffer: HashMap::new(),
-            v3_next_channel_delivery: None,
+            v3_next_channel_delivery: 1,
+            v3_wrap_dseq: None,
+            v3_one_dseq: None,
+            v3_zero_wait_since: None,
             v3_channel_stalled_since: None,
             v3_channel_stall_reported: false,
             v3_base_established: false,
             v3_highest_received: 0,
-            v3_sender_base: 0,
             v3_announced_aoa: None,
             v3_remote_acked: None,
             source_block: Vec::new(),
@@ -407,7 +422,10 @@ impl UdpConnection {
                 self.v3_base_established = false;
                 self.v3_received_dseq.clear();
                 self.v3_channel_buffer.clear();
-                self.v3_next_channel_delivery = None;
+                self.v3_next_channel_delivery = 1;
+                self.v3_wrap_dseq = None;
+                self.v3_one_dseq = None;
+                self.v3_zero_wait_since = None;
                 self.v3_channel_stalled_since = None;
                 self.v3_channel_stall_reported = false;
 
@@ -415,7 +433,6 @@ impl UdpConnection {
                 // announces that base in the AckOfAcks payload of its first DATA packet.
                 let our_seq16 = V3_INITIAL_SEQUENCE;
                 self.v3_next_data_sequence = our_seq16;
-                self.v3_sender_base = our_seq16;
                 self.v3_announced_aoa = None;
                 self.v3_remote_acked = None;
 
@@ -537,6 +554,7 @@ impl UdpConnection {
         }
 
         let mut retransmits = Vec::new();
+        let mut due = Vec::new();
         let mut to_remove = Vec::new();
         let now = Instant::now();
         let timeout = Duration::from_millis(self.config.retransmit_timeout_ms as u64);
@@ -544,9 +562,7 @@ impl UdpConnection {
         for (key, pending) in self.pending_packets.iter_mut() {
             if now.duration_since(pending.last_sent) >= timeout {
                 if pending.retransmit_count < self.config.max_retransmits {
-                    pending.retransmit_count += 1;
-                    pending.last_sent = now;
-                    retransmits.push(pending.data.clone());
+                    due.push(*key);
                 } else {
                     // Don't terminate connection - just stop retransmitting this packet
                     // The higher layer (TLS/DTLS) will handle timeouts if needed
@@ -559,11 +575,44 @@ impl UdpConnection {
         // forward, which the peer learns from the next AckOfAcks we send.
         for key in to_remove {
             self.pending_packets.remove(&key);
-            if let PendingKey::V3(seq) = key {
-                let base = seq.wrapping_add(1);
-                if seq_gt(base, self.v3_sender_base) {
-                    self.v3_sender_base = base;
+        }
+
+        // Oldest first, so the stream is resent in the order it was sent.
+        due.sort_by_key(|key| match *key {
+            PendingKey::V1(seq) => seq.wrapping_sub(self.next_coded_sequence) as u64,
+            PendingKey::V3(seq) => seq.wrapping_sub(self.v3_next_data_sequence) as u64,
+        });
+        for key in due {
+            let Some(mut pending) = self.pending_packets.remove(&key) else {
+                continue;
+            };
+            pending.retransmit_count += 1;
+            pending.last_sent = now;
+
+            let Some((channel_sequence, payload)) = pending.v3_chunk.take() else {
+                retransmits.push(pending.data.clone());
+                self.pending_packets.insert(key, pending);
+                continue;
+            };
+
+            // [MS-RDPEUDP2] 3.1.5.1.3: a lost packet is resent under a new data sequence
+            // number, the channel sequence number stays. The AckOfAcks then moves past the old
+            // one, so the peer stops waiting for it.
+            let data_sequence = self.v3_next_data_sequence;
+            self.v3_next_data_sequence = self.v3_next_data_sequence.wrapping_add(1);
+            match self.encode_v3_data(data_sequence, channel_sequence, &payload, true) {
+                Ok(encoded) => {
+                    debug!(
+                        "🔁 V3 retransmit #{}: channel_seq={channel_sequence} as data_seq={data_sequence}",
+                        pending.retransmit_count
+                    );
+                    retransmits.push(encoded.clone());
+                    pending.data = encoded;
+                    pending.v3_chunk = Some((channel_sequence, payload));
+                    self.pending_packets
+                        .insert(PendingKey::V3(data_sequence), pending);
                 }
+                Err(error) => warn!("⚠️  V3: cannot encode retransmit of {channel_sequence}: {error}"),
             }
         }
 
@@ -730,7 +779,7 @@ impl UdpConnection {
         let data_sequence = self.v3_next_data_sequence;
         let channel_sequence = self.v3_next_channel_sequence;
         self.v3_next_data_sequence = self.v3_next_data_sequence.wrapping_add(1);
-        self.v3_next_channel_sequence = self.v3_next_channel_sequence.wrapping_add(1);
+        self.v3_next_channel_sequence = next_channel_sequence(self.v3_next_channel_sequence);
 
         debug!(
             "📤 V3 DATA: data_seq={} (0x{:04X}), channel_seq={} (0x{:04X}), payload_len={}",
@@ -741,6 +790,42 @@ impl UdpConnection {
             data.len()
         );
 
+        let encoded = self.encode_v3_data(data_sequence, channel_sequence, &data, false)?;
+        if self.config.mode == TransportMode::Reliable {
+            self.pending_packets.insert(
+                PendingKey::V3(data_sequence),
+                PendingPacket {
+                    data: encoded.clone(),
+                    last_sent: Instant::now(),
+                    retransmit_count: 0,
+                    v3_chunk: Some((channel_sequence, data)),
+                },
+            );
+        }
+        Ok(encoded)
+    }
+
+    /// Lowest data sequence number of ours still awaiting acknowledgement, counting the one
+    /// about to go out ([MS-RDPEUDP2] 2.2.1.2.4 AckOfAcks).
+    fn v3_sender_base(&self, sending: u16) -> u16 {
+        self.pending_packets
+            .keys()
+            .filter_map(|key| match *key {
+                PendingKey::V3(seq) => Some(seq),
+                PendingKey::V1(_) => None,
+            })
+            .fold(sending, |base, seq| if seq_gt(base, seq) { seq } else { base })
+    }
+
+    /// Encodes a v3 DATA packet. A resend always repeats the AckOfAcks, since the first
+    /// announcement may have been lost along with the packet.
+    fn encode_v3_data(
+        &mut self,
+        data_sequence: u16,
+        channel_sequence: u16,
+        data: &[u8],
+        resend: bool,
+    ) -> Result<Vec<u8>> {
         let mut flags = rdpudp_v2_flags!(DATA);
         let mut ack_payload = None;
         if self.pending_ack.take().is_some() {
@@ -776,9 +861,10 @@ impl UdpConnection {
         // ([MS-RDPEUDP2] 2.2.1.2.4), which tells the peer where our sender window starts.
         // Sending the sequence being transmitted instead would ask the peer to abandon every
         // packet still in flight. It only needs to go out when the value changes.
-        let ack_of_acks = if self.v3_announced_aoa != Some(self.v3_sender_base) {
-            self.v3_announced_aoa = Some(self.v3_sender_base);
-            Some(rdpudp_v2_ack_of_acks!(self.v3_sender_base))
+        let sender_base = self.v3_sender_base(data_sequence);
+        let ack_of_acks = if resend || self.v3_announced_aoa != Some(sender_base) {
+            self.v3_announced_aoa = Some(sender_base);
+            Some(rdpudp_v2_ack_of_acks!(sender_base))
         } else {
             None
         };
@@ -794,10 +880,9 @@ impl UdpConnection {
             }),
             data_body = Some(DataBodyPayload {
                 channel_sequence_number: channel_sequence,
-                data: data.clone(),
+                data: data.to_vec(),
             })
         )?;
-        self.track_pending(PendingKey::V3(data_sequence), encoded.clone());
         Ok(encoded)
     }
 
@@ -834,8 +919,9 @@ impl UdpConnection {
         // This is the only way to get past a lost dummy packet, because dummies are never
         // retransmitted -- without honouring it the receive stream stalls forever.
         let mut delivered = Vec::new();
-        if let Some(aoa) = &packet.ack_of_acks {
-            self.advance_receive_base(aoa.sequence_number);
+        let aoa = packet.ack_of_acks.as_ref().map(|aoa| aoa.sequence_number);
+        if let Some(aoa) = aoa {
+            self.advance_receive_base(aoa);
         }
 
         // The AckOfAcks above is usually piggybacked on a DATA packet, so this packet's own
@@ -848,10 +934,18 @@ impl UdpConnection {
         self.last_data_arrival = Some(Instant::now());
 
         if !self.v3_base_established {
-            debug!("📥 V3: first DATA packet, sequence space starts at {sequence}");
+            // Windows announces where its sequence space starts in the AckOfAcks of its first
+            // DATA packets. Taking the base from that, rather than from whichever packet arrives
+            // first, keeps a lost or late first packet from being acknowledged unseen.
+            let base = aoa
+                .filter(|&aoa| {
+                    !seq_gt(aoa, sequence) && sequence.wrapping_sub(aoa) < V3_RECEIVE_REACH
+                })
+                .unwrap_or(sequence);
+            debug!("📥 V3: first DATA packet {sequence}, sequence space starts at {base}");
             self.v3_base_established = true;
-            self.v3_expected_sequence = sequence;
-            self.v3_highest_received = sequence.wrapping_sub(1);
+            self.v3_expected_sequence = base;
+            self.v3_highest_received = base.wrapping_sub(1);
         }
 
         let ahead = sequence.wrapping_sub(self.v3_expected_sequence);
@@ -869,12 +963,29 @@ impl UdpConnection {
             self.arm_pending_ack();
             return Ok(delivered);
         }
-        if ahead > V3_RECEIVE_WINDOW {
+        if ahead >= V3_RECEIVE_REACH {
             debug!(
                 "⚠️  V3: dropping packet seq={sequence}, {ahead} past expected={}",
                 self.v3_expected_sequence
             );
             return Ok(delivered);
+        }
+
+        // A chunk out of reach of the stream cannot be kept. Its packet then stays
+        // unacknowledged, so the peer sends it again: acknowledged, it would be gone for good and
+        // the stream would stall behind it.
+        if let Some(body) = &packet.data_body {
+            let chunk_ahead = body
+                .channel_sequence_number
+                .wrapping_sub(self.v3_next_channel_delivery);
+            if (V3_RECEIVE_REACH..0x8000).contains(&chunk_ahead) {
+                debug!(
+                    "⚠️  V3: not acknowledging seq={sequence}, its chunk {} is out of reach \
+                     (awaiting {})",
+                    body.channel_sequence_number, self.v3_next_channel_delivery
+                );
+                return Ok(delivered);
+            }
         }
 
         if seq_gt(sequence, self.v3_highest_received) {
@@ -893,6 +1004,11 @@ impl UdpConnection {
                     body.data.len(),
                     packet.header.flags.bits()
                 );
+                match body.channel_sequence_number {
+                    0xffff => self.v3_wrap_dseq = Some(sequence),
+                    1 => self.v3_one_dseq = Some(sequence),
+                    _ => {}
+                }
                 self.buffer_channel_data(body.channel_sequence_number, body.data);
             }
             None => debug!("📥 V3 DUMMY packet: seq={sequence}"),
@@ -908,19 +1024,48 @@ impl UdpConnection {
 
     /// Places a chunk in the stream buffer, discarding one that has already been handed up.
     fn buffer_channel_data(&mut self, channel_sequence: u16, data: Vec<u8>) {
-        match self.v3_next_channel_delivery {
-            None => self.v3_next_channel_delivery = Some(channel_sequence),
-            Some(next) if channel_sequence != next && !seq_gt(channel_sequence, next) => {
-                debug!(
-                    "⏭️  V3: dropping channel sequence {channel_sequence} as already delivered \
-                     (awaiting {next}, {} buffered)",
-                    self.v3_channel_buffer.len()
-                );
-                return;
-            }
-            Some(_) => {}
+        let next = self.v3_next_channel_delivery;
+        if channel_sequence != next && !seq_gt(channel_sequence, next) {
+            debug!(
+                "⏭️  V3: dropping channel sequence {channel_sequence} as already delivered \
+                 (awaiting {next}, {} buffered)",
+                self.v3_channel_buffer.len()
+            );
+            return;
         }
         self.v3_channel_buffer.insert(channel_sequence, data);
+    }
+
+    /// Moves the stream past channel sequence 0 when it is waiting there with 1 already here.
+    /// Windows wraps 65535 -> 1 and never sends 0; a peer that does sent it before 1. When 1 came
+    /// in the data sequence right after the one that carried 65535, nothing was sent in between
+    /// and there is no 0. Otherwise 0 gets a grace period to turn up as a resend.
+    fn skip_channel_zero(&mut self) -> bool {
+        if self.v3_next_channel_delivery != 0
+            || self.v3_channel_buffer.contains_key(&0)
+            || !self.v3_channel_buffer.contains_key(&1)
+        {
+            self.v3_zero_wait_since = None;
+            return false;
+        }
+
+        let now = Instant::now();
+        let since = *self.v3_zero_wait_since.get_or_insert(now);
+        let adjacent = matches!(
+            (self.v3_wrap_dseq, self.v3_one_dseq),
+            (Some(wrap), Some(one)) if wrap.wrapping_add(1) == one
+        );
+        if !adjacent && now.duration_since(since) < CHANNEL_ZERO_GRACE {
+            return false;
+        }
+
+        debug!(
+            "🔀 V3: channel sequence wrapped past 0{}",
+            if adjacent { "" } else { ", which never arrived" }
+        );
+        self.v3_zero_wait_since = None;
+        self.v3_next_channel_delivery = 1;
+        true
     }
 
     /// Moves the transport window past every data sequence number that has arrived.
@@ -934,19 +1079,20 @@ impl UdpConnection {
     /// filled by a retransmission arriving later under a different data sequence number.
     fn take_ready_channel_data(&mut self) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
-        let Some(mut next) = self.v3_next_channel_delivery else {
-            return result;
-        };
-        let started_at = next;
-        while let Some(data) = self.v3_channel_buffer.remove(&next) {
-            if !data.is_empty() {
-                result.push(data);
+        let started_at = self.v3_next_channel_delivery;
+        loop {
+            let next = self.v3_next_channel_delivery;
+            if let Some(data) = self.v3_channel_buffer.remove(&next) {
+                if !data.is_empty() {
+                    result.push(data);
+                }
+                self.v3_next_channel_delivery = next.wrapping_add(1);
+            } else if !self.skip_channel_zero() {
+                break;
             }
-            next = next_channel_sequence(next);
         }
-        self.v3_next_channel_delivery = Some(next);
 
-        if next != started_at {
+        if self.v3_next_channel_delivery != started_at {
             // The stream moved, so any pile-up has cleared.
             self.v3_channel_stalled_since = None;
             self.v3_channel_stall_reported = false;
@@ -981,23 +1127,20 @@ impl UdpConnection {
         let awaited = self.v3_next_channel_delivery;
         // Describe the buffered chunks relative to what is awaited, so the log says how far the
         // stream has run ahead of the hole rather than just printing wrapped raw numbers.
-        let (nearest, furthest) = awaited.map_or((None, None), |next| {
-            let mut nearest: Option<u16> = None;
-            let mut furthest: Option<u16> = None;
-            for &cs in self.v3_channel_buffer.keys() {
-                let ahead = cs.wrapping_sub(next);
-                if nearest.is_none_or(|best| ahead < best.wrapping_sub(next)) {
-                    nearest = Some(cs);
-                }
-                if furthest.is_none_or(|worst| ahead > worst.wrapping_sub(next)) {
-                    furthest = Some(cs);
-                }
+        let mut nearest: Option<u16> = None;
+        let mut furthest: Option<u16> = None;
+        for &cs in self.v3_channel_buffer.keys() {
+            let ahead = cs.wrapping_sub(awaited);
+            if nearest.is_none_or(|best| ahead < best.wrapping_sub(awaited)) {
+                nearest = Some(cs);
             }
-            (nearest, furthest)
-        });
+            if furthest.is_none_or(|worst| ahead > worst.wrapping_sub(awaited)) {
+                furthest = Some(cs);
+            }
+        }
 
         warn!(
-            "🧊 V3 stream stalled for {:?}: awaiting channel sequence {:?}, {} chunks buffered \
+            "🧊 V3 stream stalled for {:?}: awaiting channel sequence {}, {} chunks buffered \
              (nearest {:?}, furthest {:?}); transport is healthy at dseq {} with {} out of order, \
              so nothing will unstick this on its own -- giving it until {:?} before the \
              transport is dropped and its channels go back over TCP",
@@ -1020,11 +1163,11 @@ impl UdpConnection {
     /// Moves the lower bound of the receive window forward, abandoning any gap below it.
     /// Returns true when the base actually moved.
     fn advance_receive_base(&mut self, base: u16) -> bool {
+        // However far ahead: through an outage the peer resends its window again and again,
+        // each time under new sequence numbers, and Windows moved almost 5000 ahead in a 2
+        // second outage. Only its AckOfAcks brings us along. seq_gt limits the jump to half the
+        // sequence space.
         if !self.v3_base_established || !seq_gt(base, self.v3_expected_sequence) {
-            return false;
-        }
-        if base.wrapping_sub(self.v3_expected_sequence) > V3_RECEIVE_WINDOW {
-            debug!("⚠️  V3: ignoring implausible AckOfAcks {base}");
             return false;
         }
         debug!(
@@ -1076,9 +1219,6 @@ impl UdpConnection {
         let base = vector.base_sequence_number;
         self.pending_packets
             .retain(|key, _| !matches!(key, PendingKey::V3(seq) if !seq_gt(*seq, base.wrapping_sub(1))));
-        if self.v3_sender_base != base && !seq_gt(self.v3_sender_base, base) {
-            self.v3_sender_base = base;
-        }
     }
 
     fn collect_ready_packets(&mut self) -> Vec<Vec<u8>> {
@@ -1129,21 +1269,43 @@ impl UdpConnection {
     }
 
     /// Builds an ACK vector describing the receive window from the first missing sequence up to
-    /// the highest one seen, using state-map entries (bit 0 = base, increasing towards bit 6).
+    /// the highest one seen ([MS-RDPEUDP2] 2.2.1.2.6). Runs of seven or more packets in the same
+    /// state go in run-length entries (up to 63 each), the rest in state maps (bit 0 = first).
+    /// With state maps only, the 127 entries cover 889 packets, a fraction of a second behind a
+    /// hole on a busy link, and everything past that stays unacknowledged until it is filled.
     fn build_v3_ack_vector(&self) -> AckVectorPayload {
         let base = self.v3_expected_sequence;
-        let span = self.v3_highest_received.wrapping_sub(base).wrapping_add(1) as usize;
-        let bytes = span.div_ceil(7).min(V3_MAX_ACKVEC_BYTES);
-        let mut entries = Vec::with_capacity(bytes);
-        for chunk in 0..bytes {
+        let span = (self.v3_highest_received.wrapping_sub(base).wrapping_add(1) as usize)
+            .min(V3_RECEIVE_REACH as usize);
+        let received = |pos: usize| {
+            self.v3_received_dseq
+                .contains(&base.wrapping_add(pos as u16))
+        };
+
+        let mut entries = Vec::new();
+        let mut pos = 0;
+        while pos < span && entries.len() < V3_MAX_ACKVEC_BYTES {
+            let state = received(pos);
+            let mut run = 1;
+            while pos + run < span && run < 0x3f && received(pos + run) == state {
+                run += 1;
+            }
+            if run >= 7 {
+                entries.push(AckVecEntry::RunLength {
+                    received: state,
+                    length: run as u8,
+                });
+                pos += run;
+                continue;
+            }
             let mut bits = 0u8;
-            for bit in 0..7u8 {
-                let seq = base.wrapping_add((chunk * 7) as u16 + bit as u16);
-                if self.v3_received_dseq.contains(&seq) {
+            for bit in 0..7 {
+                if pos + bit < span && received(pos + bit) {
                     bits |= 1 << bit;
                 }
             }
             entries.push(AckVecEntry::StateMap(bits));
+            pos += 7;
         }
         AckVectorPayload {
             base_sequence_number: base,
@@ -1184,6 +1346,7 @@ impl UdpConnection {
                 data,
                 last_sent: now,
                 retransmit_count: 0,
+                v3_chunk: None,
             },
         );
     }
@@ -1243,10 +1406,6 @@ impl UdpConnection {
             PendingKey::V3(seq) => seq_gt(*seq, ack_sequence),
             PendingKey::V1(_) => true,
         });
-        let base = ack_sequence.wrapping_add(1);
-        if seq_gt(base, self.v3_sender_base) {
-            self.v3_sender_base = base;
-        }
     }
 }
 
@@ -1310,9 +1469,10 @@ mod tests {
 
     /// Builds an on-wire v3 DATA packet. `body` of `None` produces a dummy packet, which on the
     /// wire still carries a body that the receiver must ignore. The channel sequence tracks the
-    /// data sequence, which is what a first transmission looks like.
+    /// data sequence, starting at 1 for data sequence 100, which is what first transmissions of
+    /// a fresh connection look like.
     fn v3_data(sequence: u16, body: Option<&[u8]>) -> Vec<u8> {
-        v3_data_with_channel(sequence, sequence, body)
+        v3_data_with_channel(sequence, sequence.wrapping_sub(V3_INITIAL_SEQUENCE - 1), body)
     }
 
     /// Builds a v3 DATA packet with an explicit channel sequence, so a retransmission -- a fresh
@@ -1362,9 +1522,10 @@ mod tests {
             conn.has_pending_ack(),
             "a dummy still occupies a sequence number and must be acknowledged"
         );
-        // The sequence space advanced, so real data behind it is delivered immediately.
+        // The sequence space advanced, so real data behind it is delivered immediately. The
+        // dummy took no channel sequence, so this is the first chunk of the stream.
         let delivered = conn
-            .process_source_packet(&v3_data(101, Some(b"payload")))
+            .process_source_packet(&v3_data_with_channel(101, 1, Some(b"payload")))
             .expect("data");
         assert_eq!(delivered, vec![b"payload".to_vec()]);
     }
@@ -1377,24 +1538,24 @@ mod tests {
     fn retransmission_is_reordered_back_into_the_stream() {
         let mut conn = connected_v3();
         assert_eq!(
-            conn.process_source_packet(&v3_data_with_channel(223, 23, Some(b"a")))
-                .expect("223"),
+            conn.process_source_packet(&v3_data_with_channel(100, 1, Some(b"a")))
+                .expect("100"),
             vec![b"a".to_vec()]
         );
 
-        // Channel sequence 24 is lost. 25 and 26 arrive and must wait for it.
+        // Channel sequence 2 is lost. 3 and 4 arrive and must wait for it.
         assert!(conn
-            .process_source_packet(&v3_data_with_channel(224, 25, Some(b"c")))
-            .expect("224")
+            .process_source_packet(&v3_data_with_channel(101, 3, Some(b"c")))
+            .expect("101")
             .is_empty());
         assert!(conn
-            .process_source_packet(&v3_data_with_channel(225, 26, Some(b"d")))
-            .expect("225")
+            .process_source_packet(&v3_data_with_channel(102, 4, Some(b"d")))
+            .expect("102")
             .is_empty());
 
-        // The peer resends chunk 24 under a fresh data sequence number.
+        // The peer resends chunk 2 under a fresh data sequence number.
         let delivered = conn
-            .process_source_packet(&v3_data_with_channel(226, 24, Some(b"b")))
+            .process_source_packet(&v3_data_with_channel(103, 2, Some(b"b")))
             .expect("retransmit");
         assert_eq!(
             delivered,
@@ -1408,10 +1569,10 @@ mod tests {
     #[test]
     fn ack_of_acks_advances_the_window_without_touching_the_stream() {
         let mut conn = connected_v3();
-        conn.process_source_packet(&v3_data_with_channel(100, 10, Some(b"a")))
+        conn.process_source_packet(&v3_data_with_channel(100, 1, Some(b"a")))
             .expect("100");
         // 101 is a dummy that never arrives, so 102 waits behind it at the transport layer only.
-        conn.process_source_packet(&v3_data_with_channel(102, 11, Some(b"b")))
+        conn.process_source_packet(&v3_data_with_channel(102, 2, Some(b"b")))
             .expect("102");
         assert_eq!(conn.v3_expected_sequence, 101, "the window stops at the hole");
 
@@ -1419,7 +1580,7 @@ mod tests {
         assert_eq!(conn.v3_expected_sequence, 103, "the window moves past the dummy");
         assert!(
             conn.v3_channel_buffer.is_empty(),
-            "chunk 11 was already handed up in order and nothing was discarded"
+            "chunk 2 was already handed up in order and nothing was discarded"
         );
     }
 
@@ -1437,12 +1598,13 @@ mod tests {
         assert!(conn.has_pending_ack(), "a retransmit must be re-acknowledged");
     }
 
-    /// The channel sequence space is 1-based and wraps 65535 -> 1, skipping 0. Advancing with a
-    /// plain wrapping add leaves the receiver waiting for a chunk 0 that the peer never sends,
-    /// which stalls the stream for the rest of the connection while the transport stays healthy.
+    /// Windows wraps the channel sequence 65535 -> 1, skipping 0. When 1 comes in the data
+    /// sequence right after 65535, there provably was no 0 and the stream must not wait for one:
+    /// that stalls it for the rest of the connection while the transport stays healthy.
     #[test]
     fn channel_sequence_wraps_past_zero() {
         let mut conn = connected_v3();
+        conn.v3_next_channel_delivery = 65535;
         assert_eq!(
             conn.process_source_packet(&v3_data_with_channel(100, 65535, Some(b"a")))
                 .expect("65535"),
@@ -1472,29 +1634,29 @@ mod tests {
     fn retransmitted_channel_data_is_not_delivered_twice() {
         let mut conn = connected_v3();
         assert_eq!(
-            conn.process_source_packet(&v3_data_with_channel(100, 10, Some(b"a")))
+            conn.process_source_packet(&v3_data_with_channel(100, 1, Some(b"a")))
                 .expect("100"),
             vec![b"a".to_vec()]
         );
         assert_eq!(
-            conn.process_source_packet(&v3_data_with_channel(101, 11, Some(b"b")))
+            conn.process_source_packet(&v3_data_with_channel(101, 2, Some(b"b")))
                 .expect("101"),
             vec![b"b".to_vec()]
         );
 
-        // The peer never saw our ACK and resends channel sequence 11 as data sequence 102.
+        // The peer never saw our ACK and resends channel sequence 2 as data sequence 102.
         let delivered = conn
-            .process_source_packet(&v3_data_with_channel(102, 11, Some(b"b")))
+            .process_source_packet(&v3_data_with_channel(102, 2, Some(b"b")))
             .expect("retransmit");
         assert!(
             delivered.is_empty(),
-            "channel sequence 11 has already been handed up"
+            "channel sequence 2 has already been handed up"
         );
         assert!(conn.has_pending_ack(), "the retransmit is still acknowledged");
 
         // New data still flows.
         assert_eq!(
-            conn.process_source_packet(&v3_data_with_channel(103, 12, Some(b"c")))
+            conn.process_source_packet(&v3_data_with_channel(103, 3, Some(b"c")))
                 .expect("103"),
             vec![b"c".to_vec()]
         );
@@ -1530,7 +1692,6 @@ mod tests {
     fn acknowledgements_survive_sequence_wraparound() {
         let mut conn = connected_v3();
         conn.v3_next_data_sequence = 0xfffe;
-        conn.v3_sender_base = 0xfffe;
         for _ in 0..4 {
             conn.send_data(vec![0u8; 8]).expect("send");
         }
@@ -1564,6 +1725,133 @@ mod tests {
         assert_eq!(
             packet.ack_of_acks.expect("base moved").sequence_number,
             V3_INITIAL_SEQUENCE + 1
+        );
+    }
+
+    /// [MS-RDPEUDP2] 3.1.5.1.3: a lost packet is resent under a new data sequence number with
+    /// its original channel sequence. Resending the same data sequence leaves the peer unable to
+    /// tell the resend from a late duplicate.
+    #[test]
+    fn retransmission_gets_a_new_data_sequence() {
+        let mut conn = connected_v3();
+        conn.config.retransmit_timeout_ms = 0;
+        conn.send_data(b"x".to_vec()).expect("send");
+
+        let resent = conn.check_retransmits();
+        assert_eq!(resent.len(), 1);
+        let packet = V2Packet::decode_on_wire(&resent[0]).expect("decode");
+        assert_eq!(
+            packet.data_header.expect("data").data_sequence_number,
+            V3_INITIAL_SEQUENCE + 1
+        );
+        assert_eq!(packet.data_body.expect("body").channel_sequence_number, 1);
+        assert_eq!(
+            packet.ack_of_acks.expect("a resend repeats the AckOfAcks").sequence_number,
+            V3_INITIAL_SEQUENCE + 1,
+            "the abandoned data sequence is no longer awaited"
+        );
+        assert!(conn
+            .pending_packets
+            .contains_key(&PendingKey::V3(V3_INITIAL_SEQUENCE + 1)));
+        assert!(!conn
+            .pending_packets
+            .contains_key(&PendingKey::V3(V3_INITIAL_SEQUENCE)));
+    }
+
+    /// The second chunk of the stream overtaking the first must not make the receiver start the
+    /// stream at the second one and drop the first when it turns up.
+    #[test]
+    fn late_first_chunk_is_not_lost() {
+        let mut conn = connected_v3();
+        // Windows announces its sequence base in the AckOfAcks of its first DATA packets.
+        let second = crate::rdpudp_v2_packet!(
+            header = V2PacketHeader::new(rdpudp_v2_flags!(DATA | AOA), 15).unwrap(),
+            ack_of_acks = Some(crate::rdpudp_v2_ack_of_acks!(100)),
+            data_header = Some(DataHeaderPayload {
+                data_sequence_number: 101,
+            }),
+            data_body = Some(DataBodyPayload {
+                channel_sequence_number: 2,
+                data: b"b".to_vec(),
+            })
+        )
+        .encode_on_wire(crate::v2::PacketPrefixByte::TYPE_STANDARD)
+        .expect("encode");
+
+        assert!(conn.process_source_packet(&second).expect("101").is_empty());
+        assert_eq!(
+            conn.process_source_packet(&v3_data(100, Some(b"a")))
+                .expect("100"),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+    }
+
+    /// A peer may send channel sequence 0 after 65535, and it may arrive after 1. Treating the
+    /// Windows habit of skipping 0 as universal drops those bytes.
+    #[test]
+    fn channel_zero_is_delivered_when_the_peer_sends_it() {
+        let mut conn = connected_v3();
+        conn.v3_next_channel_delivery = 65535;
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(100, 65535, Some(b"f")))
+                .expect("65535"),
+            vec![b"f".to_vec()]
+        );
+        // 1 arrives with a data sequence left between it and 65535, so a 0 may still come.
+        assert!(conn
+            .process_source_packet(&v3_data_with_channel(102, 1, Some(b"a")))
+            .expect("1")
+            .is_empty());
+        assert_eq!(
+            conn.process_source_packet(&v3_data_with_channel(101, 0, Some(b"z")))
+                .expect("0"),
+            vec![b"z".to_vec(), b"a".to_vec()]
+        );
+    }
+
+    /// A packet whose chunk the stream cannot keep must stay unacknowledged so the peer resends
+    /// it. Acknowledged and dropped, it is gone for good and the stream stalls behind it.
+    #[test]
+    fn out_of_reach_chunk_is_not_acknowledged() {
+        let mut conn = connected_v3();
+        let delivered = conn
+            .process_source_packet(&v3_data_with_channel(100, 0x8000, Some(b"far")))
+            .expect("far");
+        assert!(delivered.is_empty());
+        assert!(!conn.v3_received_dseq.contains(&100));
+        assert_eq!(conn.v3_expected_sequence, 100, "the packet was not taken in");
+        assert!(conn.v3_channel_buffer.is_empty());
+    }
+
+    /// Through an outage the peer resends under new data sequence numbers and its AckOfAcks can
+    /// move thousands ahead. The receive window has to follow it.
+    #[test]
+    fn ack_of_acks_is_followed_however_far_ahead() {
+        let mut conn = connected_v3();
+        conn.process_source_packet(&v3_data(100, Some(b"a"))).expect("100");
+        conn.process_source_packet(&v3_ack_of_acks(100 + 5000)).expect("aoa");
+        assert_eq!(conn.v3_expected_sequence, 100 + 5000);
+    }
+
+    #[test]
+    fn long_runs_go_in_run_length_ack_vector_entries() {
+        let mut conn = connected_v3();
+        conn.process_source_packet(&v3_data(100, Some(b"a"))).expect("100");
+        // 101 is lost, 102..=120 arrive.
+        for seq in 102..=120 {
+            conn.process_source_packet(&v3_data(seq, Some(b"x"))).expect("data");
+        }
+        let vector = conn.build_v3_ack_vector();
+        assert_eq!(vector.base_sequence_number, 101);
+        assert_eq!(
+            vector.entries,
+            vec![
+                AckVecEntry::StateMap(0b111_1110),
+                AckVecEntry::RunLength {
+                    received: true,
+                    length: 13
+                }
+            ]
         );
     }
 
