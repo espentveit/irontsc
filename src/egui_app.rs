@@ -114,11 +114,11 @@ const SCROLL_POINTS_PER_NOTCH: f32 = 50.0;
 
 /// The connection form's window, in logical points so that a scaled display gets a dialog of
 /// the same apparent size. Narrow and short, in the shape mstsc uses.
-const DIALOG_SIZE: (f64, f64) = (420.0, 330.0);
+const DIALOG_SIZE: (f64, f64) = (440.0, 440.0);
 
 /// The same window with the options showing. mstsc grows its dialog rather than scrolling the
 /// options inside the small one, and so does this.
-const DIALOG_SIZE_OPTIONS: (f64, f64) = (470.0, 520.0);
+const DIALOG_SIZE_OPTIONS: (f64, f64) = (490.0, 580.0);
 
 /// Port the in-session MCP server prefers.
 ///
@@ -234,9 +234,26 @@ pub struct ConnectForm {
 }
 
 impl ConnectForm {
-    fn is_complete(&self) -> bool {
-        !self.server.trim().is_empty() && !self.username.trim().is_empty()
+    /// The first field still empty, with what to tell the user about it.
+    fn missing(&self) -> Option<(LogonField, &'static str)> {
+        if self.server.trim().is_empty() {
+            Some((LogonField::Computer, "Enter the name of the remote computer."))
+        } else if self.username.trim().is_empty() {
+            Some((LogonField::UserName, "Enter the user name to log on with."))
+        } else if self.password.is_empty() {
+            Some((LogonField::Password, "Enter the password for this user."))
+        } else {
+            None
+        }
     }
+}
+
+/// The logon fields the dialog can put the cursor in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogonField {
+    Computer,
+    UserName,
+    Password,
 }
 
 /// The tabs behind mstsc's Show Options. The set is ours rather than mstsc's -- it names what
@@ -275,6 +292,14 @@ impl OptionsTab {
         Self::Debug,
     ];
 
+    /// Whether this build has anything to put on the page.
+    fn available(self) -> bool {
+        match self {
+            Self::Codecs => cfg!(any(feature = "h264", feature = "video-redirection")),
+            _ => true,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
@@ -299,6 +324,8 @@ struct DialogState {
     file: Option<PathBuf>,
     /// One line under the buttons saying what the last Save or Open did.
     notice: Option<String>,
+    /// The field to put the cursor in on the next frame the dialog is free to take focus.
+    focus: Option<LogonField>,
 }
 
 impl Default for DialogState {
@@ -308,6 +335,7 @@ impl Default for DialogState {
             tab: OptionsTab::General,
             file: None,
             notice: None,
+            focus: Some(LogonField::Computer),
         }
     }
 }
@@ -554,6 +582,14 @@ impl GlutinWindowContext {
         let window_attributes = Window::default_attributes()
             .with_resizable(true)
             .with_title(title)
+            .with_window_icon(
+                winit::window::Icon::from_rgba(
+                    include_bytes!("../packaging/assets/irontsc-64.rgba").to_vec(),
+                    64,
+                    64,
+                )
+                .ok(),
+            )
             // Logical, so the dialog is the same apparent size at 100% and at 167%.
             .with_inner_size(winit::dpi::LogicalSize::new(DIALOG_SIZE.0, DIALOG_SIZE.1))
             // Stay hidden until there is something to show, to avoid a white flash.
@@ -842,6 +878,8 @@ struct SessionApp {
     mcp_error: Option<String>,
     /// Connect as soon as there is a window, skipping the dialog entirely.
     pending_autoconnect: bool,
+    /// Closing the window was asked for while connected; the session view asks first.
+    confirm_close: bool,
     /// Switch MCP mode on as soon as there is a session to switch it on for. Set by `--mcp`,
     /// for a window started to be driven as well as watched: the gear does the same thing, but
     /// something has to be there to click it.
@@ -878,6 +916,7 @@ impl SessionApp {
             #[cfg(feature = "mcp")]
             mcp_error: None,
             pending_autoconnect: false,
+            confirm_close: false,
             #[cfg(feature = "mcp")]
             pending_mcp: false,
             exiting: false,
@@ -920,6 +959,7 @@ impl SessionApp {
             .is_some_and(|position| session.desktop_rect.contains(position))
             && !over_island
             && !self.egui_using_pointer()
+            && !self.confirm_close
     }
 
     /// Everything the island paints, taken off the session before the frame borrows it.
@@ -1407,7 +1447,11 @@ impl SessionApp {
                     tracing::error!(?error, "RDP connection failed");
                     #[cfg(feature = "mcp")]
                     session.frame.set_error(format!("{error}"));
-                    disconnect = Some(Some(format!("{error}")));
+                    disconnect = Some(Some(format!(
+                        "Could not connect to {}.\n\n{}",
+                        self.form.server.trim(),
+                        describe_connect_failure(&error)
+                    )));
                     break;
                 }
                 RdpOutputEvent::Terminated(result) => {
@@ -1614,6 +1658,9 @@ impl SessionApp {
             DIALOG_SIZE
         };
 
+        // Smaller than the collapsed dialog only clips the fields; the session lifts this again.
+        window.set_min_inner_size(Some(winit::dpi::LogicalSize::new(DIALOG_SIZE.0, DIALOG_SIZE.1)));
+
         // Never most of the screen: on a small or heavily scaled display the pages scroll
         // inside the dialog instead.
         if let Some(monitor) = window.current_monitor() {
@@ -1689,6 +1736,12 @@ impl SessionApp {
     fn connect(&mut self) {
         self.connect_error = None;
 
+        if let Some((field, message)) = self.form.missing() {
+            self.connect_error = Some(message.to_owned());
+            self.dialog.focus = Some(field);
+            return;
+        }
+
         let mut config = match build_config(&self.form, &self.settings) {
             Ok(config) => config,
             Err(error) => {
@@ -1754,6 +1807,7 @@ impl SessionApp {
                 let _ = window.request_inner_size(session_size);
             }
             window.set_title(&format!("{} - IronTSC", self.form.server));
+            window.set_min_inner_size(None::<winit::dpi::Size>);
         }
         self.fullscreen = fullscreen;
 
@@ -1848,6 +1902,8 @@ impl SessionApp {
         }
 
         self.connect_error = message;
+        self.confirm_close = false;
+        self.dialog.focus = Some(LogonField::Computer);
         self.island = Island::default();
 
         if let Some(gl_window) = self.gl_window.as_ref() {
@@ -1941,6 +1997,7 @@ impl SessionApp {
             .round()
             .max(1.0) as u32;
         let island_view = self.island_view(scale_percent);
+        let confirm_close = self.confirm_close.then(|| self.form.server.trim().to_owned());
 
         let mut form = self.form.clone();
         let mut settings = self.settings.clone();
@@ -1979,6 +2036,10 @@ impl SessionApp {
                     if let (Some(position), Some(view)) = (island_position, island_view.as_ref()) {
                         island_size = show_island(ctx, position, view, &mut actions);
                     }
+                }
+
+                if let Some(server) = confirm_close.as_deref() {
+                    show_close_modal(ctx, server, &mut actions);
                 }
             } else {
                 show_connect_dialog(
@@ -2070,6 +2131,14 @@ impl SessionApp {
             }
         }
 
+        if actions.dismiss_error {
+            self.connect_error = None;
+        }
+
+        if actions.cancel_close {
+            self.confirm_close = false;
+        }
+
         if actions.toggle_options {
             self.dialog.options_open = !self.dialog.options_open;
             self.resize_dialog_window();
@@ -2139,6 +2208,8 @@ struct FrameActions {
     minimize: bool,
     island_dragged: Option<f32>,
     toggle_options: bool,
+    dismiss_error: bool,
+    cancel_close: bool,
     save_settings: bool,
     save_settings_as: bool,
     open_settings: bool,
@@ -2179,6 +2250,144 @@ struct McpView {
     error: Option<String>,
 }
 
+/// The island's controls, drawn as strokes rather than glyphs: egui's bundled fonts have no
+/// pin, fullscreen or close symbols, and text labels in their place read as a row of words.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IslandIcon {
+    Keyboard,
+    Pin,
+    Minimize,
+    Fullscreen,
+    ExitFullscreen,
+    Disconnect,
+}
+
+const ISLAND_BUTTON: egui::Vec2 = egui::vec2(32.0, 28.0);
+
+/// One square island button: a plate under the pointer, a tint while `on`, and the icon.
+fn island_button(ui: &mut egui::Ui, icon: IslandIcon, on: bool, tip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(ISLAND_BUTTON, egui::Sense::click());
+    let painter = ui.painter_at(rect.expand(1.0));
+    let close = icon == IslandIcon::Disconnect;
+
+    let plate = if response.is_pointer_button_down_on() {
+        if close {
+            egui::Color32::from_rgb(0xA3, 0x26, 0x1B)
+        } else {
+            egui::Color32::from_white_alpha(58)
+        }
+    } else if response.hovered() {
+        if close {
+            egui::Color32::from_rgb(0xC4, 0x2B, 0x1C)
+        } else {
+            egui::Color32::from_white_alpha(38)
+        }
+    } else if on {
+        ACCENT.gamma_multiply(0.55)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    painter.rect_filled(rect, 8.0, plate);
+
+    let colour = if on || response.hovered() {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_rgb(214, 216, 224)
+    };
+    paint_island_icon(&painter, rect.center(), icon, on, egui::Stroke::new(1.6, colour));
+
+    response.on_hover_text(tip)
+}
+
+/// The icons on a 14-point grid around `c`, all in the same stroke so the row reads as a set.
+fn paint_island_icon(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    icon: IslandIcon,
+    on: bool,
+    stroke: egui::Stroke,
+) {
+    let p = |x: f32, y: f32| c + egui::vec2(x, y);
+    let line = |a: egui::Pos2, b: egui::Pos2| painter.line_segment([a, b], stroke);
+
+    match icon {
+        IslandIcon::Minimize => {
+            line(p(-6.0, 0.5), p(6.0, 0.5));
+        }
+        IslandIcon::Fullscreen | IslandIcon::ExitFullscreen => {
+            // Four corner brackets: pointing out to grow, in to shrink back.
+            let (corner, arm) = if icon == IslandIcon::Fullscreen {
+                (6.0, -3.5)
+            } else {
+                (2.5, 3.5)
+            };
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let at = p(sx * corner, sy * corner);
+                painter.add(egui::Shape::line(
+                    vec![
+                        at + egui::vec2(0.0, sy * arm),
+                        at,
+                        at + egui::vec2(sx * arm, 0.0),
+                    ],
+                    stroke,
+                ));
+            }
+        }
+        IslandIcon::Disconnect => {
+            line(p(-5.5, -5.5), p(5.5, 5.5));
+            line(p(5.5, -5.5), p(-5.5, 5.5));
+        }
+        IslandIcon::Pin => {
+            // A pushpin: cap, body, flared base and the needle.
+            let body = vec![p(-2.5, -6.0), p(2.5, -6.0), p(3.5, -1.0), p(-3.5, -1.0)];
+            if on {
+                painter.add(egui::Shape::convex_polygon(body.clone(), stroke.color, stroke));
+            } else {
+                painter.add(egui::Shape::closed_line(body, stroke));
+            }
+            line(p(-5.5, -1.0), p(5.5, -1.0));
+            line(p(0.0, -1.0), p(0.0, 6.5));
+        }
+        IslandIcon::Keyboard => {
+            let outline = egui::Rect::from_center_size(c, egui::vec2(15.0, 10.0));
+            painter.rect_stroke(outline, 2.0, stroke, egui::StrokeKind::Middle);
+            for row in [-2.0, 0.5] {
+                for column in [-4.5, -1.5, 1.5, 4.5] {
+                    painter.circle_filled(p(column, row), 0.9, stroke.color);
+                }
+            }
+            line(p(-3.0, 3.0), p(3.0, 3.0));
+        }
+    }
+}
+
+/// The drag handle: two columns of dots.
+fn island_grip(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 28.0), egui::Sense::drag());
+    let colour = if response.hovered() || response.dragged() {
+        egui::Color32::from_rgb(214, 216, 224)
+    } else {
+        egui::Color32::from_rgb(120, 122, 132)
+    };
+    for x in [-2.5, 2.5] {
+        for y in [-5.0, 0.0, 5.0] {
+            ui.painter()
+                .circle_filled(rect.center() + egui::vec2(x, y), 1.4, colour);
+        }
+    }
+    response
+}
+
+/// A short vertical rule between groups of island controls.
+fn island_divider(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 28.0), egui::Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.center().y - 8.0..=rect.center().y + 8.0,
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(40)),
+    );
+}
+
 /// Draws the floating control island and reports its size for next frame's positioning.
 ///
 /// Deliberately flat: a drop shadow here has to be recomposited against whatever the remote
@@ -2202,7 +2411,7 @@ fn show_island(
                     egui::Color32::from_rgba_unmultiplied(255, 255, 255, 56),
                 ))
                 .corner_radius(14.0)
-                .inner_margin(egui::Margin::symmetric(10, 5))
+                .inner_margin(egui::Margin::symmetric(8, 4))
                 .show(ui, |ui| {
                     // The island paints its own dark background, so its contents must not
                     // inherit the ambient theme's text colour: under a light theme that is dark
@@ -2233,27 +2442,22 @@ fn show_island(
                         widget.corner_radius = egui::CornerRadius::same(8);
                     }
 
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     ui.horizontal(|ui| {
                         // An explicit grip, so dragging the island can never be confused with
-                        // clicking one of its buttons. Labels here are plain text rather than
-                        // symbols: egui's bundled fonts do not cover glyphs like U+2261 or
-                        // U+2715, which simply render as nothing.
-                        let grip = ui.add(
-                            egui::Label::new(egui::RichText::new("::").weak())
-                                .sense(egui::Sense::drag()),
-                        );
+                        // clicking one of its buttons.
+                        let grip = island_grip(ui);
                         if grip.dragged() {
                             actions.island_dragged = Some(grip.drag_delta().x);
                         }
-                        if grip.hovered() {
+                        if grip.hovered() || grip.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                         }
-
-                        ui.separator();
 
                         // The machine you are on, named the way mstsc's connection bar names
                         // it, and a second place to drag from: mstsc's bar is moved by its
                         // middle, and the grip alone is a very small target.
+                        ui.add_space(4.0);
                         let name = ui.add(
                             egui::Label::new(egui::RichText::new(&view.server).strong())
                                 .selectable(false)
@@ -2272,35 +2476,30 @@ fn show_island(
                         if !view.connected {
                             ui.label(egui::RichText::new(&view.status).small().weak());
                         }
+                        ui.add_space(6.0);
+                        island_divider(ui);
 
-                        ui.separator();
-
-                        let capture_label = if view.capture_enabled {
-                            egui::RichText::new("Keys on").strong()
-                        } else {
-                            egui::RichText::new("Keys off").weak()
-                        };
-                        let capture_button = ui
-                            .add_enabled(view.capture_available, egui::Button::new(capture_label));
-                        if capture_button.clicked() {
-                            actions.toggle_capture = true;
+                        // Left out, not greyed out, where this platform has no capture at all.
+                        if view.capture_available {
+                            let tip = format!(
+                                "{} system shortcuts (Alt+Tab, Super, ...) to the remote \
+                                 desktop\n{}",
+                                if view.capture_enabled { "Sending" } else { "Send" },
+                                view.capture_status,
+                            );
+                            if island_button(ui, IslandIcon::Keyboard, view.capture_enabled, &tip)
+                                .clicked()
+                            {
+                                actions.toggle_capture = true;
+                            }
                         }
-                        capture_button.on_hover_text(format!(
-                            "Send Alt+Tab, Super and other system shortcuts to the remote \
-                             desktop\n{}",
-                            view.capture_status,
-                        ));
 
-                        let pin_label = if view.pinned {
-                            egui::RichText::new("Pinned").strong()
+                        let pin_tip = if view.pinned {
+                            "Pinned: the controls stay visible in fullscreen"
                         } else {
-                            egui::RichText::new("Pin").weak()
+                            "Keep the controls visible in fullscreen"
                         };
-                        if ui
-                            .add(egui::Button::new(pin_label))
-                            .on_hover_text("Keep the controls visible in fullscreen")
-                            .clicked()
-                        {
+                        if island_button(ui, IslandIcon::Pin, view.pinned, pin_tip).clicked() {
                             actions.toggle_pin = true;
                         }
 
@@ -2309,33 +2508,22 @@ fn show_island(
                         #[cfg(feature = "mcp")]
                         show_gear_button(ui, view, actions);
 
+                        island_divider(ui);
+
                         // Window controls sit at the right-hand end, in the order mstsc uses:
-                        // minimise, restore/maximise, close. The island sizes itself to its
-                        // content, so being last in the row is what puts them on the right.
-                        if ui
-                            .add(egui::Button::new("\u{2013}"))
-                            .on_hover_text("Minimise")
-                            .clicked()
-                        {
+                        // minimise, restore/maximise, close.
+                        if island_button(ui, IslandIcon::Minimize, false, "Minimise").clicked() {
                             actions.minimize = true;
                         }
-
-                        // Text rather than a glyph: U+2921/U+2922 are outside egui's bundled
-                        // fonts and draw as nothing.
-                        let fullscreen_label = if view.fullscreen { "Restore" } else { "Full" };
-                        if ui
-                            .add(egui::Button::new(fullscreen_label))
-                            .on_hover_text("Toggle fullscreen")
-                            .clicked()
-                        {
+                        let (icon, tip) = if view.fullscreen {
+                            (IslandIcon::ExitFullscreen, "Leave fullscreen")
+                        } else {
+                            (IslandIcon::Fullscreen, "Fullscreen")
+                        };
+                        if island_button(ui, icon, false, tip).clicked() {
                             actions.toggle_fullscreen = true;
                         }
-
-                        if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new("X").color(egui::Color32::LIGHT_RED),
-                            ))
-                            .on_hover_text("Disconnect")
+                        if island_button(ui, IslandIcon::Disconnect, false, "Disconnect")
                             .clicked()
                         {
                             actions.disconnect = true;
@@ -2540,6 +2728,53 @@ fn show_connection_details(ui: &mut egui::Ui, view: &IslandView) {
         });
 }
 
+/// The accent the dialog and the icon share.
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x2F, 0x6F, 0xE4);
+
+/// Roomier than egui's defaults, which are sized for dense tool panels rather than a dialog:
+/// larger text, taller controls, softer corners and an accent taken from the icon. Applied
+/// to both themes, so following the system's light or dark mode keeps it.
+fn apply_style(ctx: &egui::Context) {
+    use egui::{FontId, TextStyle};
+
+    ctx.all_styles_mut(|style| {
+        style.text_styles = [
+            (TextStyle::Heading, FontId::proportional(20.0)),
+            (TextStyle::Body, FontId::proportional(14.0)),
+            (TextStyle::Button, FontId::proportional(14.0)),
+            (TextStyle::Monospace, FontId::monospace(13.0)),
+            (TextStyle::Small, FontId::proportional(11.5)),
+        ]
+        .into();
+
+        let spacing = &mut style.spacing;
+        spacing.item_spacing = egui::vec2(8.0, 8.0);
+        spacing.button_padding = egui::vec2(12.0, 5.0);
+        spacing.interact_size = egui::vec2(40.0, 26.0);
+        spacing.icon_width = 16.0;
+        spacing.icon_width_inner = 9.0;
+        spacing.icon_spacing = 7.0;
+        spacing.combo_height = 300.0;
+        spacing.window_margin = egui::Margin::same(16);
+
+        let visuals = &mut style.visuals;
+        let radius = egui::CornerRadius::same(6);
+        for widget in [
+            &mut visuals.widgets.noninteractive,
+            &mut visuals.widgets.inactive,
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+            &mut visuals.widgets.open,
+        ] {
+            widget.corner_radius = radius;
+        }
+        visuals.window_corner_radius = egui::CornerRadius::same(12);
+        visuals.selection.bg_fill = ACCENT;
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+        visuals.hyperlink_color = ACCENT;
+    });
+}
+
 /// The connection dialog, in the shape mstsc uses: a small window with the logon fields, and
 /// Show Options to grow it into tabs. The tab set is ours -- it names what this client has --
 /// but the arrangement, the group boxes and the Save/Save As/Open row are mstsc's.
@@ -2556,14 +2791,23 @@ fn show_connect_dialog(
     error: Option<&str>,
     actions: &mut FrameActions,
 ) {
-    let ready = form.is_complete();
+    if let Some(error) = error {
+        show_error_modal(ctx, error, actions);
+    }
+    // Only once the modal is gone: focus asked for under it would be taken straight back.
+    let focus = if error.is_none() {
+        dialog.focus.take()
+    } else {
+        None
+    };
 
-    egui::CentralPanel::default().show(ctx, |ui| {
+    let panel = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 16));
+    egui::CentralPanel::default().frame(panel).show(ctx, |ui| {
         // The action row sits on the bottom edge but is laid out after the pages, so Tab walks
         // the logon fields before it reaches the buttons. Its height from the last frame is
         // what the pages leave free for it.
         let bar_height_id = ui.id().with("irontsc-connect-actions-height");
-        let bar_height = ui.data(|data| data.get_temp::<f32>(bar_height_id)).unwrap_or(40.0);
+        let bar_height = ui.data(|data| data.get_temp::<f32>(bar_height_id)).unwrap_or(46.0);
         let full = ui.available_rect_before_wrap();
         let pages = egui::Rect::from_min_max(
             full.min,
@@ -2579,7 +2823,7 @@ fn show_connect_dialog(
 
             if dialog.options_open {
                 ui.horizontal(|ui| {
-                    for tab in OptionsTab::ALL {
+                    for tab in OptionsTab::ALL.into_iter().filter(|tab| tab.available()) {
                         ui.selectable_value(&mut dialog.tab, tab, tab.label());
                     }
                 });
@@ -2599,7 +2843,7 @@ fn show_connect_dialog(
 
                     match page {
                         OptionsTab::General => {
-                            submit = show_logon_settings(ui, form, settings);
+                            submit = show_logon_settings(ui, form, settings, focus);
                             if dialog.options_open {
                                 show_connection_settings(ui, dialog, actions);
                             }
@@ -2635,26 +2879,22 @@ fn show_connect_dialog(
                         actions.toggle_options = true;
                     }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(ready, egui::Button::new("Connect"))
-                            .clicked()
-                        {
-                            actions.connect = true;
-                        }
-                        if ui.button("Quit").clicked() {
-                            actions.quit = true;
-                        }
-                    });
+                    // Right-aligned but laid out left to right, so Tab reaches Quit before
+                    // Connect, the order they are read in.
+                    let button = egui::vec2(72.0, 0.0);
+                    let row = button.x * 2.0 + ui.spacing().item_spacing.x;
+                    ui.add_space((ui.available_width() - row).max(0.0));
+                    if ui.add(egui::Button::new("Quit").min_size(button)).clicked() {
+                        actions.quit = true;
+                    }
+                    if ui.add(egui::Button::new("Connect").min_size(button)).clicked() {
+                        actions.connect = true;
+                    }
                 });
 
                 if let Some(notice) = dialog.notice.as_deref() {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new(notice).small().weak());
-                }
-                if let Some(error) = error {
-                    ui.add_space(4.0);
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
 
                 ui.add_space(6.0);
@@ -2667,21 +2907,153 @@ fn show_connect_dialog(
             ui.ctx().request_repaint();
         }
 
-        if submit && ready {
+        if submit {
             actions.connect = true;
         }
     });
+}
+
+/// The modals' card: the popup look with room to breathe.
+fn modal_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::popup(&ctx.style())
+        .inner_margin(egui::Margin::symmetric(26, 22))
+        .corner_radius(12.0)
+}
+
+/// Closing the window while connected: disconnect and quit, or stay.
+fn show_close_modal(ctx: &egui::Context, server: &str, actions: &mut FrameActions) {
+    let modal = egui::Modal::new(egui::Id::new("irontsc-confirm-close"))
+        .frame(modal_frame(ctx))
+        .show(ctx, |ui| {
+        ui.set_width(340.0);
+        ui.heading("Disconnect?");
+        ui.add_space(6.0);
+        ui.label(format!(
+            "Closing IronTSC ends the remote session on {server}. Programs running there keep \
+             running."
+        ));
+        ui.add_space(14.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let button = egui::vec2(88.0, 0.0);
+            let cancel = ui.add(egui::Button::new("Cancel").min_size(button));
+            let disconnect = ui.add(
+                egui::Button::new(egui::RichText::new("Disconnect").color(egui::Color32::WHITE))
+                    .fill(ACCENT)
+                    .min_size(button),
+            );
+            // The safe answer has the keyboard: Enter on a reflex keeps the session.
+            cancel.request_focus();
+            if cancel.clicked() {
+                actions.cancel_close = true;
+            }
+            if disconnect.clicked() {
+                actions.quit = true;
+            }
+        });
+    });
+    if modal.should_close() {
+        actions.cancel_close = true;
+    }
+}
+
+/// A failed connect in words the user can act on.
+///
+/// The connector's own text names only the stage that failed ("[TCP connect] custom error");
+/// what went wrong is in the error it carries, which for anything on the network is the
+/// operating system's own sentence.
+fn describe_connect_failure(error: &ironrdp::connector::ConnectorError) -> String {
+    use ironrdp::connector::ConnectorErrorKind;
+    use std::io::ErrorKind;
+
+    // The logon failures CredSSP reports by NTSTATUS, which say more than its description.
+    if let ConnectorErrorKind::Credssp(credssp) = error.kind() {
+        let known = match credssp.nstatus.map(|status| status.0) {
+            Some(0xC000_006D) => Some("The user name or password is incorrect."),
+            Some(0xC000_0071) => Some("The password for this account has expired."),
+            Some(0xC000_0072) => Some("This account is disabled."),
+            Some(0xC000_0193) => Some("This account has expired."),
+            Some(0xC000_0224) => Some("The password must be changed before logging on."),
+            Some(0xC000_0234) => Some("This account is locked out."),
+            _ => None,
+        };
+        if let Some(message) = known {
+            return message.to_owned();
+        }
+    }
+
+    let mut cause: &(dyn std::error::Error + 'static) = error;
+    while let Some(next) = cause.source() {
+        cause = next;
+    }
+
+    if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+        match io.kind() {
+            ErrorKind::ConnectionRefused => {
+                return "The computer refused the connection. Check that Remote Desktop is \
+                        enabled on it and that the port is right."
+                    .to_owned();
+            }
+            ErrorKind::TimedOut => {
+                return "The computer did not answer. Check the name and that it is on and \
+                        reachable from here."
+                    .to_owned();
+            }
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
+                return "The computer closed the connection.".to_owned();
+            }
+            _ => {}
+        }
+    }
+
+    if std::ptr::addr_eq(cause, error as &dyn std::error::Error) {
+        return error.to_string();
+    }
+    // "No such host is known. (os error 11001)": the code means nothing to the reader.
+    let text = cause.to_string();
+    match text.rfind(" (os error ") {
+        Some(at) => text[..at].to_owned(),
+        None => text,
+    }
+}
+
+/// Why the last Connect did not get anywhere, over the dialog until it is acknowledged.
+fn show_error_modal(ctx: &egui::Context, error: &str, actions: &mut FrameActions) {
+    let modal = egui::Modal::new(egui::Id::new("irontsc-connect-error"))
+        .frame(modal_frame(ctx))
+        .show(ctx, |ui| {
+        ui.set_width(320.0);
+        ui.heading("Remote Desktop Connection");
+        ui.add_space(8.0);
+        ui.label(error);
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let ok = ui.add(egui::Button::new("OK").min_size(egui::vec2(72.0, 0.0)));
+            ok.request_focus();
+            if ok.clicked() {
+                actions.dismiss_error = true;
+            }
+        });
+    });
+    // Escape and a click outside close it too; Enter lands on OK, which has focus.
+    if modal.should_close() {
+        actions.dismiss_error = true;
+    }
 }
 
 /// A titled box, standing in for the group boxes mstsc builds its tabs from.
 fn settings_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.label(egui::RichText::new(title).strong());
     ui.add_space(2.0);
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        add(ui);
-    });
-    ui.add_space(10.0);
+    egui::Frame::NONE
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+    ui.add_space(14.0);
 }
 
 /// A checkbox with the explanatory line GTK's settings put under every switch.
@@ -2689,11 +3061,11 @@ fn switch_row(ui: &mut egui::Ui, value: &mut bool, label: &str, description: &st
     ui.checkbox(value, label);
     // Hand-indented rather than `Ui::indent`, which draws a vertical rule down the margin and
     // turns a page of these into a ladder.
-    ui.horizontal(|ui| {
-        ui.add_space(22.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
         ui.label(egui::RichText::new(description).small().weak());
     });
-    ui.add_space(6.0);
+    ui.add_space(4.0);
 }
 
 /// The logon fields. Returns true when Enter was pressed in one of them.
@@ -2701,6 +3073,7 @@ fn show_logon_settings(
     ui: &mut egui::Ui,
     form: &mut ConnectForm,
     settings: &mut RdpSettings,
+    focus: Option<LogonField>,
 ) -> bool {
     let mut submit = false;
 
@@ -2710,20 +3083,25 @@ fn show_logon_settings(
 
         egui::Grid::new("irontsc-connect-grid")
             .num_columns(2)
-            .spacing([8.0, 8.0])
+            .spacing([12.0, 8.0])
             .show(ui, |ui| {
                 let mut field = |ui: &mut egui::Ui,
                                  label: &str,
                                  value: &mut String,
                                  hint: &str,
-                                 password: bool| {
+                                 password: bool,
+                                 which: Option<LogonField>| {
                     ui.label(label);
                     let response = ui.add(
                         egui::TextEdit::singleline(value)
                             .hint_text(hint)
                             .password(password)
+                            .margin(egui::vec2(7.0, 4.0))
                             .desired_width(f32::INFINITY),
                     );
+                    if which.is_some() && which == focus {
+                        response.request_focus();
+                    }
                     submit |=
                         response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.end_row();
@@ -2735,10 +3113,25 @@ fn show_logon_settings(
                     &mut form.server,
                     "host or host:port",
                     false,
+                    Some(LogonField::Computer),
                 );
-                field(ui, "User name:", &mut form.username, "", false);
-                field(ui, "Password:", &mut form.password, "", true);
-                field(ui, "Domain:", &mut form.domain, "optional", false);
+                field(
+                    ui,
+                    "User name:",
+                    &mut form.username,
+                    "",
+                    false,
+                    Some(LogonField::UserName),
+                );
+                field(
+                    ui,
+                    "Password:",
+                    &mut form.password,
+                    "",
+                    true,
+                    Some(LogonField::Password),
+                );
+                field(ui, "Domain:", &mut form.domain, "optional", false, None);
             });
 
         ui.add_space(6.0);
@@ -2843,7 +3236,10 @@ fn show_connection_settings(ui: &mut egui::Ui, dialog: &DialogState, actions: &m
             .file
             .as_ref()
             .map(|file| file.display().to_string())
-            .unwrap_or_else(|| format!("the default {DEFAULT_RDP_FILE}"));
+            .or_else(|| {
+                RdpSettings::config_dir().map(|dir| dir.join(DEFAULT_RDP_FILE).display().to_string())
+            })
+            .unwrap_or_else(|| DEFAULT_RDP_FILE.to_owned());
         ui.label(
             egui::RichText::new(format!("Save writes to {file}"))
                 .small()
@@ -2993,14 +3389,15 @@ fn show_codec_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
 
 fn show_network_settings(ui: &mut egui::Ui, settings: &mut RdpSettings) {
     settings_group(ui, "UDP transport", |ui| {
-        let mut disable_udp = settings.get_disable_udp();
+        let mut use_udp = !settings.get_disable_udp();
         switch_row(
             ui,
-            &mut disable_udp,
-            "Disable UDP",
-            "Force TCP-only mode (disable UDP multitransport for graphics)",
+            &mut use_udp,
+            "Use UDP when available",
+            "Carry graphics over UDP multitransport when the server offers it; off keeps \
+             everything on TCP",
         );
-        settings.set_disable_udp(disable_udp);
+        settings.set_disable_udp(!use_udp);
     });
 }
 
@@ -3035,6 +3432,7 @@ impl ApplicationHandler<UserEvent> for SessionApp {
 
         let gl = Arc::new(gl_window.load_gl());
         let egui_glow = EguiGlow::new(event_loop, Arc::clone(&gl), None, None, true);
+        apply_style(&egui_glow.egui_ctx);
 
         // Nothing else drives the clock, so egui's repaint requests have to wake the loop.
         let repaint_proxy = Arc::clone(&self.proxy);
@@ -3072,6 +3470,16 @@ impl ApplicationHandler<UserEvent> for SessionApp {
         event: WindowEvent,
     ) {
         match &event {
+            // Closing a connected window ends someone's session, so it asks first, the way
+            // mstsc does. Alt+F4 lands here with Alt still down on the remote side.
+            WindowEvent::CloseRequested if self.session.is_some() => {
+                if let Some(session) = self.session.as_mut() {
+                    session.release_all_input("asking before closing the window");
+                }
+                self.confirm_close = true;
+                self.request_redraw();
+                return;
+            }
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 self.shutdown();
                 event_loop.exit();
@@ -3126,13 +3534,13 @@ impl ApplicationHandler<UserEvent> for SessionApp {
                 // In a session the keys belong to the remote desktop and egui never sees them:
                 // the island has no text entry, and letting egui consume Tab or Space would
                 // silently swallow them. On the connection dialog it is the other way round.
-                if self.session.is_some() {
+                if self.session.is_some() && !self.confirm_close {
                     self.on_keyboard_input(key_event, *is_synthetic);
                     return;
                 }
             }
             WindowEvent::ModifiersChanged(_) => {
-                if self.session.is_some() {
+                if self.session.is_some() && !self.confirm_close {
                     // Modifiers reach the session as ordinary physical keys.
                     return;
                 }

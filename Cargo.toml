@@ -300,6 +300,10 @@ x11-dl = "2.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 
+# Embeds the icon in irontsc.exe; see build.rs.
+[build-dependencies]
+embed-resource = "3"
+
 # Drives the MCP server, so it only exists when that is built.
 [[test]]
 name = "mcp_http"
