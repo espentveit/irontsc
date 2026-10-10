@@ -2364,12 +2364,16 @@ fn show_gear_menu_contents(
             }
         });
         // Wrapped and selectable: it is long, and reading it off the screen is the fallback
-        // when the clipboard is going somewhere else.
-        ui.add(
-            egui::Label::new(egui::RichText::new(url).small().monospace())
-                .wrap()
-                .selectable(true),
-        );
+        // when the clipboard is going somewhere else. Laid out left-aligned rather than in the
+        // menu's justified layout: a wrapped row is stretched to the full width, and a URL has
+        // no spaces to take that up, so it would go between every letter instead.
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(url).small())
+                    .wrap()
+                    .selectable(true),
+            );
+        });
     }
 
     if let Some(command) = view.mcp.command.as_ref() {
