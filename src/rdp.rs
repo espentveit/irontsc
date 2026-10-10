@@ -1501,7 +1501,10 @@ impl ArboardClipboardBackend {
                     // fourth round -- a copied screenshot reaches the session about two seconds
                     // later, and a clipboard holding one is not read over and over in between.
                     round = round.wrapping_add(1);
-                    let mut state = ClipboardState::from_clipboard_with_image(cb, round % 4 == 1);
+                    let mut state = {
+                        let _access = clipboard_access();
+                        ClipboardState::from_clipboard_with_image(cb, round % 4 == 1)
+                    };
 
                     let should_advertise = {
                         let mut guard = clipboard_state.lock().unwrap();
@@ -1542,7 +1545,10 @@ impl ArboardClipboardBackend {
             }
         };
 
-        let state = ClipboardState::from_clipboard(&mut clipboard);
+        let state = {
+            let _access = clipboard_access();
+            ClipboardState::from_clipboard(&mut clipboard)
+        };
 
         {
             let mut guard = self.clipboard_state.lock().unwrap();
@@ -1560,6 +1566,7 @@ impl ArboardClipboardBackend {
     /// Runs `body` against the session's one clipboard, opening it on first use.
     fn with_clipboard<T>(&self, body: impl FnOnce(&mut Clipboard) -> T) -> Option<T> {
         let mut held = self.clipboard.lock().unwrap();
+        let _access = clipboard_access();
         if held.is_none() {
             match Clipboard::new() {
                 Ok(clipboard) => *held = Some(clipboard),
@@ -1688,6 +1695,18 @@ impl Drop for ArboardClipboardBackend {
             let _ = handle.join();
         }
     }
+}
+
+/// One clipboard user at a time across the whole process.
+///
+/// The watcher, the first advertisement and the server's requests each hold an `arboard`
+/// handle of their own, on different threads. On Windows the clipboard is opened for the
+/// process rather than the thread, so two of them reading at once both get in, and Windows'
+/// own handling of the data (`GetClipboardData` -- Web Threat Defense hooks it) then corrupts
+/// the heap: a crash on connect, depending on timing and on what was copied.
+fn clipboard_access() -> std::sync::MutexGuard<'static, ()> {
+    static ACCESS: Mutex<()> = Mutex::new(());
+    ACCESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl CliprdrBackend for ArboardClipboardBackend {
