@@ -118,12 +118,13 @@ const DIALOG_SIZE: (f64, f64) = (420.0, 330.0);
 
 /// The same window with the options showing. mstsc grows its dialog rather than scrolling the
 /// options inside the small one, and so does this.
-const DIALOG_SIZE_OPTIONS: (f64, f64) = (470.0, 620.0);
+const DIALOG_SIZE_OPTIONS: (f64, f64) = (470.0, 520.0);
 
 /// Port the in-session MCP server prefers.
 ///
 /// Fixed rather than ephemeral so that a client configured once keeps working; if it is busy,
 /// the server falls back to any free port and the gear menu shows the URL it actually got.
+#[cfg(feature = "mcp")]
 const MCP_DEFAULT_PORT: u16 = 7444;
 
 /// The pointer has to settle inside this band at the top of the window before the island is
@@ -167,9 +168,11 @@ struct SessionEventSender {
     proxy: Arc<Mutex<EventLoopProxy<UserEvent>>>,
     wakeup_pending: Arc<AtomicBool>,
     /// Set while MCP mode is on, and only then: a session nobody is driving pays nothing.
+    #[cfg(feature = "mcp")]
     mirror: Arc<Mutex<Option<Arc<crate::agent::SharedFrame>>>>,
 }
 
+#[cfg(feature = "mcp")]
 impl SessionEventSender {
     /// Starts mirroring frames for an agent, from this side of the channel.
     fn mirror_into(&self, frame: Arc<crate::agent::SharedFrame>) {
@@ -188,6 +191,7 @@ impl SessionEventSender {
 
 impl RdpEventSender for SessionEventSender {
     fn send_event(&self, event: RdpOutputEvent) -> Result<(), ()> {
+        #[cfg(feature = "mcp")]
         if let RdpOutputEvent::Image {
             buffer,
             width,
@@ -244,11 +248,13 @@ enum OptionsTab {
     Resources,
     Codecs,
     Network,
+    #[cfg(feature = "mcp")]
     Agent,
     Debug,
 }
 
 impl OptionsTab {
+    #[cfg(feature = "mcp")]
     const ALL: [Self; 7] = [
         Self::General,
         Self::Display,
@@ -259,6 +265,16 @@ impl OptionsTab {
         Self::Debug,
     ];
 
+    #[cfg(not(feature = "mcp"))]
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Display,
+        Self::Resources,
+        Self::Codecs,
+        Self::Network,
+        Self::Debug,
+    ];
+
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
@@ -266,6 +282,7 @@ impl OptionsTab {
             Self::Resources => "Resources",
             Self::Codecs => "Codecs",
             Self::Network => "Network",
+            #[cfg(feature = "mcp")]
             Self::Agent => "MCP",
             Self::Debug => "Debug",
         }
@@ -308,8 +325,10 @@ struct Session {
     /// beside it already copies the same damage rectangle, so this costs one more memcpy of
     /// whatever changed -- and it means switching MCP mode on finds the desktop already
     /// there, instead of waiting for a repaint that an idle desktop is never going to send.
+    #[cfg(feature = "mcp")]
     frame: Arc<crate::agent::SharedFrame>,
     /// The loopback MCP server, while MCP mode is switched on.
+    #[cfg(feature = "mcp")]
     mcp: Option<McpBridge>,
 
     /// The remote desktop, living in one GPU texture that is updated in place.
@@ -410,7 +429,10 @@ impl Session {
         self.shutting_down = true;
         // Before the input channel closes, so a chord the agent was holding is let go of on
         // the server rather than left down.
-        self.mcp = None;
+        #[cfg(feature = "mcp")]
+        {
+            self.mcp = None;
+        }
         self.release_all_input("session is closing");
         let _ = self.input_sender.send(RdpInputEvent::Close);
     }
@@ -421,6 +443,7 @@ impl Session {
 /// Everything here is dropped together when MCP mode is switched off: the handle releases
 /// whatever the agent was holding down, and dropping the server cancels its accept loop
 /// before the runtime that carries it goes away.
+#[cfg(feature = "mcp")]
 struct McpBridge {
     session: Arc<crate::agent::AgentSession>,
     server: crate::agent::HttpServer,
@@ -434,6 +457,7 @@ struct McpBridge {
     runtime: tokio::runtime::Runtime,
 }
 
+#[cfg(feature = "mcp")]
 impl McpBridge {
     /// Starts a loopback MCP server against an existing session.
     fn start(
@@ -496,6 +520,7 @@ impl McpBridge {
     }
 }
 
+#[cfg(feature = "mcp")]
 impl Drop for McpBridge {
     fn drop(&mut self) {
         // A half-finished chord must not outlive MCP mode: the user gets the session back
@@ -813,12 +838,14 @@ struct SessionApp {
     /// A wake-up the island's reveal delay is waiting on.
     island_deadline: Option<Instant>,
     /// Why MCP mode last refused to start, shown in the gear menu.
+    #[cfg(feature = "mcp")]
     mcp_error: Option<String>,
     /// Connect as soon as there is a window, skipping the dialog entirely.
     pending_autoconnect: bool,
     /// Switch MCP mode on as soon as there is a session to switch it on for. Set by `--mcp`,
     /// for a window started to be driven as well as watched: the gear does the same thing, but
     /// something has to be there to click it.
+    #[cfg(feature = "mcp")]
     pending_mcp: bool,
     exiting: bool,
 }
@@ -848,8 +875,10 @@ impl SessionApp {
             wakeup_pending,
             repaint_delay: Duration::MAX,
             island_deadline: None,
+            #[cfg(feature = "mcp")]
             mcp_error: None,
             pending_autoconnect: false,
+            #[cfg(feature = "mcp")]
             pending_mcp: false,
             exiting: false,
         }
@@ -925,6 +954,7 @@ impl SessionApp {
                     }
                 },
             ),
+            #[cfg(feature = "mcp")]
             mcp: match session.mcp.as_ref() {
                 Some(bridge) => McpView {
                     enabled: true,
@@ -1187,6 +1217,22 @@ impl SessionApp {
         }
     }
 
+    /// Whether an agent is attached, or about to be.
+    #[cfg(feature = "mcp")]
+    fn agent_mode(&self) -> bool {
+        self.pending_mcp
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.mcp.is_some())
+    }
+
+    /// Without the `mcp` feature there is never an agent.
+    #[cfg(not(feature = "mcp"))]
+    fn agent_mode(&self) -> bool {
+        false
+    }
+
     /// Asks the server for a desktop the size of the area we are drawing into.
     ///
     /// The remote size is negotiated in *physical* pixels while the layout above is in logical
@@ -1199,11 +1245,7 @@ impl SessionApp {
         // ordinary watched session, while a connection's explicit choice applies to both.
         let connection_dpi = self.settings.get_dpi_scaling();
         let agent_dpi = self.preferences.dpi_scale;
-        let agent_mode = self.pending_mcp
-            || self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.mcp.is_some());
+        let agent_mode = self.agent_mode();
         let window_size = self
             .gl_window
             .as_ref()
@@ -1363,11 +1405,13 @@ impl SessionApp {
                 }
                 RdpOutputEvent::ConnectionFailure(error) => {
                     tracing::error!(?error, "RDP connection failed");
+                    #[cfg(feature = "mcp")]
                     session.frame.set_error(format!("{error}"));
                     disconnect = Some(Some(format!("{error}")));
                     break;
                 }
                 RdpOutputEvent::Terminated(result) => {
+                    #[cfg(feature = "mcp")]
                     session
                         .frame
                         .set_terminated("the session ended".to_owned());
@@ -1563,15 +1607,21 @@ impl SessionApp {
             return;
         };
 
-        let (width, height) = if self.dialog.options_open {
+        let window = gl_window.window();
+        let (width, mut height) = if self.dialog.options_open {
             DIALOG_SIZE_OPTIONS
         } else {
             DIALOG_SIZE
         };
 
-        let _ = gl_window
-            .window()
-            .request_inner_size(winit::dpi::LogicalSize::new(width, height));
+        // Never most of the screen: on a small or heavily scaled display the pages scroll
+        // inside the dialog instead.
+        if let Some(monitor) = window.current_monitor() {
+            let screen = monitor.size().to_logical::<f64>(monitor.scale_factor());
+            height = height.min(screen.height * 0.7);
+        }
+
+        let _ = window.request_inner_size(winit::dpi::LogicalSize::new(width, height));
     }
 
     /// Folds the form's fields into the settings, which are what gets written to a `.rdp`.
@@ -1653,7 +1703,7 @@ impl SessionApp {
         config.connector.desktop_scale_factor = effective_dpi_scale(
             f64::from(self.pixels_per_point()),
             self.settings.get_dpi_scaling(),
-            self.pending_mcp,
+            self.agent_mode(),
             self.preferences.dpi_scale,
         );
 
@@ -1673,13 +1723,16 @@ impl SessionApp {
 
         // The mirror belongs to the session and is filled by the thread that produces frames,
         // not by the window's paint loop; see `SessionEventSender`.
+#[cfg(feature = "mcp")]
         let frame = Arc::new(crate::agent::SharedFrame::new());
         let event_sender = SessionEventSender {
             sender: output_sender,
             proxy: Arc::clone(&self.proxy),
             wakeup_pending: Arc::clone(&self.wakeup_pending),
+            #[cfg(feature = "mcp")]
             mirror: Arc::default(),
         };
+        #[cfg(feature = "mcp")]
         event_sender.mirror_into(Arc::clone(&frame));
 
         let session_size = winit::dpi::PhysicalSize::new(
@@ -1715,7 +1768,9 @@ impl SessionApp {
             input_sender,
             output_receiver,
             input_database: Database::new(),
+            #[cfg(feature = "mcp")]
             frame,
+            #[cfg(feature = "mcp")]
             mcp: None,
             surface: None,
             surface_size: (0, 0),
@@ -1742,6 +1797,7 @@ impl SessionApp {
     ///
     /// Nothing here restarts anything: the agent joins the session already on screen, which is
     /// the point of doing it from the island rather than from the command line.
+    #[cfg(feature = "mcp")]
     fn toggle_mcp(&mut self) {
         let Some(session) = self.session.as_mut() else {
             return;
@@ -1992,6 +2048,7 @@ impl SessionApp {
             self.island.pinned = !self.island.pinned;
         }
 
+        #[cfg(feature = "mcp")]
         if actions.toggle_mcp {
             self.toggle_mcp();
         }
@@ -2085,6 +2142,7 @@ struct FrameActions {
     save_settings: bool,
     save_settings_as: bool,
     open_settings: bool,
+    #[cfg(feature = "mcp")]
     toggle_mcp: bool,
 }
 
@@ -2102,10 +2160,12 @@ struct IslandView {
     capture_available: bool,
     capture_enabled: bool,
     capture_status: String,
+    #[cfg(feature = "mcp")]
     mcp: McpView,
 }
 
 /// What the gear menu shows about MCP mode.
+#[cfg(feature = "mcp")]
 #[derive(Default)]
 struct McpView {
     enabled: bool,
@@ -2246,30 +2306,8 @@ fn show_island(
 
                         // Everything that is not a per-session control lives behind the gear,
                         // so the island's face stays the short row of things reached often.
-                        // A dot marks MCP mode being on from the outside, since a menu that
-                        // has to be opened to be read is no indicator at all.
-                        // Plain text rather than a gear glyph: egui's bundled fonts do not
-                        // cover U+2699 any more than they cover the others avoided above, and
-                        // a button that draws as nothing is worse than a blunt one. When MCP
-                        // mode is on the button says so, which is the indicator.
-                        let gear_label = if view.mcp.enabled {
-                            egui::RichText::new("MCP")
-                                .strong()
-                                .color(egui::Color32::from_rgb(126, 208, 255))
-                        } else {
-                            egui::RichText::new("...").weak()
-                        };
-                        ui.menu_button(gear_label, |ui| {
-                            show_gear_menu(ui, view, actions);
-                        })
-                        .response
-                        .on_hover_text(if view.mcp.enabled {
-                            "Settings \u{2014} MCP mode is on"
-                        } else {
-                            "Settings"
-                        });
-
-                        ui.separator();
+                        #[cfg(feature = "mcp")]
+                        show_gear_button(ui, view, actions);
 
                         // Window controls sit at the right-hand end, in the order mstsc uses:
                         // minimise, restore/maximise, close. The island sizes itself to its
@@ -2309,10 +2347,40 @@ fn show_island(
     response.response.rect.size()
 }
 
+/// The gear on the island, which is where MCP mode is switched on.
+#[cfg(feature = "mcp")]
+fn show_gear_button(ui: &mut egui::Ui, view: &IslandView, actions: &mut FrameActions) {
+    // A dot marks MCP mode being on from the outside, since a menu that
+    // has to be opened to be read is no indicator at all.
+    // Plain text rather than a gear glyph: egui's bundled fonts do not
+    // cover U+2699 any more than they cover the others avoided above, and
+    // a button that draws as nothing is worse than a blunt one. When MCP
+    // mode is on the button says so, which is the indicator.
+    let gear_label = if view.mcp.enabled {
+        egui::RichText::new("MCP")
+            .strong()
+            .color(egui::Color32::from_rgb(126, 208, 255))
+    } else {
+        egui::RichText::new("...").weak()
+    };
+    ui.menu_button(gear_label, |ui| {
+        show_gear_menu(ui, view, actions);
+    })
+    .response
+    .on_hover_text(if view.mcp.enabled {
+        "Settings \u{2014} MCP mode is on"
+    } else {
+        "Settings"
+    });
+
+    ui.separator();
+}
+
 /// The gear menu.
 ///
 /// MCP mode lives here rather than on the island's face: it is switched on once and then left
 /// alone, and it is not something to put a click away from Disconnect.
+#[cfg(feature = "mcp")]
 fn show_gear_menu(ui: &mut egui::Ui, view: &IslandView, actions: &mut FrameActions) {
     ui.set_width(320.0);
     egui::ScrollArea::vertical()
@@ -2321,6 +2389,7 @@ fn show_gear_menu(ui: &mut egui::Ui, view: &IslandView, actions: &mut FrameActio
         .show(ui, |ui| show_gear_menu_contents(ui, view, actions));
 }
 
+#[cfg(feature = "mcp")]
 fn show_gear_menu_contents(
     ui: &mut egui::Ui,
     view: &IslandView,
@@ -2478,6 +2547,10 @@ fn show_connect_dialog(
     ctx: &egui::Context,
     form: &mut ConnectForm,
     settings: &mut RdpSettings,
+    #[cfg_attr(
+        not(feature = "mcp"),
+        expect(unused_variables, reason = "only the MCP tab edits the preferences")
+    )]
     preferences: &mut crate::preferences::Preferences,
     dialog: &mut DialogState,
     error: Option<&str>,
@@ -2485,92 +2558,114 @@ fn show_connect_dialog(
 ) {
     let ready = form.is_complete();
 
-    // A bottom panel, so Connect stays on the window's bottom edge whether the options are
-    // showing or not, and the pages above it get whatever room is left.
-    egui::TopBottomPanel::bottom("irontsc-connect-actions")
-        .show_separator_line(false)
-        .show(ctx, |ui| {
-            ui.add_space(6.0);
-
-            if let Some(error) = error {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
-                ui.add_space(4.0);
-            }
-            if let Some(notice) = dialog.notice.as_deref() {
-                ui.label(egui::RichText::new(notice).small().weak());
-                ui.add_space(4.0);
-            }
-
-            ui.horizontal(|ui| {
-                // Plain words rather than a chevron: egui's bundled fonts do not cover the
-                // triangle glyphs, which would simply draw as nothing.
-                let label = if dialog.options_open {
-                    "Hide Options"
-                } else {
-                    "Show Options"
-                };
-                if ui.button(label).clicked() {
-                    actions.toggle_options = true;
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Connect"))
-                        .clicked()
-                    {
-                        actions.connect = true;
-                    }
-                    if ui.button("Quit").clicked() {
-                        actions.quit = true;
-                    }
-                });
-            });
-
-            ui.add_space(8.0);
-        });
-
     egui::CentralPanel::default().show(ctx, |ui| {
-        ui.add_space(6.0);
-        ui.heading("Remote Desktop Connection");
-        ui.add_space(8.0);
-
-        if dialog.options_open {
-            ui.horizontal(|ui| {
-                for tab in OptionsTab::ALL {
-                    ui.selectable_value(&mut dialog.tab, tab, tab.label());
-                }
-            });
-            ui.add_space(8.0);
-        }
+        // The action row sits on the bottom edge but is laid out after the pages, so Tab walks
+        // the logon fields before it reaches the buttons. Its height from the last frame is
+        // what the pages leave free for it.
+        let bar_height_id = ui.id().with("irontsc-connect-actions-height");
+        let bar_height = ui.data(|data| data.get_temp::<f32>(bar_height_id)).unwrap_or(40.0);
+        let full = ui.available_rect_before_wrap();
+        let pages = egui::Rect::from_min_max(
+            full.min,
+            egui::pos2(full.max.x, (full.max.y - bar_height).max(full.min.y)),
+        );
 
         let mut submit = false;
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // Collapsed, the dialog is the General page without the file buttons, which is
-                // how mstsc's small window relates to its General tab.
-                let page = if dialog.options_open {
-                    dialog.tab
-                } else {
-                    OptionsTab::General
-                };
+        ui.scope_builder(egui::UiBuilder::new().max_rect(pages), |ui| {
+            ui.add_space(6.0);
+            ui.heading("Remote Desktop Connection");
+            ui.add_space(8.0);
 
-                match page {
-                    OptionsTab::General => {
-                        submit = show_logon_settings(ui, form, settings);
-                        if dialog.options_open {
-                            show_connection_settings(ui, dialog, actions);
-                        }
+            if dialog.options_open {
+                ui.horizontal(|ui| {
+                    for tab in OptionsTab::ALL {
+                        ui.selectable_value(&mut dialog.tab, tab, tab.label());
                     }
-                    OptionsTab::Display => show_display_settings(ui, settings),
-                    OptionsTab::Resources => show_resource_settings(ui, settings),
-                    OptionsTab::Codecs => show_codec_settings(ui, settings),
-                    OptionsTab::Network => show_network_settings(ui, settings),
-                    OptionsTab::Agent => show_agent_settings(ui, preferences),
-                    OptionsTab::Debug => show_debug_settings(ui, settings),
+                });
+                ui.add_space(8.0);
+            }
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Collapsed, the dialog is the General page without the file buttons,
+                    // which is how mstsc's small window relates to its General tab.
+                    let page = if dialog.options_open {
+                        dialog.tab
+                    } else {
+                        OptionsTab::General
+                    };
+
+                    match page {
+                        OptionsTab::General => {
+                            submit = show_logon_settings(ui, form, settings);
+                            if dialog.options_open {
+                                show_connection_settings(ui, dialog, actions);
+                            }
+                        }
+                        OptionsTab::Display => show_display_settings(ui, settings),
+                        OptionsTab::Resources => show_resource_settings(ui, settings),
+                        OptionsTab::Codecs => show_codec_settings(ui, settings),
+                        OptionsTab::Network => show_network_settings(ui, settings),
+                        #[cfg(feature = "mcp")]
+                        OptionsTab::Agent => show_agent_settings(ui, preferences),
+                        OptionsTab::Debug => show_debug_settings(ui, settings),
+                    }
+                });
+        });
+
+        // Bottom-up, so the row hugs the bottom edge whatever the guess above was.
+        let bar = ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(full)
+                .layout(egui::Layout::bottom_up(egui::Align::Min)),
+            |ui| {
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    // Plain words rather than a chevron: egui's bundled fonts do not cover
+                    // the triangle glyphs, which would simply draw as nothing.
+                    let label = if dialog.options_open {
+                        "Hide Options"
+                    } else {
+                        "Show Options"
+                    };
+                    if ui.button(label).clicked() {
+                        actions.toggle_options = true;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Connect"))
+                            .clicked()
+                        {
+                            actions.connect = true;
+                        }
+                        if ui.button("Quit").clicked() {
+                            actions.quit = true;
+                        }
+                    });
+                });
+
+                if let Some(notice) = dialog.notice.as_deref() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(notice).small().weak());
                 }
-            });
+                if let Some(error) = error {
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+
+                ui.add_space(6.0);
+            },
+        );
+
+        let measured = bar.response.rect.height();
+        if (measured - bar_height).abs() > 0.5 {
+            ui.data_mut(|data| data.insert_temp(bar_height_id, measured));
+            ui.ctx().request_repaint();
+        }
 
         if submit && ready {
             actions.connect = true;
@@ -2656,6 +2751,7 @@ fn show_logon_settings(
     submit
 }
 
+#[cfg(feature = "mcp")]
 fn show_agent_settings(
     ui: &mut egui::Ui,
     preferences: &mut crate::preferences::Preferences,
@@ -2984,6 +3080,7 @@ impl ApplicationHandler<UserEvent> for SessionApp {
             WindowEvent::RedrawRequested => {
                 // `--mcp` waits here rather than at startup, so it covers a session the user
                 // logged on to themselves as well as one the command line connected.
+                #[cfg(feature = "mcp")]
                 if self.pending_mcp
                     && self.session.as_ref().is_some_and(|session| session.mcp.is_none())
                 {
@@ -3302,6 +3399,7 @@ pub fn run(
     form: ConnectForm,
     settings: RdpSettings,
     autoconnect: bool,
+    #[cfg(feature = "mcp")]
     mcp: bool,
 ) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
@@ -3316,7 +3414,10 @@ pub fn run(
     // Deferred until the window exists: connecting resizes it, so doing it any earlier would
     // flash the dialog first.
     app.pending_autoconnect = autoconnect;
-    app.pending_mcp = mcp;
+    #[cfg(feature = "mcp")]
+    {
+        app.pending_mcp = mcp;
+    }
 
     event_loop
         .run_app(&mut app)
@@ -3389,6 +3490,7 @@ mod tests {
         assert!(config.camera);
     }
 
+    #[cfg(feature = "mcp")]
     #[test]
     #[ignore = "requires the locally installed screen models"]
     fn mcp_bridge_with_screen_models_shuts_down_cleanly() {

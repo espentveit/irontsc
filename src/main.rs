@@ -8,6 +8,12 @@
 //! The protocol layers below are frontend-agnostic and talk over `RdpInputEvent` and
 //! `RdpOutputEvent` channels.
 
+// Release builds on Windows are a windowed app, so launching from Explorer or a shortcut does
+// not open a console window beside it. The catch is that such an app gets no console when
+// started from cmd or PowerShell either, and every `println!` goes nowhere; `console::attach`
+// below borrows the parent's console back when there is one. Debug builds stay console apps.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 // The client itself lives in the library next door, so that the tabbed shell can be built on
 // the same code rather than compiling these files a second time.
 
@@ -38,6 +44,7 @@ struct Args {
     /// Switch MCP mode on as soon as the session is up, rather than from the gear. The logon
     /// dialog still appears if the credentials are not all there; MCP mode comes up once the
     /// session does.
+    #[cfg(feature = "mcp")]
     #[arg(long)]
     mcp: bool,
 }
@@ -91,11 +98,13 @@ struct ConnectionArgs {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// List the MCP sessions running on this machine, and how to reach them.
+    #[cfg(feature = "mcp")]
     Sessions(SessionsCommand),
 
     /// Drive one of those sessions: `irontsc session <session> <tool> [name=value ...]`.
     ///
     /// With no tool it prints the ones that session offers, which is the palette to pick from.
+    #[cfg(feature = "mcp")]
     Session(SessionCommand),
 
     /// Read or write IronTSC's own preferences, which apply to every connection.
@@ -111,9 +120,11 @@ enum Command {
     /// This is the form an MCP client starts for itself. To let an agent drive a session you
     /// are already watching, leave this off and switch MCP mode on from the gear in the
     /// session island instead.
+    #[cfg(feature = "mcp")]
     Mcp(McpCommand),
 }
 
+#[cfg(feature = "mcp")]
 #[derive(ClapArgs, Debug)]
 struct McpCommand {
     #[command(flatten)]
@@ -153,6 +164,7 @@ struct ConfigCommand {
     file: Option<std::path::PathBuf>,
 }
 
+#[cfg(feature = "mcp")]
 #[derive(ClapArgs, Debug)]
 struct SessionsCommand {
     /// Print the register as JSON, for something reading rather than someone.
@@ -160,6 +172,7 @@ struct SessionsCommand {
     json: bool,
 }
 
+#[cfg(feature = "mcp")]
 #[derive(ClapArgs, Debug)]
 struct SessionCommand {
     /// Which session: its PID, its port, or part of the computer or user name. `any` takes
@@ -249,44 +262,63 @@ fn resolve(connection: &ConnectionArgs) -> anyhow::Result<(ConnectForm, RdpSetti
 }
 
 fn main() -> anyhow::Result<()> {
+    // Before anything prints, `--help` included.
+    #[cfg(windows)]
+    console::attach();
     let args = Args::parse();
 
     // stdio is the MCP channel in headless mode, so the log has to go somewhere else or it
     // corrupts the protocol stream. Everywhere else stdout is fine.
+    #[cfg(feature = "mcp")]
     let to_stderr = matches!(args.command, Some(Command::Mcp(_)));
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_target(true)
-        .with_line_number(true);
-    if to_stderr {
-        subscriber.with_writer(std::io::stderr).init();
-    } else {
-        subscriber.init();
+    #[cfg(not(feature = "mcp"))]
+    let to_stderr = false;
+    // Silent unless asked: with no RUST_LOG there is no subscriber, and every event is dropped.
+    if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .with_line_number(true);
+        if to_stderr {
+            subscriber.with_writer(std::io::stderr).init();
+        } else {
+            subscriber.init();
+        }
     }
 
     match args.command {
         Some(Command::Config(command)) => run_config(&command),
+        #[cfg(feature = "mcp")]
         Some(Command::Sessions(command)) => run_sessions(&command),
+        #[cfg(feature = "mcp")]
         Some(Command::Session(command)) => run_session(&command),
+        #[cfg(feature = "mcp")]
         Some(Command::Mcp(mcp)) => run_mcp(mcp),
         None => {
             let (form, settings) = resolve(&args.connection)?;
 
+            // `--mcp` counts as asking to connect, since MCP mode needs a session.
+            #[cfg(feature = "mcp")]
+            let wants_session = args.mcp;
+            #[cfg(not(feature = "mcp"))]
+            let wants_session = false;
+
             // Anything short of a full set of credentials still gets the dialog, pre-filled.
-            let autoconnect = (args.autologon || args.mcp || args.connection.computer.is_some())
+            let autoconnect = (args.autologon || wants_session || args.connection.computer.is_some())
                 && !form.server.trim().is_empty()
                 && !form.username.trim().is_empty()
                 && !form.password.is_empty();
 
-            egui_app::run(form, settings, autoconnect, args.mcp)
+            #[cfg(feature = "mcp")]
+            return egui_app::run(form, settings, autoconnect, args.mcp);
+            #[cfg(not(feature = "mcp"))]
+            egui_app::run(form, settings, autoconnect)
         }
     }
 }
 
 /// Headless MCP mode: open a session of our own and serve it over stdio.
+#[cfg(feature = "mcp")]
 fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
     let (form, settings) = resolve(&command.connection)?;
 
@@ -358,6 +390,7 @@ fn run_mcp(command: McpCommand) -> anyhow::Result<()> {
 }
 
 /// Prints the register: what MCP sessions are up, and the URL each one answers on.
+#[cfg(feature = "mcp")]
 fn run_sessions(command: &SessionsCommand) -> anyhow::Result<()> {
     let sessions = irontsc::agent::registry::list();
 
@@ -392,6 +425,7 @@ fn run_sessions(command: &SessionsCommand) -> anyhow::Result<()> {
 }
 
 /// Runs one tool against one session, or lists the tools it offers.
+#[cfg(feature = "mcp")]
 fn run_session(command: &SessionCommand) -> anyhow::Result<()> {
     let url = match &command.url {
         Some(url) => url.clone(),
@@ -433,6 +467,7 @@ fn run_session(command: &SessionCommand) -> anyhow::Result<()> {
 }
 
 /// Finds the session the argument names, or explains what there was to choose from.
+#[cfg(feature = "mcp")]
 fn pick(needle: &str) -> anyhow::Result<irontsc::agent::Descriptor> {
     let sessions = irontsc::agent::registry::list();
     if sessions.is_empty() {
@@ -466,6 +501,7 @@ fn pick(needle: &str) -> anyhow::Result<irontsc::agent::Descriptor> {
 }
 
 /// Turns `name=value` pairs, or a JSON object, into the arguments for a tool call.
+#[cfg(feature = "mcp")]
 fn read_arguments(command: &SessionCommand) -> anyhow::Result<serde_json::Value> {
     if let Some(json) = &command.json_arguments {
         let value: serde_json::Value =
@@ -488,6 +524,7 @@ fn read_arguments(command: &SessionCommand) -> anyhow::Result<serde_json::Value>
 
 /// Reads an argument the way a person means it: a number is a number, `true` is a boolean,
 /// something in braces is JSON, and the rest is text.
+#[cfg(feature = "mcp")]
 fn read_value(raw: &str) -> serde_json::Value {
     match raw {
         "true" => return serde_json::Value::Bool(true),
@@ -512,6 +549,7 @@ fn read_value(raw: &str) -> serde_json::Value {
 }
 
 /// Prints what a tool sent back: text as text, and an image as the file it was written to.
+#[cfg(feature = "mcp")]
 fn render(
     result: &serde_json::Value,
     tool: &str,
@@ -574,6 +612,7 @@ fn render(
 }
 
 /// The width and height in a PNG's header, which saves decoding the whole thing to report it.
+#[cfg(feature = "mcp")]
 fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     const HEADER: usize = 24;
     if bytes.len() < HEADER || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
@@ -585,6 +624,7 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// How long a session has been up, in the roughest terms that are still useful.
+#[cfg(feature = "mcp")]
 fn uptime(started_at: u64) -> String {
     let now = irontsc::agent::registry::now();
     let seconds = now.saturating_sub(started_at);
@@ -695,4 +735,157 @@ fn show(name: &str, value: &serde_json::Value) -> String {
         return "(set)".to_owned();
     }
     as_text(value)
+}
+
+#[cfg(windows)]
+mod console {
+    use std::ffi::c_void;
+    use std::io::Read;
+    use std::os::windows::io::FromRawHandle;
+    use std::sync::mpsc;
+
+    type Handle = *mut c_void;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_TYPE_UNKNOWN: u32 = 0;
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+    /// Chunks of output held while the console is not keeping up.
+    const QUEUE_CHUNKS: usize = 1024;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> Handle;
+        fn SetStdHandle(which: u32, handle: Handle) -> i32;
+        fn AttachConsole(process: u32) -> i32;
+        fn GetFileType(handle: Handle) -> u32;
+        fn CreatePipe(read: *mut Handle, write: *mut Handle, security: *mut c_void, size: u32)
+            -> i32;
+        fn WriteConsoleW(
+            console: Handle,
+            text: *const u16,
+            len: u32,
+            written: *mut u32,
+            reserved: *mut c_void,
+        ) -> i32;
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *mut c_void,
+            disposition: u32,
+            flags: u32,
+            template: Handle,
+        ) -> Handle;
+    }
+
+    /// A raw handle moved into a thread. Console and pipe handles are
+    /// process-wide kernel objects, usable from any thread.
+    struct Raw(Handle);
+    unsafe impl Send for Raw {}
+
+    /// Whether a standard handle has nowhere to go.
+    fn empty(which: u32) -> bool {
+        // SAFETY: plain Win32 queries on this process's own std handles.
+        unsafe {
+            let handle = GetStdHandle(which);
+            handle.is_null()
+                || handle == INVALID_HANDLE_VALUE
+                || GetFileType(handle) == FILE_TYPE_UNKNOWN
+        }
+    }
+
+    pub(super) fn attach() {
+        let targets: Vec<u32> = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .into_iter()
+            .filter(|which| empty(*which))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let (mut read, mut write): (Handle, Handle) = (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: `name` is NUL-terminated and outlives the call; the out
+        // pointers are valid locals. Handles are kept for the process's life.
+        let console = unsafe {
+            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+                return;
+            }
+            let console = CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+            if console == INVALID_HANDLE_VALUE {
+                return;
+            }
+            if CreatePipe(&mut read, &mut write, std::ptr::null_mut(), 1 << 16) == 0 {
+                return;
+            }
+            for which in &targets {
+                SetStdHandle(*which, write);
+            }
+            Raw(console)
+        };
+        let read = Raw(read);
+        let (queue, chunks) = mpsc::sync_channel::<Vec<u8>>(QUEUE_CHUNKS);
+
+        // Drain the pipe as fast as the app fills it; never wait on the queue.
+        let _ = std::thread::Builder::new()
+            .name("console-drain".into())
+            .spawn(move || {
+                let read = read;
+                // SAFETY: this thread owns the pipe's read end from here on.
+                let mut pipe = unsafe { std::fs::File::from_raw_handle(read.0) };
+                let mut buf = vec![0u8; 16 * 1024];
+                while let Ok(n) = pipe.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    let _ = queue.try_send(buf[..n].to_vec());
+                }
+            });
+
+        // Write to the console as UTF-16, so the app's `·` and `-` survive
+        // whatever code page the terminal is using. Only this thread ever
+        // blocks on the console.
+        let _ = std::thread::Builder::new()
+            .name("console-write".into())
+            .spawn(move || {
+                let console = console;
+                let mut pending: Vec<u8> = Vec::new();
+                for chunk in chunks {
+                    pending.extend_from_slice(&chunk);
+                    // Keep a UTF-8 sequence split across chunks for the next.
+                    let valid = match std::str::from_utf8(&pending) {
+                        Ok(_) => pending.len(),
+                        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                        Err(_) => pending.len(),
+                    };
+                    let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
+                    pending.drain(..valid);
+                    let wide: Vec<u16> = text.encode_utf16().collect();
+                    let mut written = 0u32;
+                    // SAFETY: `wide` outlives the call; `console` is CONOUT$.
+                    unsafe {
+                        WriteConsoleW(
+                            console.0,
+                            wide.as_ptr(),
+                            wide.len() as u32,
+                            &mut written,
+                            std::ptr::null_mut(),
+                        );
+                    }
+                }
+            });
+    }
 }

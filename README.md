@@ -6,8 +6,8 @@ winit, and glutin and is inspired by the Windows Remote Desktop client
 (`mstsc`).
 
 IronTSC supports saved `.rdp` connections, clipboard and audio redirection,
-dynamic desktop resizing, RDP graphics codecs, TCP and UDP transports, a docked
-terminal, and an MCP interface for agent-driven sessions.
+dynamic desktop resizing, RDP graphics codecs, TCP and UDP transports, and a
+docked terminal.
 
 ## Download
 
@@ -69,22 +69,9 @@ Open a saved connection:
 irontsc connection.rdp
 ```
 
-Run `irontsc --help` for all connection, folder sharing, camera, audio capture,
-configuration, and MCP options. Only warnings and errors are logged by default.
-Set `RUST_LOG` to opt into more detail, for example `RUST_LOG=debug irontsc`.
-
-## MCP mode
-
-IronTSC can expose a remote desktop through the Model Context Protocol. Enable
-MCP from the session toolbar to let an agent join the visible session, or start
-a headless stdio session:
-
-```sh
-irontsc mcp --computer server.example.com --username user --password secret
-```
-
-The MCP surface provides screenshots, pixel and region queries, mouse and
-keyboard input, status, waiting, and disconnect controls.
+Run `irontsc --help` for all connection, folder sharing, camera, audio capture
+and configuration options. Nothing is logged by default; set `RUST_LOG` to opt
+in, for example `RUST_LOG=debug irontsc`.
 
 ## Development
 
