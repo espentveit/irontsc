@@ -659,61 +659,47 @@ impl Packet {
     /// Parses a packet from raw bytes.
     pub fn decode(input: &[u8]) -> Result<Self> {
         let (header, mut rest) = RdpUdpFecHeader::decode_from(input)?;
-        eprintln!(
-            "🔍 Packet decode: flags={:?}, rest_len={}",
-            header.flags,
-            rest.len()
-        );
+        tracing::trace!(flags = ?header.flags, rest_len = rest.len(), "packet decode");
 
         // Per MS-RDPEUDP, the ACK vector section is only present when ACK flag is set
         // AND the packet is a DATA packet (not just SYN+ACK which has ACK flag but no vector)
         let ack = if header.flags.contains(HeaderFlags::ACK)
             && header.flags.contains(HeaderFlags::DATA)
         {
-            eprintln!("   Parsing ACK vector...");
             let (ack, tail) = AckSection::decode(rest)?;
             rest = tail;
             Some(ack)
         } else {
-            eprintln!("   Skipping ACK vector (no DATA flag or no ACK flag)");
             None
         };
         let ack_of_acks = if header.flags.contains(HeaderFlags::ACK_OF_ACKS) {
-            eprintln!("   Parsing ACK_OF_ACKS...");
             let (aoa, tail) = AckOfAcks::decode_from(rest)?;
             rest = tail;
             Some(aoa)
         } else {
-            eprintln!("   Skipping ACK_OF_ACKS");
             None
         };
         let syn_data = if header.flags.contains(HeaderFlags::SYN) {
-            eprintln!("   Parsing SYN data (rest_len={})...", rest.len());
             let (syn, tail) = SynDataPayload::decode_from(rest)?;
-            eprintln!("   SYN data parsed: {:?}, tail_len={}", syn, tail.len());
+            tracing::trace!(?syn, tail_len = tail.len(), "SYN data parsed");
             rest = tail;
             Some(syn)
         } else {
-            eprintln!("   Skipping SYN data");
             None
         };
         let correlation_id = if header.flags.contains(HeaderFlags::CORRELATION_ID) {
-            eprintln!("   Parsing CORRELATION_ID...");
             let (cid, tail) = CorrelationIdPayload::decode_from(rest)?;
             rest = tail;
             Some(cid)
         } else {
-            eprintln!("   Skipping CORRELATION_ID");
             None
         };
         let syn_data_ex = if header.flags.contains(HeaderFlags::SYN_EX) {
-            eprintln!("   Parsing SYN_EX (rest_len={})...", rest.len());
             let (syn_ex, tail) = SynDataExPayload::decode_from(rest)?;
-            eprintln!("   SYN_EX parsed successfully, tail_len={}", tail.len());
+            tracing::trace!(tail_len = tail.len(), "SYN_EX parsed");
             rest = tail;
             Some(syn_ex)
         } else {
-            eprintln!("   Skipping SYN_EX");
             None
         };
         let (source_payload, fec_payload) = if header.flags.contains(HeaderFlags::DATA) {

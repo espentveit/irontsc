@@ -2815,9 +2815,6 @@ async fn active_session<T: RdpEventSender + Clone>(
                         // Check if it's an "Unknown pduType" error that we can safely ignore
                         let err_msg = format!("{:?}", e);
                         let err_str = format!("{}", e);
-                        eprintln!("🔍 PDU read error details (Debug): {}", err_msg);
-                        eprintln!("🔍 PDU read error details (Display): {}", err_str);
-                        eprintln!("   Error type object: {:?}", e);
                         warn!("⚠️  PDU read error: {} / {}", err_msg, err_str);
 
                         //  FOR NOW: Accept ANY error during active session and continue

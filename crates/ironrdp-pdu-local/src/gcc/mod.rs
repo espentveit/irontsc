@@ -95,13 +95,6 @@ impl Encode for ClientGccBlocks {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
         ensure_size!(in: dst, size: self.size());
 
-        eprintln!("🔧 ClientGccBlocks::encode - START");
-        eprintln!(
-            "   multi_transport_channel: {:?}",
-            self.multi_transport_channel
-                .as_ref()
-                .map(|mt| mt.flags.bits())
-        );
 
         UserDataHeader::encode(dst, ClientGccType::CoreData.as_u16(), &self.core)?;
         UserDataHeader::encode(dst, ClientGccType::SecurityData.as_u16(), &self.security)?;
@@ -123,24 +116,11 @@ impl Encode for ClientGccBlocks {
             )?;
         }
         if let Some(ref multi_transport_channel) = self.multi_transport_channel {
-            eprintln!("   ✅ ENCODING MultiTransportChannelData");
-            eprintln!(
-                "      Header Type: 0x{:04X}",
-                ClientGccType::MultiTransportChannelData.as_u16()
-            );
-            eprintln!(
-                "      Flags: 0x{:08X}",
-                multi_transport_channel.flags.bits()
-            );
-            eprintln!("      Size: {} bytes", multi_transport_channel.size());
             UserDataHeader::encode(
                 dst,
                 ClientGccType::MultiTransportChannelData.as_u16(),
                 multi_transport_channel,
             )?;
-            eprintln!("   ✅ MultiTransportChannelData ENCODED");
-        } else {
-            eprintln!("   ❌ MultiTransportChannelData is NONE!");
         }
         if let Some(ref monitor_extended) = self.monitor_extended {
             UserDataHeader::encode(
@@ -150,10 +130,6 @@ impl Encode for ClientGccBlocks {
             )?;
         }
 
-        eprintln!(
-            "🔧 ClientGccBlocks::encode - COMPLETE (total size: {})",
-            self.size()
-        );
         Ok(())
     }
 
