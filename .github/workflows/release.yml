@@ -80,6 +80,7 @@ jobs:
           mkdir -p "dist/$bundle"
           install -m755 target/release/irontsc "dist/$bundle/irontsc"
           install -m644 README.md "dist/$bundle/README.md"
+          install -m644 packaging/assets/irontsc.png "dist/$bundle/irontsc.png"
           tar -C dist -czf "dist/$bundle.tar.gz" "$bundle"
 
       - name: Inspect Linux package

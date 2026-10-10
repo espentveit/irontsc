@@ -12,6 +12,8 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="ARPHELPLINK" Value="https://github.com/espentveit/irontsc" />
+    <Icon Id="IronTscIcon" SourceFile="$(var.SourceDir)\packaging\assets\irontsc.ico" />
+    <Property Id="ARPPRODUCTICON" Value="IronTscIcon" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
@@ -42,6 +44,7 @@
             Name="IronTSC"
             Description="Remote Desktop client"
             Target="[INSTALLFOLDER]irontsc.exe"
+            Icon="IronTscIcon"
             WorkingDirectory="INSTALLFOLDER"
             Advertise="no" />
         <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
