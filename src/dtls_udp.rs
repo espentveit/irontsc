@@ -1,7 +1,7 @@
 /// DTLS wrapper for UDP datagrams (MS-RDPEMT requirement)
 ///
 /// Provides DTLS 1.2 encryption/decryption for the MS-RDPEMT UDP transport.
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use foreign_types::ForeignType;
 use libc::{c_int, c_void};
 use openssl::ssl::{
@@ -51,8 +51,10 @@ pub enum EncryptionProtocol {
 pub struct DtlsConfig {
     /// Server hostname for certificate validation
     pub server_name: String,
-    /// Whether to verify server certificate (should be true in production)
-    pub verify_certificate: bool,
+    /// Public key of the certificate the main connection was accepted with. The tunnel's TLS
+    /// session ends at the same server, so its certificate must carry the same key: RDP servers
+    /// use self-signed certificates, and this pins the tunnel to the one already trusted.
+    pub server_public_key: Vec<u8>,
     /// Protocol to use (TLS for Reliable, DTLS for Lossy)
     pub protocol: EncryptionProtocol,
 }
@@ -109,19 +111,12 @@ impl DtlsUdpSocket {
         // ctx_builder.set_min_proto_version(Some(SslVersion::TLS1))?;
         // ctx_builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
 
-        // Configure certificate verification
-        if config.verify_certificate {
-            ctx_builder.set_verify(SslVerifyMode::PEER);
-            ctx_builder
-                .set_default_verify_paths()
-                .context("Failed to load system CA certificates")?;
-        } else {
-            warn!(
-                "⚠️  {} certificate verification disabled (insecure, for testing only)",
-                protocol_name
-            );
-            ctx_builder.set_verify(SslVerifyMode::NONE);
+        // No chain validation: the certificate is checked against the main connection's key
+        // once the handshake completes, see `verify_peer`.
+        if config.server_public_key.is_empty() {
+            bail!("no server public key to check the tunnel's {protocol_name} certificate against");
         }
+        ctx_builder.set_verify(SslVerifyMode::NONE);
 
         //Set TLS 1.3 cipher suites - minimal to reduce ClientHello size
         // Only advertise one cipher to minimize extension bloat
@@ -265,6 +260,7 @@ impl DtlsUdpSocket {
 
         if ret == 1 {
             // Unlikely to complete on first call, but handle it
+            self.verify_peer(&ssl)?;
             self.ssl_conn = Some(ssl);
             self.handshake_complete = true;
             return Ok(Vec::new());
@@ -375,6 +371,9 @@ impl DtlsUdpSocket {
                 EncryptionProtocol::Dtls => "DTLS",
             };
             info!("✅ {} handshake complete", protocol_name);
+            // Nothing goes out on a session whose certificate is not the main connection's,
+            // not even the client's Finished.
+            Self::check_peer_key(ssl, &self.config.server_public_key)?;
             // Note: Don't set handshake_complete = true yet!
             // The caller needs to send the final handshake messages (ChangeCipherSpec, Finished)
             // BEFORE encryption kicks in. The caller will mark it complete after sending.
@@ -512,6 +511,33 @@ impl DtlsUdpSocket {
     }
 
     #[inline]
+    fn verify_peer(&self, ssl: &Ssl) -> Result<()> {
+        Self::check_peer_key(ssl, &self.config.server_public_key)
+    }
+
+    /// Checks that the server's certificate carries `expected`, the subject public key of the
+    /// certificate the main connection was accepted with.
+    fn check_peer_key(ssl: &Ssl, expected: &[u8]) -> Result<()> {
+        use x509_cert::der::Decode as _;
+
+        let cert = ssl
+            .peer_certificate()
+            .context("the tunnel's TLS session has no server certificate")?;
+        let der = cert.to_der().context("cannot encode the tunnel's certificate")?;
+        let cert = x509_cert::Certificate::from_der(&der)
+            .context("cannot parse the tunnel's certificate")?;
+        let key = cert
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .as_bytes()
+            .context("the tunnel certificate's public key is not byte aligned")?;
+        if key != expected {
+            bail!("the tunnel's TLS certificate differs from the main connection's");
+        }
+        Ok(())
+    }
+
     fn ssl_ptr(ssl: &Ssl) -> *mut ffi::SSL {
         ForeignType::as_ptr(ssl)
     }
@@ -728,7 +754,7 @@ mod tests {
 
         let config = DtlsConfig {
             server_name: "test.example.com".to_string(),
-            verify_certificate: false,
+            server_public_key: vec![0x30],
             protocol: EncryptionProtocol::Dtls,
         };
 

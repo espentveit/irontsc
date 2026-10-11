@@ -191,7 +191,8 @@ enum ClipboardFraming {
 
 /// Asks this session's clipboard for the PDUs an action turns into, framed for its channel.
 ///
-/// A server that has agreed Soft-Sync is not symmetric about the clipboard. It stops writing on
+/// A server tunnelling static channels ([MS-RDPEDYC] 3.1.5.4, which this client no longer
+/// advertises) is not symmetric about the clipboard. It stops writing on
 /// the static `cliprdr` channel and opens a dynamic channel of the same name to write on -- but
 /// it goes on *reading* the static channel, and never reads the dynamic one it opened. So the
 /// two halves are split here: the PDUs are built by the [`ironrdp::cliprdr::Cliprdr`] the server
@@ -422,7 +423,7 @@ pub struct RdpClient<T: RdpEventSender + Clone> {
 impl<T: RdpEventSender + Clone> RdpClient<T> {
     pub async fn run(mut self) {
         loop {
-            let (connection_result, framed, client_addr) =
+            let (connection_result, framed, client_addr, server_public_key) =
                 if let Some(rdcleanpath) = self.config.rdcleanpath.as_ref() {
                     match connect_ws(
                         &self.config,
@@ -465,6 +466,7 @@ impl<T: RdpEventSender + Clone> RdpClient<T> {
                 &mut self.input_event_receiver,
                 self.config.destination.clone(),
                 client_addr,
+                server_public_key,
                 self.config.disable_udp,
             )
             .await
@@ -513,7 +515,7 @@ async fn connect(
     config: &Config,
     cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
     dvc_pipe_proxy_factory: &DvcPipeProxyFactory,
-) -> ConnectorResult<(ConnectionResult, UpgradedFramed, SocketAddr)> {
+) -> ConnectorResult<(ConnectionResult, UpgradedFramed, SocketAddr, Vec<u8>)> {
     let _ = dvc_pipe_proxy_factory;
 
     let dest = format!(
@@ -646,8 +648,8 @@ async fn connect(
         drdynvc = drdynvc.with_dynamic_channel(MouseCursorProcessor::new());
 
         // `cliprdr` and `rdpdr` are static virtual channels by their specifications, and both
-        // are attached as such below. A server that has agreed Soft-Sync opens dynamic channels
-        // of the same names to write on and stops writing on the static ids -- while going on
+        // are attached as such below. A server tunnelling static channels ([MS-RDPEDYC]
+        // 3.1.5.4, not advertised) opens dynamic channels of the same names to write on and stops writing on the static ids -- while going on
         // reading the static ones. See `crate::dvc_bridge`.
         use crate::dvc_bridge::{HostedChannel, RedirectedChannel};
 
@@ -754,7 +756,7 @@ async fn connect(
         &mut upgraded_framed,
         connector,
         (&config.destination).into(),
-        server_public_key,
+        server_public_key.clone(),
         Some(&mut ReqwestNetworkClient::new()),
         None,
     )
@@ -785,7 +787,7 @@ async fn connect(
         warn!("⚠️  No correlation ID - server-initiated multitransport will not be possible");
     }
 
-    Ok((connection_result, upgraded_framed, client_addr))
+    Ok((connection_result, upgraded_framed, client_addr, server_public_key))
 }
 
 async fn connect_ws(
@@ -793,7 +795,7 @@ async fn connect_ws(
     _rdcleanpath: &RDCleanPathConfig,
     _cliprdr_factory: Option<&(dyn CliprdrBackendFactory + Send)>,
     dvc_pipe_proxy_factory: &DvcPipeProxyFactory,
-) -> ConnectorResult<(ConnectionResult, UpgradedFramed, SocketAddr)> {
+) -> ConnectorResult<(ConnectionResult, UpgradedFramed, SocketAddr, Vec<u8>)> {
     let _ = dvc_pipe_proxy_factory;
 
     // TODO: RDCleanPath/WebSocket support requires internal ironrdp modules
@@ -872,7 +874,7 @@ async fn connect_ws(
         &mut framed,
         connector,
         (&config.destination).into(),
-        server_public_key,
+        server_public_key.clone(),
         Some(&mut ReqwestNetworkClient::new()),
         None,
     )
@@ -882,7 +884,7 @@ async fn connect_ws(
     let erased_stream = Box::new(ws) as Box<dyn AsyncReadWrite + Unpin + Send + Sync>;
     let upgraded_framed = ironrdp_tokio::TokioFramed::new_with_leftover(erased_stream, leftover_bytes);
 
-    Ok((connection_result, upgraded_framed, client_addr))
+    Ok((connection_result, upgraded_framed, client_addr, server_public_key))
     */
 }
 
@@ -1942,6 +1944,8 @@ struct ActiveUdpTunnel {
     tunnel_established: bool,
     tunnel_established_time: Option<std::time::Instant>,
     soft_sync_received: bool,
+    /// Whether the Initiate Multitransport Response has gone out for this request.
+    multitransport_answered: bool,
 }
 
 impl Drop for ActiveUdpTunnel {
@@ -1959,6 +1963,24 @@ impl Drop for ActiveUdpTunnel {
             );
         }
     }
+}
+
+/// TUNNELTYPE_UDPFECR, the only tunnel type this client sets up.
+const TUNNELTYPE_UDPFECR: u32 = 0x0000_0001;
+
+/// Tells the DVC client the reliable tunnel will not come up, returning the Soft-Sync Response
+/// that was waiting for it, if one was.
+fn report_tunnel_failure(active_stage: &mut ActiveStage) -> SessionResult<Option<Vec<u8>>> {
+    let Some(drdynvc) = active_stage.get_svc_processor_mut::<ironrdp_dvc::DrdynvcClient>() else {
+        return Ok(None);
+    };
+    let messages = drdynvc
+        .tunnel_failed(TUNNELTYPE_UDPFECR)
+        .map_err(|e| session::custom_err!("Soft-Sync after a tunnel failure", e))?;
+    if messages.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(active_stage.encode_dvc_messages(messages)?))
 }
 
 fn detect_multitransport_request(
@@ -2369,6 +2391,7 @@ fn handle_autodetect_request(
 
 async fn start_udp_tunnel(
     destination: &Destination,
+    server_public_key: &[u8],
     correlation_id: Option<[u8; 16]>,
     selected_protocol: nego::SecurityProtocol,
     request: &MultitransportRequestInfo,
@@ -2383,6 +2406,7 @@ async fn start_udp_tunnel(
 
     let mut config = UdpTransportConfig::default();
     config.server_addr = server_addr;
+    config.server_public_key = server_public_key.to_vec();
     let protocol_bits = request.protocol.as_u16();
     let requested_reliable = (protocol_bits & MultitransportProtocol::RELIABLE_BIT) != 0;
     let requested_lossy = (protocol_bits & MultitransportProtocol::LOSSY_BIT) != 0;
@@ -2463,6 +2487,7 @@ async fn start_udp_tunnel(
         tunnel_established: false,
         tunnel_established_time: None,
         soft_sync_received: false,
+        multitransport_answered: false,
     })
 }
 
@@ -2473,6 +2498,7 @@ async fn active_session<T: RdpEventSender + Clone>(
     input_event_receiver: &mut mpsc::UnboundedReceiver<RdpInputEvent>,
     destination: Destination,
     client_addr: SocketAddr,
+    server_public_key: Vec<u8>,
     disable_udp: bool,
 ) -> SessionResult<RdpControlFlow> {
     let (mut reader, mut writer) = split_tokio_framed(framed);
@@ -2603,6 +2629,7 @@ async fn active_session<T: RdpEventSender + Clone>(
 
             match start_udp_tunnel(
                 &destination,
+                &server_public_key,
                 correlation_id,
                 selected_protocol,
                 &request_info,
@@ -2639,6 +2666,9 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 error!("❌ Failed to send MultitransportResponse: {:?}", e);
                             } else {
                                 info!("📤 MultitransportResponse sent successfully ({} bytes)", frame.len());
+                                if let Some(tunnel) = udp_tunnels.get_mut(&request_id) {
+                                    tunnel.multitransport_answered = true;
+                                }
                             }
                         }
                         Err(err) => {
@@ -2654,6 +2684,13 @@ async fn active_session<T: RdpEventSender + Clone>(
                         "❌ Failed to auto-initialize UDP transport for request_id={}: {}",
                         request_id, err
                     );
+                    let frame = report_tunnel_failure(&mut active_stage)?;
+                    if let Some(frame) = frame {
+                        writer
+                            .write_all(&frame)
+                            .await
+                            .map_err(|e| session::custom_err!("write Soft-Sync Response", e))?;
+                    }
                 }
             }
         }
@@ -2769,6 +2806,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                 } else if requested_lossy || requested_reliable || fallback_reliable {
                     match start_udp_tunnel(
                         &destination,
+                        &server_public_key,
                         correlation_id,
                         selected_protocol,
                         &request_info,
@@ -2784,6 +2822,9 @@ async fn active_session<T: RdpEventSender + Clone>(
                                 "❌ Failed to initialize UDP transport for request_id={}: {}",
                                 request_id, err
                             );
+                            if let Some(frame) = report_tunnel_failure(&mut active_stage)? {
+                                extra_outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                            }
                         }
                     }
                 } else {
@@ -2936,7 +2977,8 @@ async fn active_session<T: RdpEventSender + Clone>(
                         // NOW send MultitransportResponse on TCP channel (per MS-RDPBCGR spec)
                         // This must be sent AFTER the tunnel is fully established (TunnelCreateResponse received)
                         // Sending it too early (e.g., after TLS handshake) causes server-side RDP_SEC error 0x8007139F
-                        if let Some(tunnel) = udp_tunnels.get(&request_id) {
+                        if let Some(tunnel) = udp_tunnels.get_mut(&request_id).filter(|tunnel| !tunnel.multitransport_answered) {
+                            tunnel.multitransport_answered = true;
                             let request_info = MultitransportRequestInfo {
                                 request_id,
                                 protocol: tunnel.protocol,
@@ -2961,7 +3003,7 @@ async fn active_session<T: RdpEventSender + Clone>(
                                     );
                                 }
                             }
-                        } else {
+                        } else if !udp_tunnels.contains_key(&request_id) {
                             warn!("⚠️  TunnelEstablished received but tunnel info not found for request_id={}", request_id);
                         }
 
@@ -2981,12 +3023,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                             continue;
                         }
 
-                        // Determine transport context using rule engine
-                        // RULE: Use UDP only if tunnel has completed Soft-Sync, otherwise TCP
-                        // Per MS-RDPEDYC: "The server manager and client manager MUST NOT send or receive
-                        // any dynamic virtual channel data on the multitransport tunnels until the Soft-Sync
-                        // negotiation has completed."
-                        let transport_context = transport_rules.route_incoming_tunnel_data(request_id).to_context();
+                        // Tunnel data is always handed over as such: the DVC client holds it back
+                        // until its Soft-Sync Response has gone out ([MS-RDPEDYC] 3.2.5.3.1), which
+                        // it knows before the tunnel state here does.
+                        let transport_context = TransportContext::UdpTunnel(request_id);
                         
                         info!("   🎯 Transport rule decision: {:?} for tunnel {}", transport_context, request_id);
 
@@ -3148,7 +3188,10 @@ async fn active_session<T: RdpEventSender + Clone>(
                         udp_tunnels.remove(&request_id);
                         let carried_channels = transport_rules
                             .get_tunnel(request_id)
-                            .is_some_and(|tunnel| tunnel.can_carry_dvc_data());
+                            .is_some_and(|tunnel| tunnel.can_carry_dvc_data())
+                            || active_stage
+                                .get_svc_processor::<ironrdp_dvc::DrdynvcClient>()
+                                .is_some_and(|drdynvc| drdynvc.has_channels_on(TUNNELTYPE_UDPFECR));
                         transport_rules.transition_tunnel(request_id, TunnelState::Closed);
                         // Soft-Sync only moves channels onto a tunnel, nothing moves them back:
                         // the server goes on sending graphics into the dead tunnel, and Windows
@@ -3159,11 +3202,15 @@ async fn active_session<T: RdpEventSender + Clone>(
                             warn!("the UDP tunnel broke down, reconnecting");
                             return Ok(RdpControlFlow::ReconnectAfterTunnelLoss);
                         }
+                        // A Soft-Sync Request waiting for this tunnel is answered without it.
+                        if let Some(frame) = report_tunnel_failure(&mut active_stage)? {
+                            outputs.push(ActiveStageOutput::ResponseFrame(frame));
+                        }
                     }
                     None => unreachable!("a closed tunnel stream is reported as Disconnected"),
                 }
 
-                vec![]
+                outputs
             }
             _ = stats_timer.tick() => {
                 // Send periodic connection statistics to UI

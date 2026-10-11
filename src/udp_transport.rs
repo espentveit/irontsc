@@ -42,6 +42,9 @@ pub struct UdpTransportConfig {
     pub use_tls: bool,
     /// Use DTLS encryption for lossy mode (required when Enhanced RDP Security is in effect)
     pub use_dtls: bool,
+    /// Public key of the certificate the main connection's TLS session was accepted with. The
+    /// tunnel's TLS session ends at the same server, so it must present the same key.
+    pub server_public_key: Vec<u8>,
 }
 
 impl UdpTransportConfig {
@@ -67,6 +70,7 @@ impl Default for UdpTransportConfig {
             mtu: 1232,
             use_tls: false,  // Default to no TLS (Standard RDP Security)
             use_dtls: false, // Default to no DTLS (Standard RDP Security)
+            server_public_key: Vec::new(),
         }
     }
 }
@@ -131,6 +135,8 @@ pub struct UdpTransportManager {
     tunnel_data_buffer: Vec<u8>,
     /// Server name for TLS/DTLS
     server_name: String,
+    /// Key the tunnel's TLS certificate must carry, see `UdpTransportConfig::server_public_key`
+    server_public_key: Vec<u8>,
     /// TLS socket wrapper for reliable mode (if TLS is required per MS-RDPEMT)
     tls_socket: Option<DtlsUdpSocket>,
     /// DTLS socket wrapper for lossy mode (if DTLS is required per MS-RDPEMT)
@@ -265,6 +271,7 @@ impl UdpTransportManager {
             pending_tunnel_response: None,
             tunnel_data_buffer: Vec::new(),
             server_name,
+            server_public_key: config.server_public_key.clone(),
             tls_socket: None,
             dtls_socket: None,
             use_tls,
@@ -380,7 +387,7 @@ impl UdpTransportManager {
             // Create TLS/DTLS layer (encryption only, no socket I/O)
             let dtls_config = DtlsConfig {
                 server_name: self.server_name.clone(),
-                verify_certificate: false, // TODO: Enable in production
+                server_public_key: self.server_public_key.clone(),
                 protocol: protocol_enum,
             };
 

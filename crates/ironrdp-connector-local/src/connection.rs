@@ -893,11 +893,13 @@ fn create_gcc_blocks<'a>(
         // Client Message Channel Data - required for RDP 10.0+ (Windows 10+)
         // This advertises support for server-initiated messages and autodetect
         message_channel: Some(gcc::ClientMessageChannelData),
-        // Enable multitransport (UDP) support with the same flag set mstsc uses.
+        // Enable multitransport (UDP) support. mstsc also sets TRANSPORT_TYPE_UDP_PREFERRED,
+        // which lets the server tunnel static channel traffic over dynamic channels
+        // ([MS-RDPEDYC] 3.1.5.4): with it Windows moves cliprdr and rdpdr onto dynamic channels
+        // of the same names. That is not implemented here, so it is not advertised.
         multi_transport_channel: Some(ironrdp_pdu::gcc::MultiTransportChannelData {
             flags: ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
                 | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
-                | ironrdp_pdu::gcc::MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
                 | ironrdp_pdu::gcc::MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
         }),
         monitor_extended: None,

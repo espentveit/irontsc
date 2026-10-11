@@ -550,7 +550,6 @@ pub fn create_client_data(
         multi_transport_channel: Some(MultiTransportChannelData {
             flags: MultiTransportFlags::TRANSPORT_TYPE_UDP_FECR
                 | MultiTransportFlags::TRANSPORT_TYPE_UDP_FECL
-                | MultiTransportFlags::TRANSPORT_TYPE_UDP_PREFERRED
                 | MultiTransportFlags::SOFT_SYNC_TCP_TO_UDP,
         }),
         monitor_extended: None,

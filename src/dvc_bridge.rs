@@ -2,8 +2,11 @@
 //!
 //! Two different things bring one here, and they differ in where the replies go.
 //!
-//! A server that has agreed Soft-Sync ([MS-RDPEDYC] 3.1.5.3) rearranges the session's
-//! redirection channels, and does it asymmetrically. It stops writing on the static channel --
+//! A server that both ends told they support static channel tunnelling
+//! (`TRANSPORTTYPE_UDP_PREFERRED`, [MS-RDPEDYC] 3.1.5.4) rearranges the session's redirection
+//! channels, and Windows does it asymmetrically. This client no longer advertises the flag, so
+//! a server that keeps to the spec leaves these channels static and this half of the bridge
+//! stays idle; it is kept for one that moves them anyway. It stops writing on the static channel --
 //! `cliprdr`, `rdpdr` -- and opens a dynamic channel of the same name to write on, while going
 //! on *reading* the static one, and never reading the dynamic one it opened.
 //!

@@ -25,6 +25,9 @@ use crate::{
 pub trait DvcClientProcessor: DvcProcessor {}
 
 /// Format tunnel type as a human-readable string
+/// Tunnel PDUs held back waiting for a Soft-Sync Request before the connection is given up on.
+const MAX_HELD_TUNNEL_PDUS: usize = 1024;
+
 fn tunnel_type_name(tunnel_type: u32) -> &'static str {
     match tunnel_type {
         0x00000001 => "TUNNELTYPE_UDPFECR (Reliable UDP)",
@@ -49,8 +52,18 @@ pub struct DrdynvcClient {
     /// Per MS-RDPEDYC §3.2.5.3.2: "Each multitransport tunnel that the client manager will use
     /// to send dynamic virtual channel data MUST be specified in the TunnelsToSwitch field."
     available_udp_tunnels: alloc::collections::BTreeSet<u32>,
-    /// Buffered Soft-Sync request that arrived before tunnel was established
+    /// A Soft-Sync Request naming a tunnel that is still being set up. It is answered once
+    /// every tunnel it names is up or has failed: the response must not name a tunnel before
+    /// its Initiate Multitransport Response went out ([MS-RDPEDYC] 3.2.5.3.2), and answering
+    /// twice -- empty first, then again -- is not something the protocol has.
     pending_soft_sync: Option<SoftSyncRequestPdu>,
+    /// Tunnels that failed to come up; a Soft-Sync Request naming them is answered without them.
+    failed_udp_tunnels: alloc::collections::BTreeSet<u32>,
+    /// Whether the Soft-Sync Response has gone out. Until then nothing that arrives on a tunnel
+    /// is read ([MS-RDPEDYC] 3.2.5.3.1), see `held_tunnel_data`.
+    soft_sync_answered: bool,
+    /// Tunnel PDUs that arrived before the Soft-Sync Response went out, in arrival order.
+    held_tunnel_data: Vec<(Vec<u8>, ironrdp_svc::TransportContext)>,
     /// Where a channel's decompression context comes from, when the client can decompress.
     ///
     /// Its presence is what makes this a version 3 DVC manager, and so what allows the server
@@ -89,6 +102,9 @@ impl DrdynvcClient {
             udp_channels: BTreeMap::new(),
             available_udp_tunnels: alloc::collections::BTreeSet::new(),
             pending_soft_sync: None,
+            failed_udp_tunnels: alloc::collections::BTreeSet::new(),
+            soft_sync_answered: false,
+            held_tunnel_data: Vec::new(),
             compression: None,
             decompressors: BTreeMap::new(),
             channel_transports: BTreeMap::new(),
@@ -156,25 +172,35 @@ impl DrdynvcClient {
             tunnel_type_name(tunnel_type)
         );
         self.available_udp_tunnels.insert(tunnel_type);
-
-        // Check if we have a buffered Soft-Sync request waiting for this tunnel
-        let mut responses = Vec::new();
-        if let Some(request) = self.pending_soft_sync.take() {
-            info!("📦 Processing buffered Soft-Sync request now that tunnel 0x{:08X} is available", tunnel_type);
-            self.handle_soft_sync_request_with_transport(&request, &mut responses, ironrdp_svc::TransportContext::Tcp)?;
-        }
-
-        Ok(responses)
+        self.failed_udp_tunnels.remove(&tunnel_type);
+        self.answer_pending_soft_sync()
     }
 
-    /// Unregister a UDP tunnel (e.g., if connection fails)
-    pub fn unregister_available_tunnel(&mut self, tunnel_type: u32) {
+    /// Records that a tunnel failed to come up. A Soft-Sync Request waiting for it is answered
+    /// now, without it, so the channels it names stay on TCP.
+    pub fn tunnel_failed(&mut self, tunnel_type: u32) -> Result<Vec<SvcMessage>, pdu::PduError> {
         debug!(
-            "Unregistering UDP tunnel type: 0x{:08X} ({})",
+            "UDP tunnel type 0x{:08X} ({}) failed",
             tunnel_type,
             tunnel_type_name(tunnel_type)
         );
         self.available_udp_tunnels.remove(&tunnel_type);
+        self.failed_udp_tunnels.insert(tunnel_type);
+        self.answer_pending_soft_sync()
+    }
+
+    /// Whether Soft-Sync moved any channel onto the given tunnel.
+    pub fn has_channels_on(&self, tunnel_type: u32) -> bool {
+        self.udp_channels.values().any(|&t| t == tunnel_type)
+    }
+
+    fn answer_pending_soft_sync(&mut self) -> Result<Vec<SvcMessage>, pdu::PduError> {
+        let mut responses = Vec::new();
+        if let Some(request) = self.pending_soft_sync.take() {
+            info!("📦 Answering the Soft-Sync Request that was waiting for its tunnels");
+            self.handle_soft_sync_request(&request, &mut responses)?;
+        }
+        Ok(responses)
     }
 
     /// Clears the soft-sync completion status (used after handling the event)
@@ -285,37 +311,36 @@ impl DrdynvcClient {
         request: &SoftSyncRequestPdu,
         responses: &mut Vec<SvcMessage>,
     ) -> PduResult<()> {
-        self.handle_soft_sync_request_internal(request, responses, None)
-    }
-
-    fn handle_soft_sync_request_with_transport(
-        &mut self,
-        request: &SoftSyncRequestPdu,
-        responses: &mut Vec<SvcMessage>,
-        transport: ironrdp_svc::TransportContext,
-    ) -> PduResult<()> {
-        self.handle_soft_sync_request_internal(request, responses, Some(transport))
-    }
-
-    fn handle_soft_sync_request_internal(
-        &mut self,
-        request: &SoftSyncRequestPdu,
-        responses: &mut Vec<SvcMessage>,
-        transport: Option<ironrdp_svc::TransportContext>,
-    ) -> PduResult<()> {
         info!(
             "📥 Received Soft-Sync Request from server: {} tunnel(s)",
             request.tunnels.len()
         );
 
-        // Per MS-RDPEDYC §2.2.5.1, validate SOFT_SYNC_TCP_FLUSHED flag
-        // "This flag MUST be set to indicate no more data will be sent over TCP for the specified DVCs"
+        // [MS-RDPEDYC] 2.2.5.1: SOFT_SYNC_TCP_FLUSHED must be set. Without it the server has not
+        // said its TCP data for these channels is out, so none of them moves: an empty response
+        // keeps them all on TCP.
         if (request.flags & crate::pdu::SOFT_SYNC_TCP_FLUSHED) == 0 {
             warn!(
-                "⚠️  Server Soft-Sync Request missing SOFT_SYNC_TCP_FLUSHED flag (flags=0x{:04X})",
+                "⚠️  Soft-Sync Request without SOFT_SYNC_TCP_FLUSHED (flags=0x{:04X}), channels stay on TCP",
                 request.flags
             );
-            warn!("   Per MS-RDPEDYC §2.2.5.1, this flag MUST be set - continuing anyway");
+            self.pending_soft_sync = None;
+            self.send_soft_sync_response(request, &alloc::collections::BTreeSet::new(), responses);
+            return Ok(());
+        }
+
+        // A tunnel still being set up gets its answer once it is up or has failed.
+        if let Some(tunnel) = request.tunnels.iter().find(|tunnel| {
+            !self.available_udp_tunnels.contains(&tunnel.tunnel_type)
+                && !self.failed_udp_tunnels.contains(&tunnel.tunnel_type)
+        }) {
+            info!(
+                "   Tunnel 0x{:08X} ({}) is not up yet, answering Soft-Sync once it is",
+                tunnel.tunnel_type,
+                tunnel_type_name(tunnel.tunnel_type)
+            );
+            self.pending_soft_sync = Some(request.clone());
+            return Ok(());
         }
 
         for tunnel in &request.tunnels {
@@ -325,30 +350,11 @@ impl DrdynvcClient {
                 tunnel_type_name(tunnel.tunnel_type),
                 tunnel.channel_ids.len()
             );
-            
-            // Check if this tunnel type is actually available (established with TunnelCreateResponse)
             if !self.available_udp_tunnels.contains(&tunnel.tunnel_type) {
-                warn!(
-                    "⚠️  Server requesting tunnel type 0x{:08X} ({}) but it's not established yet!",
-                    tunnel.tunnel_type,
-                    tunnel_type_name(tunnel.tunnel_type)
-                );
-                warn!("   Buffering Soft-Sync request - will process after TunnelCreateResponse");
-                
-                // Buffer this request to process later when tunnel is ready
-                self.pending_soft_sync = Some(request.clone());
-                
-                // Send empty response for now (stay on TCP)
-                let empty_tunnels = alloc::collections::BTreeSet::new();
-                let response = DrdynvcClientPdu::SoftSyncResponse(
-                    SoftSyncResponsePdu::from_request_with_available(request, &empty_tunnels)
-                );
-                info!("📤 Sending empty DVC SoftSync Response PDU (waiting for tunnel): {response:?}");
-                let msg = SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp);
-                responses.push(msg);
-                return Ok(());
+                info!("   Tunnel 0x{:08X} failed, its channels stay on TCP", tunnel.tunnel_type);
+                continue;
             }
-            
+
             let mut udp_channel_count = 0;
             for &channel_id in &tunnel.channel_ids {
                 // Check if this channel supports UDP transport (skip stubs)
@@ -400,18 +406,25 @@ impl DrdynvcClient {
             }
         }
 
+        let available = self.available_udp_tunnels.clone();
+        self.send_soft_sync_response(request, &available, responses);
+        Ok(())
+    }
+
+    /// Queues the Soft-Sync Response, naming those of the request's tunnels in `available`.
+    /// It always goes on the drdynvc static channel over TCP; from here on, tunnel data is read.
+    fn send_soft_sync_response(
+        &mut self,
+        request: &SoftSyncRequestPdu,
+        available: &alloc::collections::BTreeSet<u32>,
+        responses: &mut Vec<SvcMessage>,
+    ) {
         let response = DrdynvcClientPdu::SoftSyncResponse(
-            SoftSyncResponsePdu::from_request_with_available(request, &self.available_udp_tunnels),
+            SoftSyncResponsePdu::from_request_with_available(request, available),
         );
         info!("📤 Sending DVC SoftSync Response PDU: {response:?}");
-
-        // Per MS-RDPEDYC: Soft-Sync responses MUST go over TCP
-        // This is the transition message that signals switching to UDP is complete
-        // The response itself uses TCP, but signals that subsequent Data PDUs can use UDP
-        let msg = SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp);
-
-        responses.push(msg);
-        Ok(())
+        responses.push(SvcMessage::from(response).with_transport(ironrdp_svc::TransportContext::Tcp));
+        self.soft_sync_answered = true;
     }
 
     /// Create and return a Soft-Sync Request PDU to switch dynamic channels to UDP transport.
@@ -473,6 +486,40 @@ impl SvcProcessor for DrdynvcClient {
     }
 
     fn process(
+        &mut self,
+        payload: &[u8],
+        transport: ironrdp_svc::TransportContext,
+    ) -> PduResult<Vec<SvcMessage>> {
+        if transport == ironrdp_svc::TransportContext::Tcp {
+            return self.process_pdu(payload, transport);
+        }
+
+        // [MS-RDPEDYC] 3.2.5.3.1: nothing on a tunnel is read before the Soft-Sync Request has
+        // been answered; only then has the server said its TCP data for the channels is out.
+        // Windows does not send on the tunnel before the response, so this only holds data that
+        // overtook it, which goes up with the next tunnel PDU after the response.
+        if !self.soft_sync_answered {
+            if self.held_tunnel_data.len() >= MAX_HELD_TUNNEL_PDUS {
+                return Err(pdu_other_err!(
+                    "tunnel data keeps arriving without a Soft-Sync Request"
+                ));
+            }
+            debug!("Holding a tunnel PDU until the Soft-Sync Request is answered");
+            self.held_tunnel_data.push((payload.to_vec(), transport));
+            return Ok(Vec::new());
+        }
+
+        let mut responses = Vec::new();
+        for (held, held_transport) in core::mem::take(&mut self.held_tunnel_data) {
+            responses.extend(self.process_pdu(&held, held_transport)?);
+        }
+        responses.extend(self.process_pdu(payload, transport)?);
+        Ok(responses)
+    }
+}
+
+impl DrdynvcClient {
+    fn process_pdu(
         &mut self,
         payload: &[u8],
         transport: ironrdp_svc::TransportContext,
@@ -589,7 +636,10 @@ impl SvcProcessor for DrdynvcClient {
             }
             DrdynvcServerPdu::SoftSyncRequest(request) => {
                 debug!("Got DVC SoftSync Request PDU: {request:?}");
-                self.handle_soft_sync_request_with_transport(&request, &mut responses, transport)?;
+                if transport != ironrdp_svc::TransportContext::Tcp {
+                    return Err(pdu_other_err!("Soft-Sync Request on a multitransport tunnel"));
+                }
+                self.handle_soft_sync_request(&request, &mut responses)?;
             }
             DrdynvcServerPdu::SoftSyncResponse(response) => {
                 debug!("Got DVC SoftSync Response PDU: {response:?}");
@@ -614,4 +664,96 @@ impl SvcClientProcessor for DrdynvcClient {}
 
 fn decode_dvc_message(user_data: &[u8]) -> DecodeResult<DrdynvcServerPdu> {
     DrdynvcServerPdu::decode(&mut ReadCursor::new(user_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use ironrdp_svc::TransportContext;
+
+    use super::*;
+    use crate::pdu::{SoftSyncChannelListEntry, SOFT_SYNC_CHANNEL_LIST_PRESENT, SOFT_SYNC_TCP_FLUSHED};
+
+    const RELIABLE: u32 = 0x0000_0001;
+    const TUNNEL: TransportContext = TransportContext::UdpTunnel(7);
+
+    fn soft_sync_request(flags: u16) -> Vec<u8> {
+        let request = SoftSyncRequestPdu::new(
+            flags | SOFT_SYNC_CHANNEL_LIST_PRESENT,
+            vec![SoftSyncChannelListEntry {
+                tunnel_type: RELIABLE,
+                channel_ids: vec![3],
+            }],
+        );
+        ironrdp_core::encode_vec(&DrdynvcServerPdu::SoftSyncRequest(request)).expect("encode")
+    }
+
+    fn close_request(channel_id: u32) -> Vec<u8> {
+        ironrdp_core::encode_vec(&DrdynvcServerPdu::Close(ClosePdu::new(channel_id))).expect("encode")
+    }
+
+    /// The tunnels a Soft-Sync Response names, or `None` when `message` is not one.
+    fn soft_sync_tunnels(message: &SvcMessage) -> Option<u32> {
+        let bytes = message.to_pdu_bytes().expect("encode");
+        (bytes[0] >> 4 == 0x09).then(|| u32::from_le_bytes(bytes[2..6].try_into().unwrap()))
+    }
+
+    #[test]
+    fn soft_sync_waits_for_a_tunnel_that_is_not_up() {
+        let mut client = DrdynvcClient::new();
+        let responses = client
+            .process(&soft_sync_request(SOFT_SYNC_TCP_FLUSHED), TransportContext::Tcp)
+            .expect("request");
+        assert!(responses.is_empty(), "no response before the tunnel is up, not even an empty one");
+
+        let responses = client.register_available_tunnel(RELIABLE).expect("register");
+        assert_eq!(responses.len(), 1);
+        assert_eq!(soft_sync_tunnels(&responses[0]), Some(1));
+    }
+
+    #[test]
+    fn soft_sync_is_answered_without_a_failed_tunnel() {
+        let mut client = DrdynvcClient::new();
+        client
+            .process(&soft_sync_request(SOFT_SYNC_TCP_FLUSHED), TransportContext::Tcp)
+            .expect("request");
+        let responses = client.tunnel_failed(RELIABLE).expect("failed");
+        assert_eq!(responses.len(), 1);
+        assert_eq!(soft_sync_tunnels(&responses[0]), Some(0));
+        assert!(!client.has_channels_on(RELIABLE));
+    }
+
+    #[test]
+    fn soft_sync_without_tcp_flushed_moves_nothing() {
+        let mut client = DrdynvcClient::new();
+        client.register_available_tunnel(RELIABLE).expect("register");
+        let responses = client.process(&soft_sync_request(0), TransportContext::Tcp).expect("request");
+        assert_eq!(responses.len(), 1);
+        assert_eq!(soft_sync_tunnels(&responses[0]), Some(0));
+        assert!(!client.has_channels_on(RELIABLE));
+    }
+
+    #[test]
+    fn tunnel_data_waits_for_the_soft_sync_response() {
+        let mut client = DrdynvcClient::new();
+        client.register_available_tunnel(RELIABLE).expect("register");
+        assert!(client.process(&close_request(5), TUNNEL).expect("early").is_empty());
+
+        client
+            .process(&soft_sync_request(SOFT_SYNC_TCP_FLUSHED), TransportContext::Tcp)
+            .expect("request");
+        let responses = client.process(&close_request(6), TUNNEL).expect("after");
+        assert_eq!(responses.len(), 2, "the held PDU goes up first, then the new one");
+        assert!(responses.iter().all(|r| r.transport() == Some(TUNNEL)));
+    }
+
+    #[test]
+    fn tunnel_data_without_a_soft_sync_request_ends_the_connection() {
+        let mut client = DrdynvcClient::new();
+        for _ in 0..MAX_HELD_TUNNEL_PDUS {
+            client.process(&close_request(5), TUNNEL).expect("held");
+        }
+        assert!(client.process(&close_request(5), TUNNEL).is_err());
+    }
 }
