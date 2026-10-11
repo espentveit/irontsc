@@ -477,6 +477,9 @@ impl<T: RdpEventSender + Clone> RdpClient<T> {
                     self.config.connector.desktop_size.width = width;
                     self.config.connector.desktop_size.height = height;
                 }
+                Ok(RdpControlFlow::ReconnectAfterTunnelLoss) => {
+                    info!("Reconnecting after the UDP tunnel broke down");
+                }
                 Ok(RdpControlFlow::TerminatedGracefully(reason)) => {
                     let _ = self
                         .event_loop_proxy
@@ -496,6 +499,7 @@ impl<T: RdpEventSender + Clone> RdpClient<T> {
 
 enum RdpControlFlow {
     ReconnectWithNewSize { width: u16, height: u16 },
+    ReconnectAfterTunnelLoss,
     TerminatedGracefully(GracefulDisconnectReason),
 }
 
@@ -2850,18 +2854,19 @@ async fn active_session<T: RdpEventSender + Clone>(
                     pending::<Option<UdpTransportEvent>>().await
                 } else {
                     // Create futures for all tunnel receivers
-                    let futures: Vec<_> = udp_tunnels
-                        .values_mut()
-                        .map(|tunnel| Box::pin(tunnel.event_rx.recv()))
-                        .collect();
+                    let (ids, futures): (Vec<u32>, Vec<_>) = udp_tunnels
+                        .iter_mut()
+                        .map(|(id, tunnel)| (*id, Box::pin(tunnel.event_rx.recv())))
+                        .unzip();
 
-                    if futures.is_empty() {
-                        pending::<Option<UdpTransportEvent>>().await
-                    } else {
-                        // select_all returns (result, index, remaining_futures)
-                        let (result, _index, _remaining) = select_all(futures).await;
-                        result
-                    }
+                    // select_all returns (result, index, remaining_futures)
+                    let (result, index, _remaining) = select_all(futures).await;
+                    // A tunnel task that ended without saying why has failed all the same, and
+                    // its closed receiver would otherwise be ready on every poll.
+                    Some(result.unwrap_or_else(|| UdpTransportEvent::Disconnected {
+                        request_id: ids[index],
+                        reason: "the tunnel task ended".to_string(),
+                    }))
                 }
             } => {
                 let mut outputs = Vec::new();
@@ -3141,12 +3146,21 @@ async fn active_session<T: RdpEventSender + Clone>(
                     Some(UdpTransportEvent::Disconnected { request_id, reason }) => {
                         warn!("⚠️  UDP transport disconnected (request_id={}): {}", request_id, reason);
                         udp_tunnels.remove(&request_id);
+                        let carried_channels = transport_rules
+                            .get_tunnel(request_id)
+                            .is_some_and(|tunnel| tunnel.can_carry_dvc_data());
+                        transport_rules.transition_tunnel(request_id, TunnelState::Closed);
+                        // Soft-Sync only moves channels onto a tunnel, nothing moves them back:
+                        // the server goes on sending graphics into the dead tunnel, and Windows
+                        // gives up on it after about 3 minutes without ever ending the session or
+                        // returning to TCP. The server offers a tunnel only during the connection
+                        // sequence, so a new connection is where the session, and UDP, come back.
+                        if carried_channels {
+                            warn!("the UDP tunnel broke down, reconnecting");
+                            return Ok(RdpControlFlow::ReconnectAfterTunnelLoss);
+                        }
                     }
-                    None => {
-                        warn!("⚠️  UDP transport event stream closed (one tunnel died)");
-                        // Note: We can't easily determine which tunnel closed here
-                        // The receiver returning None means that specific tunnel's sender was dropped
-                    }
+                    None => unreachable!("a closed tunnel stream is reported as Disconnected"),
                 }
 
                 vec![]

@@ -460,6 +460,8 @@ impl UdpTransportManager {
         // Main event loop
         let mut recv_buffer = vec![0u8; 65536];
         let mut check_retransmit_interval = tokio::time::interval(Duration::from_millis(100));
+        // Set when the tunnel ends on its own, as opposed to a shutdown from the session.
+        let mut failure: Option<String> = None;
 
         loop {
             tokio::select! {
@@ -479,6 +481,7 @@ impl UdpTransportManager {
                         }
                         Err(e) => {
                             error!("UDP recv error: {}", e);
+                            failure = Some(format!("receive error: {e}"));
                             break;
                         }
                     }
@@ -599,8 +602,24 @@ impl UdpTransportManager {
                     }
                 }
             }
+
+            // [MS-RDPEUDP2] leaves retransmission entirely to the sender, so a stream waiting on
+            // a chunk the peer has written off never recovers, and a silent peer may be gone. The
+            // tunnel fails either way, and the session decides what that means for it.
+            let reason = self.connection.lock().await.failure();
+            if let Some(reason) = reason {
+                warn!("🧊 UDP tunnel failed: {reason}");
+                failure = Some(reason.to_string());
+                break;
+            }
         }
 
+        if let Some(reason) = failure {
+            let request_id = self.request_id.unwrap_or(0);
+            let _ = self
+                .event_tx
+                .send(UdpTransportEvent::Disconnected { request_id, reason });
+        }
         info!("UDP transport manager stopped");
         Ok(())
     }
@@ -733,19 +752,7 @@ impl UdpTransportManager {
         // First, try to process as RDP UDP packet to extract payload
         let mut conn = self.connection.lock().await;
         let source_result = conn.process_source_packet(packet);
-        // [MS-RDPEUDP2] leaves retransmission entirely to the sender, so a stream waiting on a
-        // channel sequence the peer has written off never recovers. Rather than hold a session
-        // that cannot move, the transport gives up and the channels return to TCP.
-        let beyond_recovery = conn.is_beyond_recovery();
         drop(conn);
-
-        if beyond_recovery {
-            warn!(
-                "🧊 UDP transport gave up on a stalled stream; dropping it so its channels \
-                 go back over TCP"
-            );
-            return Err(anyhow::anyhow!("udp stream stalled beyond recovery"));
-        }
 
         match source_result {
             Ok(payloads) if !payloads.is_empty() => {

@@ -282,7 +282,9 @@ impl TransportRules {
         };
 
         let Some(tunnel) = self.tunnels.get(&tunnel_id) else {
-            // Tunnel doesn't exist anymore, fall back to TCP
+            // Tunnel doesn't exist anymore, so our side can only use TCP. The server's side
+            // stays on the tunnel, Soft-Sync has no way back: losing a tunnel that carries
+            // channels ends the connection, see `RdpControlFlow::ReconnectAfterTunnelLoss`.
             warn!("⚠️  Channel {} routed to non-existent tunnel {}, using TCP", 
                   channel_id, tunnel_id);
             return TransportRoute::Tcp;

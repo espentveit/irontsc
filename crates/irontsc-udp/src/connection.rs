@@ -40,16 +40,33 @@ const CHANNEL_ZERO_GRACE: Duration = Duration::from_millis(1000);
 /// simply stops and the session looks frozen for no visible reason.
 const CHANNEL_STALL_WARN: Duration = Duration::from_millis(1500);
 
+/// [MS-RDPEUDP2] 3.1.1.3: both ends send at least every 16 seconds, Windows every 4 (note <2>),
+/// and 16 seconds without a datagram mean the peer is gone.
+const V3_PEER_TIMEOUT: Duration = Duration::from_secs(16);
+
+/// [MS-RDPEUDP] 3.1.1.9: 65 seconds without a datagram end a version 1 or 2 connection.
+const V1_PEER_TIMEOUT: Duration = Duration::from_secs(65);
+
+/// Silence after which the peer may have moved more than half the sequence space on, see
+/// `resync_receive_base`. Two of Windows' keepalive intervals, an idle tunnel never gets there.
+const V3_RESYNC_SILENCE: Duration = Duration::from_secs(8);
+
 /// How long a stalled stream is given before the transport is written off.
 ///
 /// [MS-RDPEUDP2] 3.1.5.1.3 puts reliability entirely on the sender: a lost packet is "resent
 /// with a new sequence number ... the ChannelSeqNum remains the same", and the receiver's only
-/// move is to buffer and wait -- there is no way to ask for a channel sequence again. So once
-/// the sender has written a packet off (an AckOfAcks moved our window past it) and no
-/// retransmission carries its ChannelSeqNum, the stream cannot recover, and waiting longer only
-/// keeps a dead session on screen. The transport is dropped instead, and the dynamic channels it
-/// carried go back over TCP, which is where they were before Soft-Sync moved them.
-const CHANNEL_STALL_FATAL: Duration = Duration::from_secs(4);
+/// move is to buffer and wait -- there is no way to ask for a channel sequence again. A stream
+/// stuck behind a missing chunk for as long as the peer timeout is no better than a peer that is
+/// gone, and waiting longer only keeps a dead session on screen. The tunnel fails instead, like
+/// one whose peer has gone quiet.
+const CHANNEL_STALL_FATAL: Duration = V3_PEER_TIMEOUT;
+
+/// [MS-RDPEUDP] 3.1.6.1: the retransmit timeout is twice the round trip, at least the version's
+/// minimum, and doubles with every resend of the same packet. Windows lets it grow to 120
+/// seconds (note <8>). Held below the round trip, every packet is resent before its
+/// acknowledgement can arrive, and a v3 resend goes out under a new data sequence number, so the
+/// late acknowledgement names the abandoned one and never clears it.
+const MAX_RETRANSMIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Largest ACK vector we will build, in bytes (the wire field is 7 bits wide).
 const V3_MAX_ACKVEC_BYTES: usize = 0x7f;
@@ -172,6 +189,8 @@ impl Default for UdpConfig {
 struct PendingPacket {
     data: Vec<u8>,
     last_sent: Instant,
+    /// How long after `last_sent` the packet is resent, doubled on every resend.
+    retransmit_timeout: Duration,
     retransmit_count: u8,
     /// Channel sequence and payload of a v3 DATA packet. A v3 retransmission is encoded again
     /// under a new data sequence number, so the original bytes cannot simply be resent.
@@ -242,6 +261,8 @@ pub struct UdpConnection {
     v3_channel_stall_reported: bool,
     /// False until the first v3 DATA packet tells us where the peer's sequence space starts.
     v3_base_established: bool,
+    /// Set after `V3_RESYNC_SILENCE` without a datagram: no ACK until an AckOfAcks sets the base.
+    v3_resync: bool,
     /// Highest v3 sequence number seen so far, used to size the ACK vector.
     v3_highest_received: u16,
     /// Last AckOfAcks value we put on the wire, so we only repeat it when it changes.
@@ -259,6 +280,8 @@ pub struct UdpConnection {
     epoch: Instant,
     /// Arrival time of the most recent DATA packet, for SendAckTimeGapInMs.
     last_data_arrival: Option<Instant>,
+    /// Arrival time of the most recent datagram of any kind, for `V3_RESYNC_SILENCE`.
+    last_received: Instant,
     last_activity: Instant,
     last_keepalive: Instant,
 }
@@ -290,6 +313,7 @@ impl UdpConnection {
             v3_channel_stalled_since: None,
             v3_channel_stall_reported: false,
             v3_base_established: false,
+            v3_resync: false,
             v3_highest_received: 0,
             v3_announced_aoa: None,
             v3_remote_acked: None,
@@ -299,6 +323,7 @@ impl UdpConnection {
             smoothed_rtt: None,
             epoch: now,
             last_data_arrival: None,
+            last_received: now,
             last_activity: now,
             last_keepalive: now,
         }
@@ -420,6 +445,7 @@ impl UdpConnection {
                 // learned from the first DATA packet the peer sends.
                 self.v3_expected_sequence = 0;
                 self.v3_base_established = false;
+                self.v3_resync = false;
                 self.v3_received_dseq.clear();
                 self.v3_channel_buffer.clear();
                 self.v3_next_channel_delivery = 1;
@@ -494,6 +520,7 @@ impl UdpConnection {
         self.config.retransmit_timeout_ms = self.negotiated_version.min_retransmit_timeout_ms();
         self.state = ConnectionState::Connected;
         self.last_activity = Instant::now();
+        self.last_received = self.last_activity;
         self.last_keepalive = self.last_activity;
         Ok(())
     }
@@ -517,7 +544,7 @@ impl UdpConnection {
             return Ok(Vec::new());
         }
 
-        self.last_activity = Instant::now();
+        self.note_received();
 
         match self.negotiated_version {
             UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => self.process_v1_source(bytes),
@@ -530,7 +557,7 @@ impl UdpConnection {
             return Ok(());
         }
 
-        self.last_activity = Instant::now();
+        self.note_received();
 
         match self.negotiated_version {
             UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => {
@@ -557,10 +584,9 @@ impl UdpConnection {
         let mut due = Vec::new();
         let mut to_remove = Vec::new();
         let now = Instant::now();
-        let timeout = Duration::from_millis(self.config.retransmit_timeout_ms as u64);
 
         for (key, pending) in self.pending_packets.iter_mut() {
-            if now.duration_since(pending.last_sent) >= timeout {
+            if now.duration_since(pending.last_sent) >= pending.retransmit_timeout {
                 if pending.retransmit_count < self.config.max_retransmits {
                     due.push(*key);
                 } else {
@@ -588,6 +614,7 @@ impl UdpConnection {
             };
             pending.retransmit_count += 1;
             pending.last_sent = now;
+            pending.retransmit_timeout = (pending.retransmit_timeout * 2).min(MAX_RETRANSMIT_TIMEOUT);
 
             let Some((channel_sequence, payload)) = pending.v3_chunk.take() else {
                 retransmits.push(pending.data.clone());
@@ -672,17 +699,24 @@ impl UdpConnection {
         Ok(Some(packet_bytes))
     }
 
+    /// A v3 keepalive is an ACK, so none goes out while the base is being resynchronised.
     pub fn needs_keepalive(&self) -> bool {
-        Instant::now().duration_since(self.last_keepalive)
-            >= Duration::from_millis(self.config.keepalive_interval_ms as u64)
+        !self.v3_resyncing()
+            && Instant::now().duration_since(self.last_keepalive)
+                >= Duration::from_millis(self.config.keepalive_interval_ms as u64)
     }
 
     /// Returns true if there's a pending acknowledgement that should be sent
     pub fn has_pending_ack(&self) -> bool {
-        self.pending_ack.is_some()
+        self.pending_ack.is_some() && !self.v3_resyncing()
     }
 
     pub fn create_ack(&mut self) -> Result<Vec<u8>> {
+        // Our position may lie ahead of the peer's numbers after a silence, see
+        // `resync_receive_base`.
+        if self.v3_resyncing() {
+            return Err(UdpError::Protocol("no acknowledgement until the peer's AckOfAcks"));
+        }
         self.last_keepalive = Instant::now();
         match self.negotiated_version {
             UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => {
@@ -797,6 +831,7 @@ impl UdpConnection {
                 PendingPacket {
                     data: encoded.clone(),
                     last_sent: Instant::now(),
+                    retransmit_timeout: self.initial_retransmit_timeout(),
                     retransmit_count: 0,
                     v3_chunk: Some((channel_sequence, data)),
                 },
@@ -828,7 +863,7 @@ impl UdpConnection {
     ) -> Result<Vec<u8>> {
         let mut flags = rdpudp_v2_flags!(DATA);
         let mut ack_payload = None;
-        if self.pending_ack.take().is_some() {
+        if !self.v3_resyncing() && self.pending_ack.take().is_some() {
             flags |= rdpudp_v2_flags!(ACK);
             let sequence = self.v3_expected_sequence.wrapping_sub(1);
             ack_payload = Some(V2AckPayload {
@@ -1100,16 +1135,35 @@ impl UdpConnection {
         result
     }
 
+    /// Why the tunnel cannot go on, if it cannot: the peer has been silent for the peer
+    /// timeout, or the stream has been stuck behind a missing chunk for as long.
+    pub fn failure(&self) -> Option<&'static str> {
+        if self.state != ConnectionState::Connected {
+            return None;
+        }
+        let (timeout, silent) = match self.negotiated_version {
+            UdpProtocolVersion::V3 => (V3_PEER_TIMEOUT, "nothing heard from the server for 16 seconds"),
+            UdpProtocolVersion::V1 | UdpProtocolVersion::V2 => {
+                (V1_PEER_TIMEOUT, "nothing heard from the server for 65 seconds")
+            }
+        };
+        let now = Instant::now();
+        if now.duration_since(self.last_received) >= timeout {
+            return Some(silent);
+        }
+        if !self.v3_channel_buffer.is_empty()
+            && self
+                .v3_channel_stalled_since
+                .is_some_and(|since| now.duration_since(since) >= CHANNEL_STALL_FATAL)
+        {
+            return Some("the stream stalled behind a chunk that never arrived");
+        }
+        None
+    }
+
     /// Reports, once, that the stream has stopped moving while chunks pile up behind a channel
     /// sequence that never arrives. Everything else stays healthy in that state -- the transport
     /// keeps acknowledging and the peer keeps sending -- so the session just appears to freeze.
-    /// True once a stalled stream has been given up on, so the transport can be torn down.
-    pub fn is_beyond_recovery(&self) -> bool {
-        self.v3_channel_stalled_since
-            .is_some_and(|since| Instant::now().duration_since(since) >= CHANNEL_STALL_FATAL)
-            && !self.v3_channel_buffer.is_empty()
-    }
-
     fn check_channel_stall(&mut self) {
         if self.v3_channel_buffer.is_empty() {
             self.v3_channel_stalled_since = None;
@@ -1143,7 +1197,7 @@ impl UdpConnection {
             "🧊 V3 stream stalled for {:?}: awaiting channel sequence {}, {} chunks buffered \
              (nearest {:?}, furthest {:?}); transport is healthy at dseq {} with {} out of order, \
              so nothing will unstick this on its own -- giving it until {:?} before the \
-             transport is dropped and its channels go back over TCP",
+             tunnel fails",
             now.duration_since(since),
             awaited,
             self.v3_channel_buffer.len(),
@@ -1166,8 +1220,14 @@ impl UdpConnection {
         // However far ahead: through an outage the peer resends its window again and again,
         // each time under new sequence numbers, and Windows moved almost 5000 ahead in a 2
         // second outage. Only its AckOfAcks brings us along. seq_gt limits the jump to half the
-        // sequence space.
-        if !self.v3_base_established || !seq_gt(base, self.v3_expected_sequence) {
+        // sequence space, `resync_receive_base` goes further after a silence.
+        if !self.v3_base_established {
+            return false;
+        }
+        if self.v3_resync {
+            return self.resync_receive_base(base);
+        }
+        if !seq_gt(base, self.v3_expected_sequence) {
             return false;
         }
         debug!(
@@ -1190,6 +1250,50 @@ impl UdpConnection {
         self.advance_dseq_window();
         self.arm_pending_ack();
         true
+    }
+
+    /// After a silence the peer may have moved more than half the 16-bit sequence space on:
+    /// through an outage it resends its window again and again under new numbers, Windows used
+    /// about 45000 in 25 s. Serial arithmetic then takes its numbers for old ones, and
+    /// acknowledging our old position names numbers it has not sent, for which Windows resets
+    /// the connection. So after a silence the peer's next AckOfAcks becomes the base, whichever
+    /// way it moves it.
+    fn resync_receive_base(&mut self, base: u16) -> bool {
+        self.v3_resync = false;
+        if base == self.v3_expected_sequence {
+            return false;
+        }
+        debug!(
+            "🔀 V3: heard from the peer again, its AckOfAcks {base} replaces {}",
+            self.v3_expected_sequence
+        );
+        self.v3_received_dseq.clear();
+        self.v3_expected_sequence = base;
+        self.v3_highest_received = base.wrapping_sub(1);
+        self.arm_pending_ack();
+        true
+    }
+
+    /// Records a datagram from the peer, marking a silence of `V3_RESYNC_SILENCE` before it.
+    fn note_received(&mut self) {
+        let now = Instant::now();
+        if self.v3_silent(now) {
+            self.v3_resync = true;
+        }
+        self.last_received = now;
+        self.last_activity = now;
+    }
+
+    fn v3_silent(&self, now: Instant) -> bool {
+        self.negotiated_version == UdpProtocolVersion::V3
+            && self.v3_base_established
+            && now.duration_since(self.last_received) >= V3_RESYNC_SILENCE
+    }
+
+    /// True while no ACK may go out: silent for `V3_RESYNC_SILENCE`, or heard from again but
+    /// still waiting for the AckOfAcks that sets the base.
+    fn v3_resyncing(&self) -> bool {
+        self.v3_resync || self.v3_silent(Instant::now())
     }
 
     /// Applies an ACK vector sent by the peer to our own outstanding packets.
@@ -1345,10 +1449,19 @@ impl UdpConnection {
             PendingPacket {
                 data,
                 last_sent: now,
+                retransmit_timeout: self.initial_retransmit_timeout(),
                 retransmit_count: 0,
                 v3_chunk: None,
             },
         );
+    }
+
+    /// Twice the round trip, at least the version's minimum ([MS-RDPEUDP] 3.1.6.1).
+    fn initial_retransmit_timeout(&self) -> Duration {
+        let floor = Duration::from_millis(u64::from(self.config.retransmit_timeout_ms));
+        self.smoothed_rtt
+            .map_or(floor, |rtt| (rtt * 2).max(floor))
+            .min(MAX_RETRANSMIT_TIMEOUT)
     }
 
     /// Handles the peer's `snSourceAck`, which reports the newest packet *of ours* it has
@@ -1831,6 +1944,90 @@ mod tests {
         conn.process_source_packet(&v3_data(100, Some(b"a"))).expect("100");
         conn.process_source_packet(&v3_ack_of_acks(100 + 5000)).expect("aoa");
         assert_eq!(conn.v3_expected_sequence, 100 + 5000);
+    }
+
+    /// After a silence the peer may come back more than half the sequence space ahead, Windows
+    /// used 45000 numbers in a 25 s outage. Its AckOfAcks has to become the base then: taking its
+    /// numbers for old ones, we would acknowledge one the peer never sent.
+    #[test]
+    fn ack_of_acks_resyncs_after_a_silence() {
+        let mut conn = connected_v3();
+        assert_eq!(
+            conn.process_source_packet(&v3_data(100, Some(b"a"))).expect("100"),
+            vec![b"a".to_vec()]
+        );
+        conn.create_ack().expect("ack");
+
+        // Two keepalive intervals without a datagram: no acknowledgement of the old position.
+        conn.last_received -= V3_RESYNC_SILENCE + Duration::from_millis(500);
+        conn.last_keepalive -= Duration::from_secs(10);
+        assert!(!conn.needs_keepalive());
+        assert!(conn.create_ack().is_err());
+
+        let ahead = 100u16.wrapping_add(45000);
+        let packet = crate::rdpudp_v2_packet!(
+            header = V2PacketHeader::new(rdpudp_v2_flags!(DATA | AOA), 15).unwrap(),
+            ack_of_acks = Some(crate::rdpudp_v2_ack_of_acks!(ahead)),
+            data_header = Some(DataHeaderPayload {
+                data_sequence_number: ahead,
+            }),
+            data_body = Some(DataBodyPayload {
+                channel_sequence_number: 2,
+                data: b"b".to_vec(),
+            })
+        )
+        .encode_on_wire(crate::v2::PacketPrefixByte::TYPE_STANDARD)
+        .expect("encode");
+        assert_eq!(
+            conn.process_source_packet(&packet).expect("after the silence"),
+            vec![b"b".to_vec()]
+        );
+        assert!(conn.has_pending_ack());
+        let ack = conn.create_ack().expect("ack");
+        let ack = V2Packet::decode_on_wire(&ack).expect("decode").ack.expect("cumulative ack");
+        assert_eq!(ack.sequence_number, ahead);
+    }
+
+    /// A tunnel fails after the peer timeout without a datagram, or with the stream stuck behind
+    /// a missing chunk for as long.
+    #[test]
+    fn tunnel_fails_after_the_peer_timeout() {
+        let mut conn = connected_v3();
+        assert_eq!(conn.failure(), None);
+        conn.last_received -= V3_PEER_TIMEOUT;
+        assert!(conn.failure().is_some(), "a silent peer is gone");
+
+        let mut conn = connected_v3();
+        conn.process_source_packet(&v3_data_with_channel(100, 2, Some(b"b")))
+            .expect("100");
+        conn.v3_channel_stalled_since = Some(Instant::now() - CHANNEL_STALL_FATAL);
+        assert!(conn.failure().is_some(), "chunk 1 never came");
+    }
+
+    /// The retransmit timeout doubles with every resend of a packet, up to 120 seconds. Held at
+    /// the minimum, a round trip longer than that has every acknowledgement name a data sequence
+    /// that was already resent under a new one.
+    #[test]
+    fn retransmit_timeout_backs_off_to_the_cap() {
+        let mut conn = connected_v3();
+        conn.smoothed_rtt = Some(Duration::from_millis(400));
+        conn.send_data(b"x".to_vec()).expect("send");
+        let timeout = |conn: &UdpConnection| {
+            conn.pending_packets
+                .values()
+                .next()
+                .expect("pending")
+                .retransmit_timeout
+        };
+        assert_eq!(timeout(&conn), Duration::from_millis(800), "twice the round trip");
+
+        for _ in 0..12 {
+            for pending in conn.pending_packets.values_mut() {
+                pending.last_sent -= pending.retransmit_timeout;
+            }
+            assert_eq!(conn.check_retransmits().len(), 1);
+        }
+        assert_eq!(timeout(&conn), MAX_RETRANSMIT_TIMEOUT);
     }
 
     #[test]
