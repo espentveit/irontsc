@@ -131,5 +131,7 @@ cargo test --workspace
 
 - `crates/` holds the vendored, patched IronRDP crates, the UDP transport
   (`irontsc-udp`) and the ported codecs.
-- `vendor/rdp-specs-md/` holds the Microsoft protocol documents used as
+- `vendor/rdp-specs-md/` (not in the repository; build it with
+  `vendor/get-specs.sh` and `vendor/render-specs.sh`) holds the Microsoft
+  protocol documents used as
   implementation references.

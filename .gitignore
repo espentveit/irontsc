@@ -25,3 +25,5 @@ samples/*.log
 # Intermediate spec downloads and unpacked DOCX; regenerate with vendor/get-specs.sh.
 /vendor/rdp-specs/
 /vendor/rdp-specs-source/
+# The rendered Markdown is Microsoft copyright and not ours to redistribute in full.
+/vendor/rdp-specs-md/

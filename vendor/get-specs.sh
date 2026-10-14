@@ -31,6 +31,9 @@ declare -A URLS=(
   ["MS-RDPEDC"]="https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-RDPEDC/%5BMS-RDPEDC%5D-170601.docx"
   ["MS-RDPEDYC"]="https://winprotocoldoc.z19.web.core.windows.net/MS-RDPEDYC/%5bMS-RDPEDYC%5d-210625.docx"
   ["MS-RDPECI"]="https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-RDPECI/%5bMS-RDPECI%5d-240423.docx"
+  ["MS-RDPEAI"]="https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-RDPEAI/%5BMS-RDPEAI%5D-240423.docx"
+  ["MS-RDPECAM"]="https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-RDPECAM/%5BMS-RDPECAM%5D-240423.docx"
+  ["MS-RDPEMT"]="https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-RDPEMT/%5BMS-RDPEMT%5D-240423.docx"
 )
 
 # Helper: sanitize a filename by removing [] and percent escapes
